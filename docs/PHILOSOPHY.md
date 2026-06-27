@@ -2,23 +2,25 @@
 
 > **"warm terminal intelligence"**
 
-## The primal pattern: delegation over execution
+## The orchestration pattern: delegation with role integrity
 
-piNen begins from a simple observation about how intelligent systems fail:
-they try to do everything themselves. A single agent context is bounded —
-by tokens, by attention, by the fragility of long chains of reasoning.
-When an agent attempts to hold a complete implementation, verification,
-and persistence plan in one session, it collapses under the weight of
-its own context.
+piNen begins from a simple observation about complex agent work: a single
+agent context is bounded — by tokens, by attention, by the fragility of long
+chains of reasoning. Planning, implementation, verification, persistence,
+scheduling, and lifecycle management become more reliable when they are treated
+as coordinated roles instead of one undifferentiated stream of action.
 
-The piNen response is radical in its simplicity: **the visible agent
-never executes the main task.** It intakes, routes, delegates, and
-verifies — but it never becomes the doer. The orchestrator is a
-conductor, not a musician. This is not a convenience; it is a
-**role-enforced contract** verified by every orchestration run.
+The piNen response is an agent harness that can be explicitly switched into a
+serious orchestration mode. In that mode, the visible agent becomes the
+**ORCHESTRATOR**: it intakes, routes, delegates, verifies, persists, schedules,
+reloads, and carries work across sessions. The orchestrator is a conductor:
+it coordinates specialist subagents and judges evidence rather than silently
+collapsing into the executor role.
 
-We call this **Orchestrator Role Integrity**, and it is the first
-principle of piNen intelligence.
+We call this **Orchestrator Role Integrity**. It is the contract that makes
+piNen useful for complex and bespoke orchestration: when a run claims to be an
+orchestration run, its artifacts, ledgers, and verifier checks must show that
+work moved through the requested shape.
 
 ## Memory that remembers what matters
 
@@ -129,10 +131,10 @@ about work.**
 
 PiNen's safety model is not bolted on — it is structural:
 
-- **Role integrity** prevents the orchestrator from collapsing into
-  the executor role, even when subagents fail. The verifier is a
-  falsifier: it must FAIL if evidence shows the orchestrator did
-  the work directly.
+- **Role integrity** keeps orchestration runs honest by checking that the
+  visible orchestrator stayed in the coordination role and routed main-task
+  work through the requested shape. The verifier is a falsifier: it must FAIL
+  if evidence shows the orchestrator did the delegated work directly.
 
 - **Effect-based judgment** distinguishes between what an agent says
   and what it actually did. Text-shape heuristics (truncation signals,
@@ -170,11 +172,12 @@ that connects because isolation is not intelligence.
 
 ## Ten principles
 
-1. **The visible agent is the orchestrator.** Never the doer. Role
+1. **When invoked for orchestration, the visible agent is the orchestrator.**
+   It coordinates roles, artifacts, evidence, and continuity while role
    integrity is enforced by the verifier, not just policy.
 
-2. **Delegate everything.** Every task flows through intake → plan →
-   delegate → verify → persist.
+2. **Use the orchestration loop for serious delegated work.** Intake → plan →
+   delegate → verify → persist gives complex tasks a traceable structure.
 
 3. **Remember across time.** Session memory is ephemeral; Engram and
    the Graphify Brain are not.

@@ -3,10 +3,11 @@
 > **"warm terminal intelligence"**
 
 piNen is an **orchestration-first** agent harness built on the Pi coding agent.
-It treats orchestration not as a feature but as the **fundamental operating
-paradigm** — the agent's primary way of reasoning about work is through
-delegation, lifecycle-gated execution, and persistent memory spanning sessions
-and projects.
+It gives users a direct terminal coding harness that can be explicitly switched
+into a disciplined orchestration harness. In orchestration mode, the visible
+agent operates as the **ORCHESTRATOR**: intake, planning, delegation,
+verification, persistence, scheduling, runtime reloads, and session continuity
+are treated as native parts of the process.
 
 ```
   ╔═══════════════════════════════════════════════════════╗
@@ -22,15 +23,31 @@ and projects.
 
 ## Philosophy
 
-### Orchestration as the primal operating mode
+### Orchestration as a first-class operating mode
 
-piNen is built on a simple conviction: **an agent should not execute work
-directly when it can delegate.** Every task, from a one-line file edit to a
-multi-phase project, flows through the same pattern — intake, plan, delegate,
-verify, persist. The visible agent is always the **ORCHESTRATOR**, not the
-doer. This role integrity is not optional; it is enforced by policy, by the
-substrate, and by the verifier, which will FAIL any run where the orchestrator
-collapsed into the executor role.
+piNen is built for users who want an agent harness that can become a serious
+orchestration system on demand. When invoked for orchestration, the visible
+agent assumes the role of **ORCHESTRATOR**: it performs intake, shapes the plan,
+delegates work to specialist subagents, verifies evidence, persists state, and
+manages the continuity of the run.
+
+This gives piNen a different center of gravity from typical direct-execution
+agents. It is designed for complex and bespoke workflows: planner/executor/
+verifier loops, research sidecars, repair passes, model-specific delegation,
+role-integrity ledgers, long-running task coordination, and evidence-based
+verification.
+
+piNen can also create new orchestration shapes on demand. If a job requires a
+bespoke workflow, piNen can use shape-building and paradigm-creation
+capabilities to define the right orchestration pattern for that task rather
+than forcing every job through a fixed template. Users can ask for a new shape,
+refine it, and then run work through it.
+
+piNen's orchestration model extends beyond a single response window. It can
+schedule future wake-ups, hand work across sessions, reload its runtime, start
+fresh sessions with continuation context, and bring itself back online as part
+of the workflow. New sessions, reloads, deferred checks, and persistent
+artifacts become part of the orchestration surface.
 
 ### Memory that persists across time
 
@@ -347,7 +364,7 @@ piNen
 
 | Concept | Description |
 |---------|-------------|
-| **Orchestrator** | The visible agent — always delegates, never executes main work |
+| **Orchestrator** | In orchestration mode, the visible agent that coordinates intake, delegation, verification, persistence, and continuity |
 | **Subagent** | Isolated agent process spawned for a focused task |
 | **Shape** | A reusable orchestration paradigm (a named orchestration pattern) |
 | **Substrate** | The safety layer that bounds every shape's spawns and iterations |
@@ -368,8 +385,9 @@ piNen
 - **Private-first publishing.** The `safe-github-publish` shape creates repos
   as private.
 - **gitleaks scanning.** Pre-commit and pre-push secret detection built in.
-- **Role integrity enforcement.** The verifier FAILs if the orchestrator
-  executed main-task work directly.
+- **Role integrity enforcement.** In orchestration runs, the verifier FAILs if
+  the orchestrator executed main-task work directly instead of routing it
+  through the requested shape.
 
 ---
 
