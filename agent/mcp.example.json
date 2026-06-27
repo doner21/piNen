@@ -1,0 +1,32 @@
+{
+  "_comment": "MCP Server Configuration — Copy to mcp.json and add your API keys",
+  "mcpServers": {
+    "engram": {
+      "command": "node",
+      "args": [
+        "-e",
+        "const { spawn } = require('node:child_process'); const { homedir, platform } = require('node:os'); const { join } = require('node:path'); const bin = process.env.ENGRAM_BIN || (platform() === 'win32' ? join(homedir(), '.pi', 'agent', 'bin', 'engram.exe') : join(homedir(), '.pi', 'agent', 'bin', 'engram')); const child = spawn(bin, ['mcp', '--tools=agent'], { stdio: 'inherit', windowsHide: true }); child.on('error', () => process.exit(127)); child.on('exit', (code, signal) => { if (typeof code === 'number') process.exit(code); process.kill(process.pid, signal || 'SIGTERM'); });"
+      ],
+      "lifecycle": "lazy",
+      "directTools": false
+    },
+    "tavily": {
+      "command": "npx",
+      "args": ["tavily-mcp"],
+      "env": {
+        "TAVILY_API_KEY": "<YOUR_TAVILY_API_KEY>"
+      },
+      "lifecycle": "lazy",
+      "directTools": false
+    },
+    "spotify": {
+      "command": "node",
+      "args": [],
+      "env": {
+        "SPOTIFY_BUILD_PATH": "<path-to-spotify-mcp-build>"
+      },
+      "lifecycle": "lazy",
+      "directTools": false
+    }
+  }
+}

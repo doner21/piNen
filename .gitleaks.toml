@@ -1,0 +1,23 @@
+# Gitleaks configuration for piNen
+# Sensitive: checks for secrets in committed code.
+# Templates (.example.json, README, docs) are allowed to contain placeholder keys.
+
+title = "piNen gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+  description = "Allowed matches — templates, docs, and example configs"
+  paths = [
+    "agent/auth.example.json",
+    "agent/mcp.example.json",
+    "agent/gmail-config.example.json",
+    "agent/spotify-mcp/spotify-config.example.json",
+    "agent/telegram-pi/config.example.json",
+    "agent/core-patch/patch-manifest.example.json",
+    "agent/README.md",
+    "README.md",
+    "pi-orchestrator-extension/README.md",
+    "pi-orchestrator-extension/PARADIGMS.md",
+  ]

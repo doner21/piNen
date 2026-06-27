@@ -1,0 +1,17 @@
+{
+  "_comment": "Template: AI Provider API Keys — Copy to agent/auth.json",
+  "providers": {
+    "openai-codex": {
+      "apiKey": "<YOUR_OPENAI_API_KEY>",
+      "baseURL": "https://api.openai.com/v1"
+    },
+    "deepseek": {
+      "apiKey": "<YOUR_DEEPSEEK_API_KEY>",
+      "baseURL": "https://api.deepseek.com/v1"
+    },
+    "anthropic": {
+      "apiKey": "<YOUR_ANTHROPIC_API_KEY>",
+      "baseURL": "https://api.anthropic.com"
+    }
+  }
+}

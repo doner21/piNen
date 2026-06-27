@@ -1,0 +1,65 @@
+# piNen agent directory gitignore
+# Runtime and private state that must never be committed
+
+# Auth / secrets
+auth.json
+mcp.json
+gmail-config.json
+
+# Session / state
+sessions/
+handoffs/
+scheduler.json
+verbosity-state.json
+mcp-cache.json
+trust.json
+.nenflow_context_health.json
+
+# NenFlow runs
+nenflow-v3/runs/
+
+# Orchestration runs
+orchestration/runs/
+
+# Graphify brain (personal project memory)
+graphify-brain/
+graphify-out/
+
+# Binaries
+bin/
+
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Core patch state
+core-patch/patch-manifest.json
+core-patch/backups/
+
+# Diagnostics / temporary
+diagnostics/
+*-diagnostics*.json
+*-diagnostics*.tmp-*
+engram-health-trace.jsonl
+tmp_search*.json
+crash-wall.md
+*handoff*.md
+*intake*.md
+*report*.md
+new-mock-process-last-run.json
+
+# Telegram runtime
+telegram-pi/secret.token
+telegram-pi/state.json
+telegram-pi/heartbeat.json
+telegram-pi/daemon-state.json
+telegram-pi/logs/
+telegram-pi/config.json
+
+# Graphify autonomy state
+graphify-autonomy/
+
+# Disabled extensions
+extensions/*.disabled
+extensions/.nenflow_context_health.json
+extensions/nul

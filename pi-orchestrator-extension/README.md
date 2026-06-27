@@ -109,6 +109,42 @@ provider/model.`) and the deterministic routing check are unchanged and remain
 byte-compatible in the report. Pre-flight pings do not count against
 `maxSubagents` and never emit attestation-shaped lines.
 
+## GitHub Publishing (safe-github-publish)
+
+The `safe-github-publish` paradigm is the **default recommended method** for
+publishing repositories to GitHub from piNen. It implements a 3-phase safe
+publishing pipeline:
+
+1. **Plan/Contract (Planner):** Produces a sanitization plan with allowlists
+   and deny lists. Never copies source `.git/` history.
+
+2. **Execute (Executor):** Builds a clean staging tree, runs local safety
+   checks (gitleaks, path scans, secret scans), initializes a fresh git
+   repository, creates a **private-first** GitHub repo, and pushes.
+
+3. **Verify (Verifier):** Independently clones the remote, runs all safety
+   gates, and produces a PASS/FAIL verdict with evidence.
+
+**Role integrity:** The visible/current orchestrator never executes staging,
+sanitization, commit, repo creation, or push. These are always delegated to
+the executor and verifier subagents.
+
+Usage:
+
+```
+/orchestrate --paradigm safe-github-publish "Publish my project as my-repo"
+```
+
+Safety features:
+- Private-first repository creation
+- gitleaks secret scanning before push
+- Path denylist enforcement (no auth files, sessions, runtime state)
+- Personal path/email scrubbing
+- Independent remote verification after push
+
+See `PARADIGMS.md` for the full shape specification and `src/shapes/safe-github-publish.ts`
+for the implementation.
+
 ## Per-run model routing and natural-language controls
 
 The `orchestrate` tool accepts optional `plannerModel`/`plannerProvider`, `executorModel`/`executorProvider`, and `verifierModel`/`verifierProvider` parameters so the calling model can decide which provider/model to use for each role. On the command line, use `--planner-model`, `--planner-provider`, etc. When these are omitted, the subagent inherits its configured model from the agent profile in `~/.pi/agent/agents/` (if set), otherwise from the parent session model.

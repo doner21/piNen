@@ -1,0 +1,29 @@
+{
+  "_comment": "AI Provider API Keys — Copy to auth.json and add your keys",
+  "providers": {
+    "openai-codex": {
+      "apiKey": "<YOUR_OPENAI_API_KEY>",
+      "baseURL": "https://api.openai.com/v1"
+    },
+    "deepseek": {
+      "apiKey": "<YOUR_DEEPSEEK_API_KEY>",
+      "baseURL": "https://api.deepseek.com/v1"
+    },
+    "anthropic": {
+      "apiKey": "<YOUR_ANTHROPIC_API_KEY>",
+      "baseURL": "https://api.anthropic.com"
+    },
+    "google": {
+      "apiKey": "<YOUR_GEMINI_API_KEY>",
+      "baseURL": "https://generativelanguage.googleapis.com"
+    },
+    "openrouter": {
+      "apiKey": "<YOUR_OPENROUTER_API_KEY>",
+      "baseURL": "https://openrouter.ai/api/v1"
+    },
+    "groq": {
+      "apiKey": "<YOUR_GROQ_API_KEY>",
+      "baseURL": "https://api.groq.com/openai/v1"
+    }
+  }
+}

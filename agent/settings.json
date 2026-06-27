@@ -1,0 +1,11 @@
+{
+  "defaultModel": "gpt-5.5",
+  "defaultProvider": "openai-codex",
+  "defaultThinkingLevel": "high",
+  "hideThinkingBlock": false,
+  "packages": [
+    "npm:pi-mcp-adapter",
+    "npm:gentle-engram@0.1.8"
+  ],
+  "theme": "dark"
+}

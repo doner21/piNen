@@ -1,0 +1,18 @@
+{
+  "_comment": "Template: MCP Server Configuration — Copy to agent/mcp.json",
+  "mcpServers": {
+    "engram": {
+      "command": "node",
+      "args": ["-e", "..."],
+      "lifecycle": "lazy"
+    },
+    "tavily": {
+      "command": "npx",
+      "args": ["tavily-mcp"],
+      "env": {
+        "TAVILY_API_KEY": "<YOUR_TAVILY_API_KEY>"
+      },
+      "lifecycle": "lazy"
+    }
+  }
+}

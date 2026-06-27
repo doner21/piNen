@@ -1,0 +1,5 @@
+{
+  "_comment": "Core patch manifest — records applied patches and backup locations",
+  "appliedTo": [],
+  "backups": []
+}

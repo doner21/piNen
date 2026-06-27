@@ -1,0 +1,105 @@
+# piNen root gitignore
+# Blocks secrets, runtime state, personal project memory, and build artifacts
+
+# Git
+.git/
+
+# Auth / secrets
+agent/auth.json
+agent/mcp.json
+agent/gmail-config.json
+*.env
+*.env.*
+*secret*
+*token*
+*credential*
+*credentials*
+*oauth*
+*key*.json
+!*.example.json
+!*.template.json
+
+# Runtime / state
+agent/sessions/
+agent/handoffs/
+agent/scheduler.json
+agent/verbosity-state.json
+agent/mcp-cache.json
+agent/trust.json
+agent/nul
+
+# NenFlow runs
+agent/nenflow-v3/runs/
+agent/nenflow-v3/runs/**/*
+
+# Orchestration runs
+agent/orchestration/runs/
+agent/orchestration/runs/**/*
+
+# Diagnostics / traces
+agent/diagnostics/
+agent/*diagnostics*.json
+agent/*diagnostics*.tmp-*
+agent/engram-health-trace.jsonl
+agent/tmp_search*.json
+agent/crash-wall.md
+agent/*handoff*.md
+agent/*intake*.md
+agent/*report*.md
+agent/continuation-task-*.md
+agent/task-*-report.md
+agent/new-mock-process-last-run.json
+agent/graphify-test-bundle.js
+
+# Graphify Brain (personal project memory)
+graphify-brain/
+graphify-out/
+.graphify_python
+.graphify_*.json
+
+# Core patch state
+agent/core-patch/patch-manifest.json
+agent/core-patch/backups/
+
+# Telegram runtime
+agent/telegram-pi/secret.token
+agent/telegram-pi/state.json
+agent/telegram-pi/heartbeat.json
+agent/telegram-pi/daemon-state.json
+agent/telegram-pi/logs/
+agent/telegram-pi/config.json
+
+# Graphify autonomy
+agent/graphify-autonomy/
+
+# MCP runtime
+**.playwright-mcp/**
+
+# Binaries
+*.exe
+*.dll
+*.pyd
+*.so
+*.dylib
+*.zip
+*.tar
+*.tar.gz
+*.7z
+*.db
+*.sqlite
+*.sqlite3
+
+# Media (except intentional skill resources)
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.webp
+*.mp4
+*.wav
+*.mp3
+*.pdf
+
+# Dependencies
+node_modules/
+*/node_modules/

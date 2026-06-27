@@ -1,0 +1,9 @@
+{
+  "_comment": "Template: Telegram Pi Bridge — Copy to agent/telegram-pi/config.json",
+  "telegramBotToken": "<YOUR_TELEGRAM_BOT_TOKEN>",
+  "authorizedChatIds": [
+    "<YOUR_CHAT_ID>"
+  ],
+  "pollIntervalMs": 3000,
+  "logDir": "<path-to-logs>"
+}

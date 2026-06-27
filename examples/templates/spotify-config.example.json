@@ -1,0 +1,14 @@
+{
+  "_comment": "Template: Spotify MCP Configuration — Copy to agent/spotify-mcp/spotify-config.json",
+  "spotifyClientId": "<YOUR_SPOTIFY_CLIENT_ID>",
+  "spotifyClientSecret": "<YOUR_SPOTIFY_CLIENT_SECRET>",
+  "spotifyRedirectUri": "http://localhost:8888/callback",
+  "spotifyScopes": [
+    "user-read-playback-state",
+    "user-modify-playback-state",
+    "user-read-currently-playing",
+    "playlist-read-private",
+    "playlist-modify-public",
+    "playlist-modify-private"
+  ]
+}
