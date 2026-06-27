@@ -1,0 +1,91 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "OrchestrationState",
+  "description": "Runtime state for the NenFlow v3 orchestration status panel, managed by the orchestration-panel extension.",
+  "type": "object",
+  "required": ["run_id", "phase", "updated_at", "totalSubagents", "completedSubagents", "workingSubagents", "subagents"],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "description": "The NenFlow run ID"
+    },
+    "phase": {
+      "type": "string",
+      "description": "Current orchestration phase: INTAKE, RESEARCH, PLAN, EXECUTE, VERIFY, ERROR, COMPLETE"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO-8601 timestamp of last state update"
+    },
+    "completed": {
+      "type": "boolean",
+      "description": "When true, the run is finished and the panel should hide"
+    },
+    "totalSubagents": {
+      "type": "integer",
+      "description": "Total number of subagents configured for this run"
+    },
+    "completedSubagents": {
+      "type": "integer",
+      "description": "Count of subagents in completed or failed status"
+    },
+    "workingSubagents": {
+      "type": "integer",
+      "description": "Count of subagents currently in running status"
+    },
+    "contextPercent": {
+      "type": ["number", "null"],
+      "description": "Best-effort context window percentage of the currently-running subagent, or null if unknown"
+    },
+    "subagents": {
+      "type": "array",
+      "description": "Per-subagent runtime status entries",
+      "items": {
+        "type": "object",
+        "required": ["agentName", "role", "status"],
+        "properties": {
+          "agentName": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "task": {
+            "type": "string",
+            "description": "The delegated task text"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["pending", "running", "completed", "failed"]
+          },
+          "model": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "startTime": {
+            "type": ["string", "null"],
+            "format": "date-time"
+          },
+          "endTime": {
+            "type": ["string", "null"],
+            "format": "date-time"
+          },
+          "exitCode": {
+            "type": ["integer", "null"]
+          },
+          "contextTokens": {
+            "type": ["number", "null"],
+            "description": "Approximate context tokens consumed by this subagent"
+          },
+          "errorMessage": {
+            "type": "string",
+            "description": "Error message if the subagent failed"
+          }
+        }
+      }
+    }
+  }
+}

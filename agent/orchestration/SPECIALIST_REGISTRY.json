@@ -1,0 +1,609 @@
+{
+  "schema_version": 1,
+  "purpose": "Specialist sidecar registry for richer Pi/NenFlow/orchestrate-run workflows. PEV remains the primary spine; these agents are optional specialists selected by phase, risk, and task type.",
+  "primary_spine": [
+    "pev-researcher",
+    "pev-planner",
+    "pev-executor",
+    "pev-verifier"
+  ],
+  "selection_rules": [
+    "Use at most 1-3 sidecars for small tasks; avoid agent sprawl.",
+    "Sidecars do not replace canonical PEV artifacts unless the user explicitly chooses a non-PEV flow.",
+    "Only agents with agencyLevel=implementation may edit source/config/docs files.",
+    "Verifier sidecars advise; pev-verifier owns the final NenFlow PASS/FAIL verdict.",
+    "Observer/witness agents record evidence, drift, and artifact health; they do not judge correctness.",
+    "If a sidecar writes an artifact in a NenFlow run, use ATT_SIDE_<PHASE>_<AGENT>.md."
+  ],
+  "agents": [
+    {
+      "name": "orch-intake-clarifier",
+      "description": "Intake clarifier — extracts goals, constraints, unknowns, assumptions, and acceptance criteria",
+      "phase": "intake",
+      "agencyLevel": "advisory",
+      "tools": [
+        "read",
+        "bash",
+        "grep",
+        "find",
+        "ls"
+      ],
+      "skills": [],
+      "when_to_route": "Use when the task needs clearer scope, requirements, non-goals, or constraints before planning.",
+      "artifact_convention": "ATT_SIDE_INTAKE_ORCH_INTAKE_CLARIFIER.md"
+    },
+    {
+      "name": "orch-requirements-scribe",
+      "description": "Requirements scribe — converts intake into implementation-ready requirements",
+      "phase": "intake",
+      "agencyLevel": "artifact-writer",
+      "tools": [
+        "read",
+        "bash",
+        "write"
+      ],
+      "skills": [],
+      "when_to_route": "Use when the task needs clearer scope, requirements, non-goals, or constraints before planning.",
+      "artifact_convention": "ATT_SIDE_INTAKE_ORCH_REQUIREMENTS_SCRIBE.md"
+    },
+    {
+      "name": "orch-scope-guardian",
+      "description": "Scope guardian — detects scope creep and protects non-goals",
+      "phase": "intake",
+      "agencyLevel": "advisory",
+      "tools": [
+        "read",
+        "bash",
+        "grep",
+        "find",
+        "ls"
+      ],
+      "skills": [],
+      "when_to_route": "Use when the task needs clearer scope, requirements, non-goals, or constraints before planning.",
+      "artifact_convention": "ATT_SIDE_INTAKE_ORCH_SCOPE_GUARDIAN.md"
+    },
+    {
+      "name": "orch-codebase-scout",
+      "description": "Codebase scout — maps relevant files, architecture boundaries, conventions, tests, and risks",
+      "phase": "research",
+      "agencyLevel": "read-only",
+      "tools": [
+        "read",
+        "bash",
+        "grep",
+        "find",
+        "ls"
+      ],
+      "skills": [],
+      "when_to_route": "Use when facts, codebase context, prior art, dependencies, or risk discovery are needed before planning.",
+      "artifact_convention": "ATT_SIDE_RESEARCH_ORCH_CODEBASE_SCOUT.md"
+    },
+    {
+      "name": "orch-dependency-researcher",
+      "description": "Dependency researcher — investigates packages, framework APIs, versions, and compatibility",
+      "phase": "research",
+      "agencyLevel": "read-only",
+      "tools": [
+        "read",
+        "bash",
+        "grep",
+        "find",
+        "ls"
+      ],
+      "skills": [
+        "internet-research"
+      ],
+      "when_to_route": "Use when facts, codebase context, prior art, dependencies, or risk discovery are needed before planning.",
+      "artifact_convention": "ATT_SIDE_RESEARCH_ORCH_DEPENDENCY_RESEARCHER.md"
+    },
+    {
+      "name": "orch-internet-researcher",
+      "description": "Internet researcher — gathers current external docs and references",
+      "phase": "research",
+      "agencyLevel": "read-only",
+      "tools": [
+        "read",
+        "bash",
+        "grep",
+        "find",
+        "ls"
+      ],
+      "skills": [
+        "internet-research"
+      ],
+      "when_to_route": "Use when facts, codebase context, prior art, dependencies, or risk discovery are needed before planning.",
+      "artifact_convention": "ATT_SIDE_RESEARCH_ORCH_INTERNET_RESEARCHER.md"
+    },
+    {
+      "name": "orch-prior-art-researcher",
+      "description": "Prior-art researcher — searches prior project memory, old runs, and existing docs",
+      "phase": "research",
+      "agencyLevel": "read-only",
+      "tools": [
+        "read",
+        "bash",
+        "grep",
+        "find",
+        "ls"
+      ],
+      "skills": [],
+      "when_to_route": "Use when facts, codebase context, prior art, dependencies, or risk discovery are needed before planning.",
+      "artifact_convention": "ATT_SIDE_RESEARCH_ORCH_PRIOR_ART_RESEARCHER.md"
+    },
+    {
+      "name": "orch-risk-researcher",
+      "description": "Risk researcher — identifies security, migration, compatibility, deployment, and operational risks",
+      "phase": "research",
+      "agencyLevel": "advisory",
+      "tools": [
+        "read",
+        "bash",
+        "grep",
+        "find",
+        "ls"
+      ],
+      "skills": [],
+      "when_to_route": "Use when facts, codebase context, prior art, dependencies, or risk discovery are needed before planning.",
+      "artifact_convention": "ATT_SIDE_RESEARCH_ORCH_RISK_RESEARCHER.md"
+    },
+    {
+      "name": "orch-graphify-reader",
+      "description": "Graphify reader — consults graphify reports/wiki for architecture context",
+      "phase": "research",
+      "agencyLevel": "read-only",
+      "tools": [
+        "read",
+        "bash",
+        "grep",
+        "find",
+        "ls"
+      ],
+      "skills": [],
+      "when_to_route": "Use when facts, codebase context, prior art, dependencies, or risk discovery are needed before planning.",
+      "artifact_convention": "ATT_SIDE_RESEARCH_ORCH_GRAPHIFY_READER.md"
+    },
+    {
+      "name": "orch-memory-searcher",
+      "description": "Memory searcher — searches durable project memory and summarizes relevant prior decisions",
+      "phase": "research",
+      "agencyLevel": "read-only",
+      "tools": [
+        "read",
+        "bash",
+        "grep",
+        "find",
+        "ls"
+      ],
+      "skills": [],
+      "when_to_route": "Use when facts, codebase context, prior art, dependencies, or risk discovery are needed before planning.",
+      "artifact_convention": "ATT_SIDE_RESEARCH_ORCH_MEMORY_SEARCHER.md"
+    },
+    {
+      "name": "orch-implementation-planner",
+      "description": "Implementation planner — produces concrete ordered implementation plans",
+      "phase": "plan",
+      "agencyLevel": "advisory",
+      "tools": [
+        "read",
+        "bash",
+        "grep",
+        "find",
+        "ls"
+      ],
+      "skills": [],
+      "when_to_route": "Use when the planner needs a specialized design, migration, test, rollback, or decomposition view.",
+      "artifact_convention": "ATT_SIDE_PLAN_ORCH_IMPLEMENTATION_PLANNER.md"
+    },
+    {
+      "name": "orch-architecture-planner",
+      "description": "Architecture planner — designs boundaries, modules, interfaces, and tradeoffs",
+      "phase": "plan",
+      "agencyLevel": "advisory",
+      "tools": [
+        "read",
+        "bash",
+        "grep",
+        "find",
+        "ls"
+      ],
+      "skills": [],
+      "when_to_route": "Use when the planner needs a specialized design, migration, test, rollback, or decomposition view.",
+      "artifact_convention": "ATT_SIDE_PLAN_ORCH_ARCHITECTURE_PLANNER.md"
+    },
+    {
+      "name": "orch-migration-planner",
+      "description": "Migration planner — plans database, schema, config, and data migrations",
+      "phase": "plan",
+      "agencyLevel": "advisory",
+      "tools": [
+        "read",
+        "bash",
+        "grep",
+        "find",
+        "ls"
+      ],
+      "skills": [
+        "supabase-postgres-best-practices"
+      ],
+      "when_to_route": "Use when the planner needs a specialized design, migration, test, rollback, or decomposition view.",
+      "artifact_convention": "ATT_SIDE_PLAN_ORCH_MIGRATION_PLANNER.md"
+    },
+    {
+      "name": "orch-test-planner",
+      "description": "Test planner — designs test strategy before implementation",
+      "phase": "plan",
+      "agencyLevel": "advisory",
+      "tools": [
+        "read",
+        "bash",
+        "grep",
+        "find",
+        "ls"
+      ],
+      "skills": [],
+      "when_to_route": "Use when the planner needs a specialized design, migration, test, rollback, or decomposition view.",
+      "artifact_convention": "ATT_SIDE_PLAN_ORCH_TEST_PLANNER.md"
+    },
+    {
+      "name": "orch-rollback-planner",
+      "description": "Rollback planner — defines safe recovery and rollback paths",
+      "phase": "plan",
+      "agencyLevel": "advisory",
+      "tools": [
+        "read",
+        "bash",
+        "grep",
+        "find",
+        "ls"
+      ],
+      "skills": [],
+      "when_to_route": "Use when the planner needs a specialized design, migration, test, rollback, or decomposition view.",
+      "artifact_convention": "ATT_SIDE_PLAN_ORCH_ROLLBACK_PLANNER.md"
+    },
+    {
+      "name": "orch-task-splitter",
+      "description": "Task splitter — decomposes large work into independent executable chunks",
+      "phase": "plan",
+      "agencyLevel": "advisory",
+      "tools": [
+        "read",
+        "bash",
+        "grep",
+        "find",
+        "ls"
+      ],
+      "skills": [],
+      "when_to_route": "Use when the planner needs a specialized design, migration, test, rollback, or decomposition view.",
+      "artifact_convention": "ATT_SIDE_PLAN_ORCH_TASK_SPLITTER.md"
+    },
+    {
+      "name": "orch-feature-implementer",
+      "description": "Feature implementer — implements scoped product/code functionality",
+      "phase": "execute",
+      "agencyLevel": "implementation",
+      "tools": [
+        "read",
+        "bash",
+        "edit",
+        "write"
+      ],
+      "skills": [],
+      "when_to_route": "Use when a specific implementation specialty should own a bounded file-change task.",
+      "artifact_convention": "ATT_SIDE_EXECUTE_ORCH_FEATURE_IMPLEMENTER.md"
+    },
+    {
+      "name": "orch-bugfixer",
+      "description": "Bugfixer — diagnoses and fixes focused defects with minimal changes",
+      "phase": "execute",
+      "agencyLevel": "implementation",
+      "tools": [
+        "read",
+        "bash",
+        "edit",
+        "write"
+      ],
+      "skills": [],
+      "when_to_route": "Use when a specific implementation specialty should own a bounded file-change task.",
+      "artifact_convention": "ATT_SIDE_EXECUTE_ORCH_BUGFIXER.md"
+    },
+    {
+      "name": "orch-refactorer",
+      "description": "Refactorer — improves structure while preserving behavior",
+      "phase": "execute",
+      "agencyLevel": "implementation",
+      "tools": [
+        "read",
+        "bash",
+        "edit",
+        "write"
+      ],
+      "skills": [],
+      "when_to_route": "Use when a specific implementation specialty should own a bounded file-change task.",
+      "artifact_convention": "ATT_SIDE_EXECUTE_ORCH_REFACTORER.md"
+    },
+    {
+      "name": "orch-test-writer",
+      "description": "Test writer — adds or updates tests only",
+      "phase": "execute",
+      "agencyLevel": "implementation",
+      "tools": [
+        "read",
+        "bash",
+        "edit",
+        "write"
+      ],
+      "skills": [],
+      "when_to_route": "Use when a specific implementation specialty should own a bounded file-change task.",
+      "artifact_convention": "ATT_SIDE_EXECUTE_ORCH_TEST_WRITER.md"
+    },
+    {
+      "name": "orch-integration-coder",
+      "description": "Integration coder — wires APIs, services, auth, SDKs, and cross-system boundaries",
+      "phase": "execute",
+      "agencyLevel": "implementation",
+      "tools": [
+        "read",
+        "bash",
+        "edit",
+        "write"
+      ],
+      "skills": [
+        "supabase"
+      ],
+      "when_to_route": "Use when a specific implementation specialty should own a bounded file-change task.",
+      "artifact_convention": "ATT_SIDE_EXECUTE_ORCH_INTEGRATION_CODER.md"
+    },
+    {
+      "name": "orch-config-operator",
+      "description": "Config operator — edits environment, build, CI, deployment, and tooling config",
+      "phase": "execute",
+      "agencyLevel": "implementation",
+      "tools": [
+        "read",
+        "bash",
+        "edit",
+        "write"
+      ],
+      "skills": [],
+      "when_to_route": "Use when a specific implementation specialty should own a bounded file-change task.",
+      "artifact_convention": "ATT_SIDE_EXECUTE_ORCH_CONFIG_OPERATOR.md"
+    },
+    {
+      "name": "orch-docs-writer",
+      "description": "Docs writer — writes documentation, READMEs, changelogs, and comments",
+      "phase": "execute",
+      "agencyLevel": "implementation",
+      "tools": [
+        "read",
+        "bash",
+        "edit",
+        "write"
+      ],
+      "skills": [
+        "changelog-generator"
+      ],
+      "when_to_route": "Use when a specific implementation specialty should own a bounded file-change task.",
+      "artifact_convention": "ATT_SIDE_EXECUTE_ORCH_DOCS_WRITER.md"
+    },
+    {
+      "name": "orch-acceptance-verifier",
+      "description": "Acceptance verifier — checks implementation against success criteria",
+      "phase": "verify",
+      "agencyLevel": "advisory",
+      "tools": [
+        "read",
+        "bash",
+        "grep",
+        "find",
+        "ls"
+      ],
+      "skills": [],
+      "when_to_route": "Use when final verification needs a specialized independent lens.",
+      "artifact_convention": "ATT_SIDE_VERIFY_ORCH_ACCEPTANCE_VERIFIER.md"
+    },
+    {
+      "name": "orch-regression-verifier",
+      "description": "Regression verifier — hunts for behavior breakage and edge-case regressions",
+      "phase": "verify",
+      "agencyLevel": "advisory",
+      "tools": [
+        "read",
+        "bash",
+        "grep",
+        "find",
+        "ls"
+      ],
+      "skills": [],
+      "when_to_route": "Use when final verification needs a specialized independent lens.",
+      "artifact_convention": "ATT_SIDE_VERIFY_ORCH_REGRESSION_VERIFIER.md"
+    },
+    {
+      "name": "orch-security-verifier",
+      "description": "Security verifier — reviews auth, secrets, injection, permissions, and data exposure risks",
+      "phase": "verify",
+      "agencyLevel": "advisory",
+      "tools": [
+        "read",
+        "bash",
+        "grep",
+        "find",
+        "ls"
+      ],
+      "skills": [
+        "supabase"
+      ],
+      "when_to_route": "Use when final verification needs a specialized independent lens.",
+      "artifact_convention": "ATT_SIDE_VERIFY_ORCH_SECURITY_VERIFIER.md"
+    },
+    {
+      "name": "orch-performance-verifier",
+      "description": "Performance verifier — checks slow paths, expensive queries, resource use, and bundle impact",
+      "phase": "verify",
+      "agencyLevel": "advisory",
+      "tools": [
+        "read",
+        "bash",
+        "grep",
+        "find",
+        "ls"
+      ],
+      "skills": [
+        "supabase-postgres-best-practices"
+      ],
+      "when_to_route": "Use when final verification needs a specialized independent lens.",
+      "artifact_convention": "ATT_SIDE_VERIFY_ORCH_PERFORMANCE_VERIFIER.md"
+    },
+    {
+      "name": "orch-typecheck-verifier",
+      "description": "Typecheck verifier — runs or recommends static type/lint/build checks",
+      "phase": "verify",
+      "agencyLevel": "advisory",
+      "tools": [
+        "read",
+        "bash",
+        "grep",
+        "find",
+        "ls"
+      ],
+      "skills": [],
+      "when_to_route": "Use when final verification needs a specialized independent lens.",
+      "artifact_convention": "ATT_SIDE_VERIFY_ORCH_TYPECHECK_VERIFIER.md"
+    },
+    {
+      "name": "orch-ui-verifier",
+      "description": "UI verifier — validates browser/frontend behavior and captures UI evidence",
+      "phase": "verify",
+      "agencyLevel": "advisory",
+      "tools": [
+        "read",
+        "bash",
+        "grep",
+        "find",
+        "ls"
+      ],
+      "skills": [
+        "webapp-testing"
+      ],
+      "when_to_route": "Use when final verification needs a specialized independent lens.",
+      "artifact_convention": "ATT_SIDE_VERIFY_ORCH_UI_VERIFIER.md"
+    },
+    {
+      "name": "orch-execution-witness",
+      "description": "Execution witness — records commands, files touched, outputs, and evidence without judging",
+      "phase": "observe",
+      "agencyLevel": "artifact-writer",
+      "tools": [
+        "read",
+        "bash",
+        "write"
+      ],
+      "skills": [],
+      "when_to_route": "Use during or after runs to capture evidence, drift, context health, or artifact completeness.",
+      "artifact_convention": "ATT_SIDE_OBSERVE_ORCH_EXECUTION_WITNESS.md"
+    },
+    {
+      "name": "orch-context-observer",
+      "description": "Context observer — watches context size, artifact completeness, and handoff health",
+      "phase": "observe",
+      "agencyLevel": "advisory",
+      "tools": [
+        "read",
+        "bash",
+        "grep",
+        "find",
+        "ls"
+      ],
+      "skills": [],
+      "when_to_route": "Use during or after runs to capture evidence, drift, context health, or artifact completeness.",
+      "artifact_convention": "ATT_SIDE_OBSERVE_ORCH_CONTEXT_OBSERVER.md"
+    },
+    {
+      "name": "orch-drift-observer",
+      "description": "Drift observer — detects divergence from plan, scope, and invariants",
+      "phase": "observe",
+      "agencyLevel": "advisory",
+      "tools": [
+        "read",
+        "bash",
+        "grep",
+        "find",
+        "ls"
+      ],
+      "skills": [],
+      "when_to_route": "Use during or after runs to capture evidence, drift, context health, or artifact completeness.",
+      "artifact_convention": "ATT_SIDE_OBSERVE_ORCH_DRIFT_OBSERVER.md"
+    },
+    {
+      "name": "orch-artifact-auditor",
+      "description": "Artifact auditor — checks required reports, plans, briefs, and verification files exist and are coherent",
+      "phase": "observe",
+      "agencyLevel": "advisory",
+      "tools": [
+        "read",
+        "bash",
+        "grep",
+        "find",
+        "ls"
+      ],
+      "skills": [],
+      "when_to_route": "Use during or after runs to capture evidence, drift, context health, or artifact completeness.",
+      "artifact_convention": "ATT_SIDE_OBSERVE_ORCH_ARTIFACT_AUDITOR.md"
+    },
+    {
+      "name": "orch-decision-recorder",
+      "description": "Decision recorder — extracts durable decisions and memory-worthy learnings",
+      "phase": "postmortem",
+      "agencyLevel": "artifact-writer",
+      "tools": [
+        "read",
+        "bash",
+        "write"
+      ],
+      "skills": [],
+      "when_to_route": "Use after runs to preserve handoffs, decisions, and reusable knowledge.",
+      "artifact_convention": "ATT_SIDE_POSTMORTEM_ORCH_DECISION_RECORDER.md"
+    },
+    {
+      "name": "orch-handoff-summarizer",
+      "description": "Handoff summarizer — produces concise continuation briefs for the next agent/session",
+      "phase": "postmortem",
+      "agencyLevel": "artifact-writer",
+      "tools": [
+        "read",
+        "bash",
+        "write"
+      ],
+      "skills": [],
+      "when_to_route": "Use after runs to preserve handoffs, decisions, and reusable knowledge.",
+      "artifact_convention": "ATT_SIDE_POSTMORTEM_ORCH_HANDOFF_SUMMARIZER.md"
+    },
+    {
+      "name": "orch-knowledge-capturer",
+      "description": "Knowledge capturer — converts run outcomes into reusable project knowledge artifacts",
+      "phase": "postmortem",
+      "agencyLevel": "artifact-writer",
+      "tools": [
+        "read",
+        "bash",
+        "write"
+      ],
+      "skills": [],
+      "when_to_route": "Use after runs to preserve handoffs, decisions, and reusable knowledge.",
+      "artifact_convention": "ATT_SIDE_POSTMORTEM_ORCH_KNOWLEDGE_CAPTURER.md"
+    },
+    {
+      "name": "orch-run-archivist",
+      "description": "Run archivist — summarizes orchestration runs and indexes artifacts for future reuse",
+      "phase": "postmortem",
+      "agencyLevel": "artifact-writer",
+      "tools": [
+        "read",
+        "bash",
+        "write"
+      ],
+      "skills": [],
+      "when_to_route": "Use after runs to preserve handoffs, decisions, and reusable knowledge.",
+      "artifact_convention": "ATT_SIDE_POSTMORTEM_ORCH_RUN_ARCHIVIST.md"
+    }
+  ]
+}

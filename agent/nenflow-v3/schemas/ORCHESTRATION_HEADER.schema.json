@@ -1,0 +1,60 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "OrchestrationHeader",
+  "description": "Static configuration for the NenFlow v3 orchestration status panel, written by the orchestrator at run start.",
+  "type": "object",
+  "required": ["run_id", "paradigm", "maxSubagents", "maxRetries", "concurrency", "roles"],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "description": "The NenFlow run ID (e.g. RUN_20260603-ORCHPANEL)"
+    },
+    "paradigm": {
+      "type": "string",
+      "description": "The orchestration paradigm name",
+      "default": "nenflow-v3"
+    },
+    "maxSubagents": {
+      "type": "integer",
+      "description": "Maximum number of subagents that can run concurrently (1 for sequential NenFlow v3)",
+      "minimum": 1
+    },
+    "maxRetries": {
+      "type": "integer",
+      "description": "Maximum number of retry attempts for failed phases (Route D continuation limit)",
+      "minimum": 0,
+      "default": 5
+    },
+    "concurrency": {
+      "type": "integer",
+      "description": "Number of subagents that can run in parallel (1 for NenFlow v3 sequential mode)",
+      "minimum": 1
+    },
+    "roles": {
+      "type": "array",
+      "description": "Per-LLM model assignments for each role in the orchestration",
+      "items": {
+        "type": "object",
+        "required": ["agentName", "role", "model", "provider"],
+        "properties": {
+          "agentName": {
+            "type": "string",
+            "description": "The subagent identifier (e.g. pev-researcher, pev-planner)"
+          },
+          "role": {
+            "type": "string",
+            "description": "The orchestration role (e.g. researcher, planner, executor, verifier)"
+          },
+          "model": {
+            "type": "string",
+            "description": "The model ID assigned to this role (e.g. deepseek-v4-pro)"
+          },
+          "provider": {
+            "type": "string",
+            "description": "The provider assigned to this role (e.g. deepseek)"
+          }
+        }
+      }
+    }
+  }
+}

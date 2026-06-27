@@ -1,0 +1,13 @@
+{
+  "name": "interactive-diagram-builder",
+  "derivedFrom": "algorithmic-art",
+  "createdAt": "2026-05-11T18:20:00Z",
+  "purpose": "Adapt algorithmic-art's self-contained interactive HTML approach into a clarity-first skill for interactive explanatory diagrams.",
+  "invocation": "/skill:interactive-diagram-builder",
+  "sourceSkillPath": "%USERPROFILE%/.pi/agent/skills/algorithmic-art",
+  "notes": [
+    "Does not modify or remove algorithmic-art.",
+    "Uses HTML/SVG/vanilla JS by default; p5.js only when beneficial.",
+    "Includes reusable template and diagram pattern reference."
+  ]
+}

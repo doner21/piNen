@@ -1,0 +1,8 @@
+{
+  "source": "https://github.com/Prat011/awesome-llm-skills",
+  "sourceCommit": "f417203aa4a4c17268653382512081d10eaada23",
+  "sourcePath": "lead-research-assistant",
+  "installedAt": "2026-05-11T17:02:57.509663+00:00",
+  "piInvocation": "/skill:lead-research-assistant",
+  "patch": "Inserted Pi Harness Adaptation note; patched selected frontmatter wording where needed."
+}

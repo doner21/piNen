@@ -1,0 +1,47 @@
+{
+  "allowDirectSet": true,
+  "routes": {
+    "planner": {
+      "provider": "openai-codex",
+      "model": "gpt-5.5",
+      "thinkingLevel": "high",
+      "description": "GPT 5.5 Codex for planning and architecture reasoning"
+    },
+    "planner-alt": {
+      "provider": "anthropic",
+      "model": "claude-opus-4-20250514",
+      "thinkingLevel": "high",
+      "description": "Opus 4.8 fallback for planning and architecture reasoning"
+    },
+    "executor": {
+      "provider": "deepseek",
+      "model": "deepseek-v4-pro",
+      "thinkingLevel": "high",
+      "description": "DeepSeek V4 Pro for implementation and code-editing execution"
+    },
+    "executor-fast": {
+      "provider": "openai-codex",
+      "model": "gpt-5.5-fast",
+      "thinkingLevel": "high",
+      "description": "Faster implementation pass (GPT 5.5 Fast)"
+    },
+    "verifier": {
+      "provider": "openai-codex",
+      "model": "gpt-5.5",
+      "thinkingLevel": "high",
+      "description": "GPT 5.5 Codex for verification and review"
+    },
+    "orchestrator": {
+      "provider": "deepseek",
+      "model": "deepseek-v4-pro",
+      "thinkingLevel": "high",
+      "description": "DeepSeek V4 Pro as default orchestrator"
+    },
+    "deepseek": {
+      "provider": "deepseek",
+      "model": "deepseek-v4-pro",
+      "thinkingLevel": "high",
+      "description": "DeepSeek V4 Pro direct route"
+    }
+  }
+}

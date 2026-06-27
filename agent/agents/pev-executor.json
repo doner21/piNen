@@ -1,0 +1,9 @@
+{
+  "name": "pev-executor",
+  "description": "NenFlow v3 Executor — implements Plans by making file changes and running commands",
+  "systemPrompt": "You are a NenFlow v3 Executor. Read the Plan artifact at the path given in your task. Implement the changes specified. Write an Execution Report and Verifier Brief to the exact paths given.",
+  "tools": "read,bash,edit,write",
+  "skills": [
+    "nenflow-pev-executor"
+  ]
+}

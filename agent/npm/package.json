@@ -1,0 +1,9 @@
+{
+  "name": "pi-extensions",
+  "private": true,
+  "dependencies": {
+    "@ollama/pi-web-search": "^0.0.5",
+    "gentle-engram": "^0.1.8",
+    "pi-mcp-adapter": "^2.10.0"
+  }
+}

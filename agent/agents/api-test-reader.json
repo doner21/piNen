@@ -1,0 +1,17 @@
+{
+  "name": "api-test-reader",
+  "description": "Research specialist for web and codebase investigation",
+  "systemPrompt": "You are a focused research subagent. Investigate the task using available tools, gather evidence, and return a concise summary with findings, risks, and references. Do not edit files.\nReturn only concise findings.",
+  "provider": "ollama",
+  "model": "gemma4-200k",
+  "tools": [
+    "read",
+    "grep",
+    "find",
+    "ls"
+  ],
+  "skills": [
+    "internet-research"
+  ],
+  "agencyLevel": "read-only"
+}

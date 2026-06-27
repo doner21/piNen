@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema",
+  "comment": "Non-secret runtime config for the telegram-pi daemon. Copy to config.json and edit. The bot token is NEVER stored here — use the TELEGRAM_BOT_TOKEN env var.",
+  "cwd": "%USERPROFILE%\\projects\\my-project",
+  "piBinary": null,
+  "heartbeatFreshSecs": 60,
+  "superviseIntervalSecs": 10,
+  "respawnCooldownSecs": 15,
+  "logMaxBytes": 1000000,
+  "logMaxFiles": 5,
+  "notes": [
+    "The heartbeats use a 'ts' field (epochMs). The extension writes 'ts'. The daemon reads hb.ts, with hb.at fallback for legacy heartbeat files.",
+    "heartbeatFreshSecs default changed to 60s (was 30s).",
+    "piBinary: path to the Pi binary. null/omitted = auto-detect (APPDATA/npm/pi.cmd, APPDATA/npm/pi, else 'pi' fallback).",
+    "Never put the bot token in this file.",
+    "The daemon never reads a token from config. Token must be TELEGRAM_BOT_TOKEN env var or secret.token (0600) file.",
+    "Daemon start: node daemon.mjs (detached). Daemon stop: reads daemon-state.json daemonPid, uses SIGTERM only on that pid."
+  ]
+}
