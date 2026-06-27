@@ -52,7 +52,10 @@ agent/new-mock-process-last-run.json
 agent/graphify-test-bundle.js
 
 # Graphify Brain (personal project memory)
-graphify-brain/
+# Only placeholder files are tracked; all project memories are ignored
+graphify-brain/*
+!graphify-brain/.gitkeep
+!graphify-brain/README.md
 graphify-out/
 .graphify_python
 .graphify_*.json

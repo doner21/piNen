@@ -7,7 +7,6 @@
 # Options:
 #   -InstallDir <path>    Override default install location ($HOME\.pi)
 #   -Force                Overwrite existing install (backs up first)
-#   -PersistEnv           Persist ENGRAM_BIN to user environment variable
 #   -ApplyCorePatch       Apply the Pi core patch after install
 #   -DryRun               Show what would happen without making changes
 #   -SkipEngram           Skip Engram download and setup
@@ -15,7 +14,6 @@
 param(
     [string]$InstallDir = "",
     [switch]$Force,
-    [switch]$PersistEnv,
     [switch]$ApplyCorePatch,
     [switch]$DryRun,
     [switch]$SkipEngram
@@ -24,18 +22,20 @@ param(
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-# ── Constants ──────────────────────────────────────────────────────────
+# --- Constants ---
 $SCRIPT_NAME = "piNen One-Click Installer"
 $REPO_URL = "https://github.com/doner21/piNen.git"
-$ENGRAM_WIN_URL = "https://github.com/Gentleman-Programming/engram/releases/latest/download/engram-windows-amd64.exe"
+$ENGRAM_VERSION = "v1.17.0"
+$ENGRAM_ZIP_URL = "https://github.com/Gentleman-Programming/engram/releases/download/$ENGRAM_VERSION/engram_1.17.0_windows_amd64.zip"
+$ENGRAM_SHA256 = "f0852549f5e3d000f1f39cd1648d4a4e3df3f489011937f6e92b148a9784782b"
 
 if ($DryRun) {
     Write-Host "========================================" -ForegroundColor Cyan
-    Write-Host "  $SCRIPT_NAME — DRY RUN" -ForegroundColor Cyan
+    Write-Host "  $SCRIPT_NAME -- DRY RUN" -ForegroundColor Cyan
     Write-Host "========================================" -ForegroundColor Cyan
 }
 
-# ── Install directory ────────────────────────────────────────────────
+# --- Install directory ---
 if (-not $InstallDir) {
     $InstallDir = Join-Path $env:USERPROFILE ".pi"
 }
@@ -44,7 +44,7 @@ $InstallDir = [System.IO.Path]::GetFullPath($InstallDir)
 Write-Host ""
 Write-Host "==> piNen install directory: $InstallDir" -ForegroundColor Cyan
 
-# ── Existing install check ────────────────────────────────────────────
+# --- Existing install check ---
 if (Test-Path $InstallDir) {
     $items = Get-ChildItem -Path $InstallDir -ErrorAction SilentlyContinue
     if ($items -and $items.Count -gt 0) {
@@ -64,13 +64,13 @@ if (Test-Path $InstallDir) {
     }
 }
 
-# ── Prerequisites check ───────────────────────────────────────────────
+# --- Prerequisites check ---
 Write-Host ""
 Write-Host "==> Checking prerequisites..." -ForegroundColor Cyan
 
 # Node.js
 $nodeVersion = $null
-try { $nodeVersion = & node --version 2>$null } catch {}
+try { $nodeVersion = & node --version 2>$null } catch { }
 if (-not $nodeVersion) {
     Write-Host "--> Node.js not found." -ForegroundColor Yellow
     if (Get-Command winget -ErrorAction SilentlyContinue) {
@@ -78,7 +78,8 @@ if (-not $nodeVersion) {
         if (-not $DryRun) {
             winget install OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements
         }
-    } else {
+    }
+    else {
         Write-Host "    ERROR: Node.js is required. Install from https://nodejs.org/" -ForegroundColor Red
         Write-Host "    Then rerun this installer." -ForegroundColor Red
         exit 1
@@ -99,39 +100,42 @@ if (Get-Command npm -ErrorAction SilentlyContinue) {
 if (Get-Command git -ErrorAction SilentlyContinue) {
     $gv = & git --version 2>$null
     Write-Host "--> Git: $gv" -ForegroundColor Green
-} else {
+}
+else {
     Write-Host "--> Git not found." -ForegroundColor Yellow
     if (Get-Command winget -ErrorAction SilentlyContinue) {
         Write-Host "    Attempting to install Git via winget..." -ForegroundColor Yellow
         if (-not $DryRun) {
             winget install Git.Git --accept-source-agreements --accept-package-agreements
         }
-    } else {
+    }
+    else {
         Write-Host "    WARNING: Git is recommended. Install from https://git-scm.com/" -ForegroundColor Yellow
     }
 }
 
-# ── Install Pi harness ────────────────────────────────────────────────
+# --- Install Pi harness ---
 Write-Host ""
 Write-Host "==> Installing Pi coding-agent harness..." -ForegroundColor Cyan
 
 $piVersion = $null
-try { $piVersion = & pi --version 2>$null } catch {}
+try { $piVersion = & pi --version 2>$null } catch { }
 
 if (-not $piVersion) {
     Write-Host "--> Installing @earendil-works/pi-coding-agent globally..." -ForegroundColor Yellow
     if (-not $DryRun) {
         npm install -g @earendil-works/pi-coding-agent
     }
-    try { $piVersion = & pi --version 2>$null } catch {}
+    try { $piVersion = & pi --version 2>$null } catch { }
     if ($piVersion) {
         Write-Host "--> Pi installed: $piVersion" -ForegroundColor Green
     }
-} else {
+}
+else {
     Write-Host "--> Pi already installed: $piVersion" -ForegroundColor Green
 }
 
-# ── Clone piNen repository ───────────────────────────────────────────
+# --- Clone piNen repository ---
 Write-Host ""
 Write-Host "==> Cloning piNen repository..." -ForegroundColor Cyan
 
@@ -144,7 +148,8 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
         }
         Write-Host "--> Repository cloned to $InstallDir" -ForegroundColor Green
     }
-} else {
+}
+else {
     Write-Host "--> Git unavailable. Downloading zip archive..." -ForegroundColor Yellow
     if (-not $DryRun) {
         $zipUrl = "https://github.com/doner21/piNen/archive/refs/heads/main.zip"
@@ -156,7 +161,7 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
     }
 }
 
-# ── Install npm dependencies ─────────────────────────────────────────
+# --- Install npm dependencies ---
 Write-Host ""
 Write-Host "==> Installing npm dependencies..." -ForegroundColor Cyan
 
@@ -175,7 +180,8 @@ if (Test-Path "agent/npm/package.json") {
         Push-Location "agent/npm"
         if (Test-Path "package-lock.json") {
             npm ci --no-audit --no-fund 2>&1
-        } else {
+        }
+        else {
             npm install --no-audit --no-fund 2>&1
         }
         Pop-Location
@@ -189,7 +195,8 @@ if (Test-Path "agent/extensions/package.json") {
         Push-Location "agent/extensions"
         if (Test-Path "package-lock.json") {
             npm ci --no-audit --no-fund 2>&1
-        } else {
+        }
+        else {
             npm install --no-audit --no-fund 2>&1
         }
         Pop-Location
@@ -209,7 +216,7 @@ if (Test-Path "agent/spotify-mcp/package.json") {
     }
 }
 
-# ── Engram setup ─────────────────────────────────────────────────────
+# --- Engram setup ---
 if (-not $SkipEngram) {
     Write-Host ""
     Write-Host "==> Setting up Engram memory..." -ForegroundColor Cyan
@@ -219,46 +226,77 @@ if (-not $SkipEngram) {
 
     if (Test-Path $engramBin) {
         Write-Host "--> Engram binary already present at $engramBin" -ForegroundColor Green
-    } else {
-        Write-Host "--> Downloading Engram from GitHub releases..." -ForegroundColor Yellow
+    }
+    else {
+        Write-Host "--> Downloading Engram $ENGRAM_VERSION from GitHub releases..." -ForegroundColor Yellow
         if (-not $DryRun) {
             if (-not (Test-Path $engramDir)) {
                 New-Item -ItemType Directory -Path $engramDir -Force | Out-Null
             }
+
+            $zipPath = Join-Path $env:TEMP "engram-windows-amd64.zip"
             try {
-                Invoke-WebRequest -UseBasicParsing -Uri $ENGRAM_WIN_URL -OutFile $engramBin
-                Write-Host "--> Engram downloaded to $engramBin" -ForegroundColor Green
-            } catch {
+                Invoke-WebRequest -UseBasicParsing -Uri $ENGRAM_ZIP_URL -OutFile $zipPath
+                Write-Host "--> Engram zip downloaded" -ForegroundColor Green
+
+                # Verify SHA256
+                $actualHash = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLower()
+                if ($actualHash -ne $ENGRAM_SHA256) {
+                    Write-Host "--> ERROR: SHA256 verification FAILED!" -ForegroundColor Red
+                    Write-Host "    Expected: $ENGRAM_SHA256" -ForegroundColor Red
+                    Write-Host "    Actual:   $actualHash" -ForegroundColor Red
+                    Write-Host "    The downloaded file may be corrupted or tampered with." -ForegroundColor Red
+                    Write-Host "    Aborting Engram installation for safety." -ForegroundColor Red
+                    Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
+                    $engramInstallFailed = $true
+                }
+                else {
+                    Write-Host "--> SHA256 verified OK" -ForegroundColor Green
+                    Expand-Archive -Path $zipPath -DestinationPath $engramDir -Force
+                    Remove-Item $zipPath -Force
+
+                    if (Test-Path $engramBin) {
+                        Write-Host "--> Engram extracted to $engramBin" -ForegroundColor Green
+                    }
+                    else {
+                        Write-Host "--> WARNING: engram.exe not found in zip archive" -ForegroundColor Yellow
+                        Write-Host "    The zip contents may have changed structure." -ForegroundColor Yellow
+                        $engramInstallFailed = $true
+                    }
+                }
+            }
+            catch {
                 Write-Host "--> WARNING: Could not download Engram automatically." -ForegroundColor Yellow
                 Write-Host "    Download manually from: https://github.com/Gentleman-Programming/engram/releases" -ForegroundColor Yellow
                 Write-Host "    Place the binary at: $engramBin" -ForegroundColor Yellow
+                $engramInstallFailed = $true
             }
         }
     }
 
-    # Set ENGRAM_BIN for current session
+    # Set ENGRAM_BIN for current session and persist
     if (Test-Path $engramBin) {
         $env:ENGRAM_BIN = $engramBin
         Write-Host "--> ENGRAM_BIN set for current session" -ForegroundColor Green
 
-        if ($PersistEnv) {
-            try {
-                [Environment]::SetEnvironmentVariable("ENGRAM_BIN", $engramBin, [EnvironmentVariableTarget]::User)
-                Write-Host "--> ENGRAM_BIN persisted to user environment" -ForegroundColor Green
-            } catch {
-                Write-Host "--> WARNING: Could not persist ENGRAM_BIN" -ForegroundColor Yellow
-            }
+        try {
+            [Environment]::SetEnvironmentVariable("ENGRAM_BIN", $engramBin, [EnvironmentVariableTarget]::User)
+            Write-Host "--> ENGRAM_BIN persisted to user environment" -ForegroundColor Green
+        }
+        catch {
+            Write-Host "--> WARNING: Could not persist ENGRAM_BIN to user environment" -ForegroundColor Yellow
+            Write-Host "    You may need to set it manually: setx ENGRAM_BIN `"$engramBin`"" -ForegroundColor Yellow
         }
     }
 }
 
-# ── Config scaffolding ────────────────────────────────────────────────
+# --- Config scaffolding ---
 Write-Host ""
 Write-Host "==> Setting up configuration templates..." -ForegroundColor Cyan
 
 $configFiles = @(
-    @{Example="agent\auth.example.json"; Target="agent\auth.json"},
-    @{Example="agent\mcp.example.json"; Target="agent\mcp.json"}
+    @{ Example = "agent\auth.example.json"; Target = "agent\auth.json" },
+    @{ Example = "agent\mcp.example.json"; Target = "agent\mcp.json" }
 )
 
 foreach ($cfg in $configFiles) {
@@ -268,7 +306,8 @@ foreach ($cfg in $configFiles) {
     if (Test-Path $examplePath) {
         if (Test-Path $targetPath) {
             Write-Host "--> $($cfg.Target) already exists (skipping)" -ForegroundColor Green
-        } else {
+        }
+        else {
             Write-Host "--> Creating $($cfg.Target) from template" -ForegroundColor Yellow
             if (-not $DryRun) {
                 Copy-Item $examplePath $targetPath
@@ -278,9 +317,9 @@ foreach ($cfg in $configFiles) {
 }
 
 Write-Host "--> IMPORTANT: Edit agent/auth.json and agent/mcp.json with your API keys!" -ForegroundColor Yellow
-Write-Host "    Never commit these files — they are gitignored." -ForegroundColor Yellow
+Write-Host "    Never commit these files -- they are gitignored." -ForegroundColor Yellow
 
-# ── Core patch ────────────────────────────────────────────────────────
+# --- Core patch ---
 if ($ApplyCorePatch) {
     Write-Host ""
     Write-Host "==> Applying Pi core patch..." -ForegroundColor Cyan
@@ -300,7 +339,7 @@ if ($ApplyCorePatch) {
     }
 }
 
-# ── Done ─────────────────────────────────────────────────────────────
+# --- Done ---
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Green
 Write-Host "  piNen installation complete!" -ForegroundColor Green
@@ -316,8 +355,10 @@ Write-Host "  2. Start Pi:" -ForegroundColor White
 Write-Host "     pi" -ForegroundColor White
 Write-Host ""
 Write-Host "  Optional:" -ForegroundColor Cyan
-Write-Host "  - Persist ENGRAM_BIN: rerun with -PersistEnv" -ForegroundColor White
 Write-Host "  - Apply core patch: rerun with -ApplyCorePatch" -ForegroundColor White
+Write-Host ""
+Write-Host "  ENGRAM_BIN has been persisted to your user environment." -ForegroundColor Green
+Write-Host "  Restart your terminal for it to take effect everywhere." -ForegroundColor Yellow
 Write-Host ""
 Write-Host "  For help, see:" -ForegroundColor Cyan
 Write-Host "  - docs\INSTALL_WINDOWS.md" -ForegroundColor White

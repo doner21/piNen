@@ -411,7 +411,7 @@
     │  subagent: pev-verifier                                          │
     │  Input:  ATT_0_INTAKE.md + ATT_1_PLAN.md                        │
     │          + ATT_2_VERIFIER_BRIEF.md                               │
-    │  Output: ATT_3_VERIFICATION.md + LATEST_VERIFICATION.md          │
+    │  Output: REMOTE_VERIFICATION.md          │
     │  Independently checks every file and success criterion           │
     │  Must produce: VERDICT: PASS  or  VERDICT: FAIL                  │
     │  Validated with: validator.js VERIFIER VERIFICATION_REPORT       │
