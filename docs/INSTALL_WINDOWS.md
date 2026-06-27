@@ -45,10 +45,10 @@ cd $HOME\.pi
 .\agent\setup.ps1
 ```
 
-With persistence and core patch:
+With core patch:
 
 ```powershell
-.\agent\setup.ps1 -PersistEnv -ApplyCorePatch
+.\agent\setup.ps1 -ApplyCorePatch
 ```
 
 ## Prerequisites
