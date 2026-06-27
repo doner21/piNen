@@ -49,10 +49,16 @@ if (Test-Path $InstallDir) {
     $items = Get-ChildItem -Path $InstallDir -ErrorAction SilentlyContinue
     if ($items -and $items.Count -gt 0) {
         if (-not $Force) {
-            Write-Host "==> ERROR: $InstallDir already exists and is non-empty." -ForegroundColor Red
-            Write-Host "    Use -Force to back up the existing directory and proceed." -ForegroundColor Yellow
-            Write-Host "    WARNING: Existing secrets/configs will be preserved ONLY in the backup." -ForegroundColor Yellow
-            exit 1
+            if ($DryRun) {
+                Write-Host "==> [DRY RUN] Existing install at $InstallDir would be detected." -ForegroundColor Cyan
+                Write-Host "    Would require -Force to back up and overwrite." -ForegroundColor Cyan
+            }
+            else {
+                Write-Host "==> ERROR: $InstallDir already exists and is non-empty." -ForegroundColor Red
+                Write-Host "    Use -Force to back up the existing directory and proceed." -ForegroundColor Yellow
+                Write-Host "    WARNING: Existing secrets/configs will be preserved ONLY in the backup." -ForegroundColor Yellow
+                exit 1
+            }
         }
 
         $backupDir = "$InstallDir-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
@@ -148,6 +154,9 @@ if (Get-Command git -ErrorAction SilentlyContinue) {
         }
         Write-Host "--> Repository cloned to $InstallDir" -ForegroundColor Green
     }
+    else {
+        Write-Host "--> [DRY RUN] Would clone $REPO_URL to $InstallDir" -ForegroundColor Cyan
+    }
 }
 else {
     Write-Host "--> Git unavailable. Downloading zip archive..." -ForegroundColor Yellow
@@ -159,25 +168,37 @@ else {
         Remove-Item $zipPath
         Write-Host "--> Zip archive extracted to $InstallDir" -ForegroundColor Green
     }
+    else {
+        Write-Host "--> [DRY RUN] Would download and extract main.zip to $InstallDir" -ForegroundColor Cyan
+    }
 }
 
 # --- Install npm dependencies ---
 Write-Host ""
 Write-Host "==> Installing npm dependencies..." -ForegroundColor Cyan
 
-Set-Location $InstallDir
+if (-not $DryRun) {
+    Set-Location $InstallDir
+}
+else {
+    Write-Host "--> [DRY RUN] Would Set-Location to $InstallDir" -ForegroundColor Cyan
+}
 
 # Root
-if (Test-Path "package.json") {
+if (Test-Path (Join-Path $InstallDir "package.json")) {
     Write-Host "--> Installing root dependencies..." -ForegroundColor Yellow
     if (-not $DryRun) { npm install --no-audit --no-fund 2>&1 }
+    else { Write-Host "    [DRY RUN] Would run: npm install" -ForegroundColor Cyan }
+}
+elseif ($DryRun) {
+    Write-Host "--> [DRY RUN] Root package.json would be present after clone" -ForegroundColor Cyan
 }
 
 # agent/npm
-if (Test-Path "agent/npm/package.json") {
+if (Test-Path (Join-Path $InstallDir "agent/npm/package.json")) {
     Write-Host "--> Installing agent/npm dependencies..." -ForegroundColor Yellow
     if (-not $DryRun) {
-        Push-Location "agent/npm"
+        Push-Location (Join-Path $InstallDir "agent/npm")
         if (Test-Path "package-lock.json") {
             npm ci --no-audit --no-fund 2>&1
         }
@@ -186,13 +207,17 @@ if (Test-Path "agent/npm/package.json") {
         }
         Pop-Location
     }
+    else { Write-Host "    [DRY RUN] Would run: npm ci in agent/npm" -ForegroundColor Cyan }
+}
+elseif ($DryRun) {
+    Write-Host "--> [DRY RUN] agent/npm/package.json would be present after clone" -ForegroundColor Cyan
 }
 
 # agent/extensions
-if (Test-Path "agent/extensions/package.json") {
+if (Test-Path (Join-Path $InstallDir "agent/extensions/package.json")) {
     Write-Host "--> Installing agent/extensions dependencies..." -ForegroundColor Yellow
     if (-not $DryRun) {
-        Push-Location "agent/extensions"
+        Push-Location (Join-Path $InstallDir "agent/extensions")
         if (Test-Path "package-lock.json") {
             npm ci --no-audit --no-fund 2>&1
         }
@@ -201,19 +226,27 @@ if (Test-Path "agent/extensions/package.json") {
         }
         Pop-Location
     }
+    else { Write-Host "    [DRY RUN] Would run: npm ci in agent/extensions" -ForegroundColor Cyan }
+}
+elseif ($DryRun) {
+    Write-Host "--> [DRY RUN] agent/extensions/package.json would be present after clone" -ForegroundColor Cyan
 }
 
 # agent/spotify-mcp
-if (Test-Path "agent/spotify-mcp/package.json") {
+if (Test-Path (Join-Path $InstallDir "agent/spotify-mcp/package.json")) {
     Write-Host "--> Installing agent/spotify-mcp dependencies..." -ForegroundColor Yellow
     if (-not $DryRun) {
-        Push-Location "agent/spotify-mcp"
+        Push-Location (Join-Path $InstallDir "agent/spotify-mcp")
         if (Test-Path "package-lock.json") {
             npm ci --no-audit --no-fund 2>&1
         }
         npm run build 2>&1
         Pop-Location
     }
+    else { Write-Host "    [DRY RUN] Would run: npm ci + npm run build in agent/spotify-mcp" -ForegroundColor Cyan }
+}
+elseif ($DryRun) {
+    Write-Host "--> [DRY RUN] agent/spotify-mcp/package.json would be present after clone" -ForegroundColor Cyan
 }
 
 # --- Engram setup ---
@@ -312,7 +345,13 @@ foreach ($cfg in $configFiles) {
             if (-not $DryRun) {
                 Copy-Item $examplePath $targetPath
             }
+            else {
+                Write-Host "    [DRY RUN] Would copy $($cfg.Example) to $($cfg.Target)" -ForegroundColor Cyan
+            }
         }
+    }
+    elseif ($DryRun) {
+        Write-Host "--> [DRY RUN] $($cfg.Example) would be present after clone" -ForegroundColor Cyan
     }
 }
 

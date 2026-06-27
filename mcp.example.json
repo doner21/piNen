@@ -1,0 +1,4 @@
+{
+  "_comment": "Root mcp.example.json — Copy to agent/mcp.json and configure your MCP servers. See agent/mcp.example.json for the full MCP server template with Engram, Tavily, and Spotify examples.",
+  "note": "This file is a pointer/template only. No real API keys or server configs are committed. Copy agent/mcp.example.json to agent/mcp.json and fill in your MCP server configuration."
+}

@@ -1,0 +1,4 @@
+{
+  "_comment": "Root auth.example.json — Copy to agent/auth.json and add your keys. See agent/auth.example.json for the full provider template.",
+  "note": "This file is a pointer/template only. No real API keys are committed. Copy agent/auth.example.json to agent/auth.json and fill in your provider API keys."
+}

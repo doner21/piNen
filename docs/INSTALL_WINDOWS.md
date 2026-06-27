@@ -22,7 +22,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "$u='https://raw.githubus
 |------|-------------|
 | `-InstallDir <path>` | Install to a custom directory (default: `$HOME\.pi`) |
 | `-Force` | Overwrite an existing install (creates timestamped backup) |
-| `-PersistEnv` | Persist `ENGRAM_BIN` to your user environment variable |
 | `-ApplyCorePatch` | Apply the Pi core patch after install |
 | `-SkipEngram` | Skip Engram download and setup |
 | `-DryRun` | Show what would happen without making changes |
@@ -33,7 +32,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "$u='https://raw.githubus
 $u='https://raw.githubusercontent.com/doner21/piNen/main/install.ps1'
 $f=Join-Path $env:TEMP 'pinen-install.ps1'
 Invoke-WebRequest -UseBasicParsing $u -OutFile $f
-powershell -NoProfile -ExecutionPolicy Bypass -File $f -PersistEnv -ApplyCorePatch
+powershell -NoProfile -ExecutionPolicy Bypass -File $f -ApplyCorePatch
 ```
 
 ## Manual Install
@@ -108,16 +107,32 @@ mem_context
 
 ### Manual Engram Setup
 
-```powershell
-$ENGRAM_URL = "https://github.com/Gentleman-Programming/engram/releases/latest/download/engram-windows-amd64.exe"
-$ENGRAM_PATH = "$env:USERPROFILE\.pi\agent\bin\engram.exe"
-Invoke-WebRequest -UseBasicParsing -Uri $ENGRAM_URL -OutFile $ENGRAM_PATH
-$env:ENGRAM_BIN = $ENGRAM_PATH
-```
+Engram is pinned to **v1.17.0** with SHA256 verification. The installer
+handles this automatically; for manual setup:
 
-To persist across sessions:
 ```powershell
-# Set user environment variable (no admin required)
+$ENGRAM_VERSION = "v1.17.0"
+$ENGRAM_SHA256 = "f0852549f5e3d000f1f39cd1648d4a4e3df3f489011937f6e92b148a9784782b"
+$ENGRAM_ZIP_URL = "https://github.com/Gentleman-Programming/engram/releases/download/$ENGRAM_VERSION/engram_1.17.0_windows_amd64.zip"
+$ENGRAM_PATH = "$env:USERPROFILE\.pi\agent\bin\engram.exe"
+
+# Create target directory
+New-Item -ItemType Directory -Path (Split-Path $ENGRAM_PATH) -Force | Out-Null
+
+# Download and verify
+$zipPath = Join-Path $env:TEMP "engram-windows-amd64.zip"
+Invoke-WebRequest -UseBasicParsing -Uri $ENGRAM_ZIP_URL -OutFile $zipPath
+$actualHash = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLower()
+if ($actualHash -ne $ENGRAM_SHA256) {
+    Write-Host "SHA256 verification FAILED! Aborting." -ForegroundColor Red
+    exit 1
+}
+Write-Host "SHA256 verified OK" -ForegroundColor Green
+Expand-Archive -Path $zipPath -DestinationPath (Split-Path $ENGRAM_PATH) -Force
+Remove-Item $zipPath
+$env:ENGRAM_BIN = $ENGRAM_PATH
+
+# Persist across sessions (no admin required)
 [Environment]::SetEnvironmentVariable("ENGRAM_BIN", $ENGRAM_PATH, "User")
 ```
 
@@ -158,7 +173,12 @@ Ensure npm's global bin directory is on your PATH. Usually:
 `%APPDATA%\npm`
 
 ### "ENGRAM_BIN is not set"
-Run `$HOME\.pi\agent\setup.ps1 -PersistEnv` or set it manually.
+ENGRAM_BIN is automatically persisted by the installer. If missing:
+
+```powershell
+$env:ENGRAM_BIN = "$env:USERPROFILE\.pi\agent\bin\engram.exe"
+[Environment]::SetEnvironmentVariable("ENGRAM_BIN", $env:ENGRAM_BIN, "User")
+```
 
 ### "PowerShell execution policy"
 The one-click command uses `-ExecutionPolicy Bypass` for the installer only.
