@@ -428,6 +428,7 @@ let debounceTimer: ReturnType<typeof setTimeout> | undefined;
 let semanticDebounceTimer: ReturnType<typeof setTimeout> | undefined;
 let runInProgress = false;
 let lastKnownCwd: string | undefined;
+let graphifyMaintenanceEmitter: ((event: { cwd: string; ok: boolean; mode: "code-only" | "semantic"; reason: string; runId: string }) => void) | undefined;
 
 function lockStaleWindowMs(config: GraphifyAutonomyConfig): number {
 	return Math.max(config.runTimeoutMs, config.semanticTimeoutMs) + 60000;
@@ -929,7 +930,7 @@ async function hasActiveRunLock(): Promise<boolean> {
 	return Boolean(meta && !isLockStale(meta, Date.now(), lockStaleWindowMs(config)));
 }
 
-async function finalizeRun(result: RunResult, reason: string): Promise<void> {
+async function finalizeRun(result: RunResult, reason: string, cwd = lastKnownCwd ?? process.cwd()): Promise<void> {
 	if (result.skippedReason === "already-running") {
 		await appendRunLog({ event: "skip", runId: result.runId, reason, skippedReason: result.skippedReason });
 		await updateState((state) => {
@@ -970,9 +971,10 @@ async function finalizeRun(result: RunResult, reason: string): Promise<void> {
 			state.lastFailureReason = result.stderrTail || `graphify exited with ${result.exitCode}`;
 		}
 	});
+	graphifyMaintenanceEmitter?.({ cwd, ok: result.ok, mode: "code-only", reason, runId: result.runId });
 }
 
-async function finalizeSemanticRun(result: SemanticGraphifyResult, reason: string): Promise<void> {
+async function finalizeSemanticRun(result: SemanticGraphifyResult, reason: string, cwd = lastKnownCwd ?? process.cwd()): Promise<void> {
 	if (result.skippedReason) {
 		await appendRunLog({ event: "semantic-skip", runId: result.runId, reason, skippedReason: result.skippedReason });
 		await updateState((state) => {
@@ -1018,6 +1020,7 @@ async function finalizeSemanticRun(result: SemanticGraphifyResult, reason: strin
 			state.lastSemanticFailureReason = result.semantic?.output?.slice(-500) || "semantic subagent failed";
 		}
 	});
+	graphifyMaintenanceEmitter?.({ cwd, ok: result.ok, mode: "semantic", reason, runId: result.runId });
 }
 
 function clearDebounce(): void {
@@ -1048,7 +1051,7 @@ function armDebounce(cwd: string, reason: string, delayMs: number): void {
 				return;
 			}
 			const result = await runCodeOnlyGraphify(cwd, reason);
-			await finalizeRun(result, reason);
+			await finalizeRun(result, reason, cwd);
 		})();
 	}, delayMs);
 }
@@ -1078,7 +1081,7 @@ function armSemanticDebounce(cwd: string, reason: string, delayMs: number): void
 				return;
 			}
 			const result = await runSemanticGraphify(cwd, reason);
-			await finalizeSemanticRun(result, reason);
+			await finalizeSemanticRun(result, reason, cwd);
 		})();
 	}, delayMs);
 }
@@ -1206,6 +1209,7 @@ function notify(ctx: ExtensionContext, text: string, level: "info" | "warning" |
 // ---------------------------------------------------------------------------
 
 export default function autonomousGraphify(pi: ExtensionAPI): void {
+	graphifyMaintenanceEmitter = (event) => pi.events.emit("graphify:maintenance-complete", event);
 	pi.on("session_start", async (_event, ctx) => {
 		await ensureRuntimeFiles();
 		lastKnownCwd = ctx.cwd;
@@ -1238,6 +1242,7 @@ export default function autonomousGraphify(pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", async () => {
 		clearDebounce();
+		graphifyMaintenanceEmitter = undefined;
 	});
 
 	pi.on("tool_result", async (event, ctx) => {
@@ -1367,10 +1372,10 @@ export default function autonomousGraphify(pi: ExtensionAPI): void {
 			}
 			const reason = params.reason?.trim() || "Run requested via graphify_auto tool.";
 			if (params.mode === "semantic") {
-				void runSemanticGraphify(ctx.cwd, reason, { force: params.force }).then((result) => finalizeSemanticRun(result, reason));
+				void runSemanticGraphify(ctx.cwd, reason, { force: params.force }).then((result) => finalizeSemanticRun(result, reason, ctx.cwd));
 				return { content: [{ type: "text" as const, text: "Started semantic graphify subagent run." }] };
 			}
-			void runCodeOnlyGraphify(ctx.cwd, reason, { force: params.force }).then((result) => finalizeRun(result, reason));
+			void runCodeOnlyGraphify(ctx.cwd, reason, { force: params.force }).then((result) => finalizeRun(result, reason, ctx.cwd));
 			return { content: [{ type: "text" as const, text: "Started code-only `graphify update .` run." }] };
 		},
 	});
@@ -1458,12 +1463,12 @@ export default function autonomousGraphify(pi: ExtensionAPI): void {
 				const runCwd = resolve(ctx.cwd, explicitPath ?? ".");
 				if (flags.has("--semantic")) {
 					const reason = "Run requested via /graphify-auto run-now --semantic.";
-					void runSemanticGraphify(runCwd, reason, { force: flags.has("--force") }).then((result) => finalizeSemanticRun(result, reason));
+					void runSemanticGraphify(runCwd, reason, { force: flags.has("--force") }).then((result) => finalizeSemanticRun(result, reason, runCwd));
 					ctx.ui.notify(`Started semantic graphify subagent run in ${runCwd}.`, "info");
 					return;
 				}
 				const reason = "Run requested via /graphify-auto run-now --code-only.";
-				void runCodeOnlyGraphify(runCwd, reason, { force: flags.has("--force") }).then((result) => finalizeRun(result, reason));
+				void runCodeOnlyGraphify(runCwd, reason, { force: flags.has("--force") }).then((result) => finalizeRun(result, reason, runCwd));
 				ctx.ui.notify(`Started code-only \`graphify update .\` in ${runCwd}.`, "info");
 				return;
 			}

@@ -1,0 +1,10 @@
+{
+  "name": "pi-extension-spotify-pi",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Spotify playback control for Pi: PKCE OAuth, DPAPI-encrypted tokens, LLM tools + /spotify-login and /spotify-logout commands.",
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}

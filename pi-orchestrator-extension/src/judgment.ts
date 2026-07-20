@@ -253,7 +253,7 @@ export function detectFalsePassContradiction(options: {
 
 // ── Structured provider errors (F5) ────────────────────────────────────────
 
-export type ProviderErrorType = "rate_limit" | "auth" | "not_found" | "network" | "unknown";
+export type ProviderErrorType = "rate_limit" | "auth" | "not_found" | "network" | "timeout" | "aborted" | "unknown";
 
 export interface ProviderHealthError {
   provider?: string;
@@ -277,7 +277,9 @@ export function parseProviderError(
   const compact = text.replace(/\s+/g, " ").trim();
 
   let type: ProviderErrorType = "unknown";
-  if (/\b429\b|rate[\s_-]?limit|usage[\s_-]?limit|quota/i.test(text)) type = "rate_limit";
+  if (/preflight[^\n]*aborted|orchestration aborted|abortsignal/i.test(text)) type = "aborted";
+  else if (/preflight[^\n]*time(?:d)?\s*out|preflight_timeout/i.test(text)) type = "timeout";
+  else if (/\b429\b|rate[\s_-]?limit|usage[\s_-]?limit|quota/i.test(text)) type = "rate_limit";
   else if (/no api key|api key|unauthorized|\b401\b|\b403\b|invalid[\s_-]?key|expired.*(token|oauth)|oauth.*expired|authentication/i.test(text)) type = "auth";
   else if (/\b404\b|model.{0,20}not found|unknown model|no such model/i.test(text)) type = "not_found";
   else if (/econnrefused|econnreset|etimedout|enotfound|network|socket hang up|fetch failed|timed? ?out/i.test(text)) type = "network";

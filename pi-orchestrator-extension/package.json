@@ -4,11 +4,15 @@
   "description": "Deterministic multi-agent orchestration extension for Pi using isolated Pi JSON-mode subprocesses.",
   "type": "module",
   "scripts": {
-    "test": "node tests/test-natural-language-controls.cjs && node tests/test-judgment-hardening.cjs && node tests/test-safe-github-publish.cjs"
+    "test": "node tests/test-natural-language-controls.cjs && node tests/test-role-concurrency.cjs && node tests/test-judgment-hardening.cjs && node tests/test-paradigm-creator.cjs && node tests/test-dual-plan-synthesis-execute-verify.cjs && node tests/test-shape-builder.cjs && node tests/test-win-console-spawn-root-cause.cjs && node tests/test-win-lifecycle-process-trace.cjs && node tests/test-safe-github-publish.cjs && node tests/test-preregistered-concurrency-spike.cjs && node tests/test-abort-resume.cjs && node tests/test-shape-route-overrides.cjs && node tests/test-custom-shape-control-propagation.cjs && node tests/test-dual-plan-footer.cjs && node tests/test-nl-route-hardening.cjs && node tests/test-pev-resume.cjs && node tests/test-deterministic-phase.cjs && node tests/test-frozen-gate-fix-loop.cjs && node tests/test-composable-pipeline-model-id.cjs && node tests/test-evidence-audit.cjs && node tests/test-independent-replication.cjs && node tests/test-m66-explicit-routing-proof.cjs && node tests/test-child-launch-protocol.cjs && node tests/test-preflight-bounds-routes.cjs"
   },
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "pi": {
-    "extensions": ["./src/index.ts"]
+    "extensions": [
+      "./src/index.ts"
+    ]
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

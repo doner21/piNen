@@ -1,6 +1,6 @@
 ---
 name: orchestration-wrapper
-description: Rich visible orchestration wrapper for Pi/NenFlow runs. Selects optional specialist `orch-*` sidecar agents for intake, research, planning, execution, verification, observation, witnessing, and postmortem capture while preserving the primary PEV spine when using NenFlow.
+description: Rich visible orchestration wrapper for Pi runs. Selects optional specialist `orch-*` sidecar agents for intake, research, planning, execution, verification, observation, witnessing, and postmortem capture. For durable-artifact PEV runs, defer to the deterministic `/orchestrate` system.
 ---
 
 # Rich Orchestration Wrapper
@@ -21,18 +21,13 @@ The visible/current agent remains the ORCHESTRATOR and must not execute the main
 
 ## Supported Modes
 
-### Mode A — NenFlow-compatible sidecar mode
+### Mode A — Deterministic orchestrator (RETIRED NenFlow slot)
 
-Use this when the user asks for NenFlow, durable artifacts, explicit intake, or visible phase orchestration.
-
-- Keep PEV as the canonical spine: `pev-researcher`, `pev-planner`, `pev-executor`, `pev-verifier`.
-- Optionally call `orch-*` specialist sidecars before or after PEV phases.
-- Save sidecar outputs in the run directory as `ATT_SIDE_<PHASE>_<AGENT>.md`.
-- Sidecars advise or produce bounded changes; canonical PASS/FAIL remains owned by `pev-verifier`.
+NenFlow v3 and its `pev-*` PEV spine are retired (2026-07-18). When the user asks for durable artifacts, explicit intake, or full phase orchestration, route the run through the deterministic `/orchestrate` command (`~/.pi/pi-orchestrator-extension`). It owns intake (including intake.md), planning, execution, and verification. `orch-*` sidecars may still be called around it; sidecar outputs are saved as `ATT_SIDE_<PHASE>_<AGENT>.md`.
 
 ### Mode B — Lightweight rich run
 
-Use this for smaller tasks where full NenFlow artifacts are too heavy.
+Use this for smaller tasks where full deterministic-run artifacts are too heavy.
 
 Visible phase order:
 1. Intake summary in current session
@@ -82,7 +77,7 @@ When calling a specialist subagent, include:
 
 - Do not call implementation agents for read-only review tasks.
 - Do not call observer/witness agents for correctness verdicts.
-- Do not let verifier sidecars overwrite `pev-verifier` final verdict in NenFlow.
+- Do not let verifier sidecars overwrite the deterministic orchestrator's final verdict.
 - Do not run more agents than needed; prefer 1-3 sidecars for small tasks.
 - **Repair-only fallback:** If subagents fail or the shape/tool fails: diagnose, repair the requested shape/tool, resume on success, escalate on failure. Never execute the main task directly and never silently switch to a different orchestration shape to complete the main task. Provider/model fallback is allowed.
 

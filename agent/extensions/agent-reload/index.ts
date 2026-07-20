@@ -2,10 +2,11 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import { promises as fsp } from "node:fs";
 import { resolve } from "node:path";
+import { randomUUID } from "node:crypto";
 
 /**
  * Agent-operated Pi reload bridge — phase-machine + session_shutdown
- * confirmation edition (v2, post-critique).
+ * confirmation edition (v3, diagnostics-reporting-fix).
  *
  * Design (see FIX_PLAN.md):
  * - The LLM-callable `agent_reload_runtime` tool schedules a background idle
@@ -28,7 +29,9 @@ import { resolve } from "node:path";
  *
  * The tool never uses `pi.sendUserMessage('/...')`.
  *
- * Diagnostics: `<cwd>/agent/agent-reload-diagnostics.json`.
+ * Diagnostics: ONE canonical location at `~/.pi/agent/agent-reload-diagnostics.json`
+ * regardless of session cwd. Atomic writes (temp + rename). Write failures
+ * are logged to stderr (never swallowed silently).
  */
 const RELOAD_COMMAND = "agent-reload-runtime";
 const POLL_INTERVAL_MS = 500;
@@ -90,51 +93,103 @@ interface ReloadDiagnostics {
 }
 
 // ---------------------------------------------------------------------------
-// Diagnostics (best-effort, must never throw; MERGES with existing file)
+// Diagnostics — canonical path, atomic write, success-preserving, stderr-aware
 // ---------------------------------------------------------------------------
 
+const USER_HOME = process.env.USERPROFILE ?? process.env.HOME ?? process.cwd();
+const PI_HOME_DIR = process.env.PI_HOME
+	? resolve(process.env.PI_HOME)
+	: resolve(USER_HOME, ".pi");
+const CANONICAL_DIAG_DIR = resolve(PI_HOME_DIR, "agent");
+const CANONICAL_DIAG_PATH = resolve(CANONICAL_DIAG_DIR, "agent-reload-diagnostics.json");
+
+/** Authoritative success signal emitted by session_shutdown handler. */
+const RELOAD_CONFIRMATION = "session_shutdown:reload";
+
+/**
+ * Write diagnostics to the ONE canonical location with success-preserving
+ * merge semantics (backported from agent-new-session v3 lifecycle-race-fix).
+ *
+ * Rules:
+ *  - One canonical path: ~/.pi/agent/agent-reload-diagnostics.json always.
+ *  - Atomic write: temp file + rename (survives partial-write during teardown).
+ *  - Success-preserving: once reloadConfirmed is observed, phase is locked to
+ *    "done" and failure fields are cleared (confirmation dominance).
+ *  - Write failures are logged to stderr; never swallowed silently.
+ *  - Merge: patch overwrites scalars; arrays append and cap.
+ */
 async function writeDiagnostics(
 	patch: Partial<ReloadDiagnostics> & { attempts?: number; cwd?: string; executeCommandAvailable?: boolean },
-	cwd: string,
+	_cwd: string, // kept for caller compatibility; IGNORED — always uses canonical path
 ): Promise<void> {
 	try {
-		const dir = resolve(cwd, "agent");
-		await fsp.mkdir(dir, { recursive: true });
-		const diagPath = resolve(dir, "agent-reload-diagnostics.json");
+		await fsp.mkdir(CANONICAL_DIAG_DIR, { recursive: true });
+
+		// 1. Read existing file; recover confirmation from raw text if malformed.
+		let raw: string | undefined;
 		let existing: ReloadDiagnostics;
+		let recoveredConfirmation = false;
+
 		try {
-			existing = JSON.parse(await fsp.readFile(diagPath, "utf8"));
+			raw = await fsp.readFile(CANONICAL_DIAG_PATH, "utf8");
+			existing = JSON.parse(raw as string);
 		} catch {
+			if (raw !== undefined) {
+				// JSON parse failed — check raw text for confirmation evidence.
+				if (raw.includes('"reloadConfirmed"') && raw.includes('true') &&
+				    raw.includes('"confirmedBy"') && raw.includes(`"${RELOAD_CONFIRMATION}"`)) {
+					recoveredConfirmation = true;
+				}
+			}
 			existing = {
 				phase: "idle",
 				attempts: 0,
-				cwd,
+				cwd: _cwd,
 				executeCommandAvailable: false,
 			};
 		}
-		// Merge: patch overwrites scalars; arrays append.
+
+		// 2. Merge: patch overwrites scalars; arrays append and cap.
 		const merged: ReloadDiagnostics = { ...existing, ...patch };
-		// Preserve/append arrays that were in existing but not in patch.
+
 		if (patch.executeEntries && existing.executeEntries) {
-			merged.executeEntries = [...existing.executeEntries, ...patch.executeEntries];
+			merged.executeEntries = [...existing.executeEntries, ...patch.executeEntries].slice(-20);
 		} else if (existing.executeEntries && !patch.executeEntries) {
 			merged.executeEntries = existing.executeEntries;
 		}
 		if (patch.tickLog && existing.tickLog) {
-			merged.tickLog = [...existing.tickLog, ...patch.tickLog];
+			merged.tickLog = [...existing.tickLog, ...patch.tickLog].slice(-80);
 		} else if (existing.tickLog && !patch.tickLog) {
 			merged.tickLog = existing.tickLog;
 		}
-		if (merged.executeEntries && merged.executeEntries.length > 20) {
-			merged.executeEntries = merged.executeEntries.slice(-20);
-		}
-		if (merged.tickLog && merged.tickLog.length > 80) {
-			merged.tickLog = merged.tickLog.slice(-80);
-		}
+
+		// 3. Success-preserving: if confirmation was ever observed, force canonical success.
+		const confirmationObserved =
+			recoveredConfirmation ||
+			merged.reloadConfirmed === true ||
+			merged.confirmedBy === RELOAD_CONFIRMATION;
+
 		merged.lastUpdated = new Date().toISOString();
-		await fsp.writeFile(diagPath, JSON.stringify(merged, null, 2), "utf8");
-	} catch {
-		/* diagnostics must never throw */
+
+		if (confirmationObserved) {
+			merged.phase = "done";
+			merged.reloadConfirmed = true;
+			merged.confirmedBy = RELOAD_CONFIRMATION;
+			merged.reloadSilentlyFailed = false;
+			merged.executeCommandRejected = false;
+			delete merged.hardTimeout;
+			delete merged.timeout;
+			delete merged.error;
+		}
+
+		// 4. Atomic write: temp file + rename.
+		const tmpPath = resolve(CANONICAL_DIAG_DIR, `.agent-reload-diagnostics.tmp-${randomUUID().slice(0, 8)}`);
+		await fsp.writeFile(tmpPath, JSON.stringify(merged, null, 2), "utf8");
+		await fsp.rename(tmpPath, CANONICAL_DIAG_PATH);
+	} catch (err) {
+		/* diagnostics must never throw, but MUST log to stderr */
+		const msg = err instanceof Error ? err.message : String(err);
+		process.stderr.write(`[agent-reload] writeDiagnostics FAILED: ${msg}\n`);
 	}
 }
 
@@ -160,11 +215,16 @@ function clearAllTimers(): void {
 	if (retryTimer) { clearTimeout(retryTimer); retryTimer = undefined; }
 }
 
+/**
+ * Reset state to idle. Does NOT clear reloadConfirmed — that flag survives
+ * for the success-preserving writer in session_shutdown and any late write.
+ * Only clear it when starting a new request cycle (scheduleIdleReload).
+ */
 function resetToIdle(cwd: string): void {
 	clearAllTimers();
 	phase = "idle";
 	activeRequestId = undefined;
-	reloadConfirmed = false;
+	// NOTE: reloadConfirmed is NOT cleared here. See above.
 }
 
 // ---------------------------------------------------------------------------
@@ -438,8 +498,8 @@ export default function agentReload(pi: ExtensionAPI): void {
 
 	// session_shutdown: the reliable SUCCESS signal. Fires in the still-alive
 	// OLD instance (correct cwd, lastKnownCwd intact) BEFORE teardown.
+	// Success-preserving: once confirmed, no later write can regress to failure.
 	pi.on("session_shutdown", (event: { reason?: string; targetSessionFile?: string }) => {
-		// Always clear timers (existing clearPending behavior).
 		clearAllTimers();
 		if (event?.reason === "reload" && activeRequestId) {
 			reloadConfirmed = true;
@@ -451,7 +511,7 @@ export default function agentReload(pi: ExtensionAPI): void {
 				phase: "done",
 				reloadConfirmed: true,
 				confirmedAt: Date.now(),
-				confirmedBy: "session_shutdown:reload",
+				confirmedBy: RELOAD_CONFIRMATION,
 				cwd,
 				executeCommandAvailable,
 			}, cwd);

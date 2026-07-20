@@ -35,6 +35,7 @@ import type {
   NormalizedParams,
   InferredModelRouting,
 } from "../types";
+import { resolveRouteOverride, formatRouteLabel } from "../routes";
 
 // ── Multi-verify-vote specific types ───────────────────────────────────────
 
@@ -581,12 +582,14 @@ function mergeModelOverrides(
   return { model, provider };
 }
 
+// Route override resolution is delegated to the shared helper (src/routes.ts)
+// so spawn routing and the report Routes line derive from identical values,
+// closing the silent-route-override bug class (2026-07-02).
 function toModelOverride(
   model?: string,
   provider?: string,
 ): { model?: string; provider?: string } | undefined {
-  if (!model && !provider) return undefined;
-  return { model, provider };
+  return resolveRouteOverride(model, provider);
 }
 
 // ── Result builders ────────────────────────────────────────────────────────
@@ -604,6 +607,11 @@ function buildFinalResult(
     "",
     `**Task:** ${params.task}`,
     `**Paradigm:** multi-verify-vote`,
+    // Routes line derives from the SAME resolved override values passed to the
+    // planner/executor/verifier spawns (via toModelOverride → resolveRouteOverride).
+    `**Routes:** Planner=${formatRouteLabel(toModelOverride(params.plannerModel, params.plannerProvider))}; ` +
+      `Executor=${formatRouteLabel(toModelOverride(params.executorModel, params.executorProvider))}; ` +
+      `Verifier=${formatRouteLabel(toModelOverride(params.verifierModel, params.verifierProvider))}`,
     `**Verifiers:** ${voteResult.votes.length} (${voteResult.passes} PASS, ${voteResult.fails} FAIL)`,
     `**Subagents spawned:** ${spawnGuard.spawned}/${spawnGuard.cap}`,
     "",

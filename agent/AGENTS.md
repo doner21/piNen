@@ -1,8 +1,10 @@
-# piNen Agent Policy
+# Global Pi Agent Policy
 
 ## Orchestrator Role Integrity Policy
 
-When the user asks for orchestration (any orchestration shape, NenFlow run, or orchestration wrapper), the visible/current agent remains the **ORCHESTRATOR** and must not execute the main task directly.
+When the user asks for orchestration (any orchestration shape, deterministic `/orchestrate` run, or orchestration wrapper), the visible/current agent remains the **ORCHESTRATOR** and must not execute the main task directly.
+
+> **NenFlow v3 is retired (2026-07-18).** The deterministic orchestration system (`/orchestrate`, `pi-orchestrator-extension`) is the standard orchestration shape, including intake/intake.md handling. Do not run NenFlow v3 or spawn `pev-*` subagents; if a NenFlow run is requested, route it to `/orchestrate`. See `agent/docs/nenflow-v3-retirement.md`.
 
 **Allowed orchestrator actions:** intake and routing; subagent spawning; artifact reads/writes for orchestration state; context checks; `git status`; reading logs; verifying completed jobs; diagnosing failed subagent spawning; repairing the requested orchestration tool/shape/runtime; retrying the requested orchestration route after repair; creating handoff/continuation artifacts.
 
@@ -19,13 +21,13 @@ Provider/model fallback is allowed; switching orchestration shape to finish the 
 
 **Context threshold — orchestrator self-handoff at 70%:** During any orchestration run, if the orchestrator's context exceeds 70%, the orchestrator must create a self-handoff, save state, schedule continuation, and resume as orchestrator in the fresh session. This 70% is an orchestrator-role rule, distinct from per-role subagent context thresholds (default 65%, configurable per run).
 
-**Orchestrator Role Integrity Ledger:** Every orchestration run must produce an *Orchestrator Role Integrity Ledger* (in NenFlow runs: `ATT_ORCHESTRATOR_ROLE_LEDGER.md` in the run directory). The ledger records: requested shape/tool; current role = ORCHESTRATOR; subagents spawned + roles; subagent artifacts; direct orchestrator actions; classification (orchestration support / diagnostics / repair / verification / handoff); explicit statement whether orchestrator executed any main-task work; context checkpoints; repair attempts + outcomes; final role-integrity verdict.
+**Orchestrator Role Integrity Ledger:** Every orchestration run must produce an *Orchestrator Role Integrity Ledger* (`ATT_ORCHESTRATOR_ROLE_LEDGER.md` in the run directory). The ledger records: requested shape/tool; current role = ORCHESTRATOR; subagents spawned + roles; subagent artifacts; direct orchestrator actions; classification (orchestration support / diagnostics / repair / verification / handoff); explicit statement whether orchestrator executed any main-task work; context checkpoints; repair attempts + outcomes; final role-integrity verdict.
 
 **Verifier falsifier:** The verifier must FAIL if evidence shows the visible/current orchestrator executed the main task directly instead of routing through the requested orchestration shape, or if the requested shape was silently replaced.
 
 ## Engram Persistent Memory
 
-piNen uses Engram for persistent memory. The binary is installed at `agent/bin/engram.exe` (Windows) or `agent/bin/engram` (Linux/macOS), and the `gentle-engram` npm package provides Pi-native `mem_*` tools.
+This Pi installation uses Engram for persistent memory. The installer places the binary at `agent/bin/engram.exe` on Windows (or `agent/bin/engram` on Unix), and the `gentle-engram` npm package provides Pi-native `mem_*` tools.
 
 ### If Engram tools are unavailable
 
@@ -33,7 +35,8 @@ piNen uses Engram for persistent memory. The binary is installed at `agent/bin/e
 2. Run `agent/setup.sh` or `agent/setup.ps1` to reconfigure
 3. Verify the binary exists: `agent/bin/engram.exe` (Windows) or `agent/bin/engram` (Linux/macOS)
 4. Run `mem_doctor` to diagnose connection issues
-5. The MCP server config at `agent/mcp.json` uses `ENGRAM_BIN || 'engram'` — if the env var is missing and 'engram' isn't on PATH, the MCP server won't start
+5. The MCP server config at `agent/mcp.json` uses `ENGRAM_BIN || 'engram'` — if the env var is missing
+   and 'engram' isn't on PATH, the MCP server won't start
 
 ### Quick fix (per-session)
 
@@ -47,9 +50,27 @@ $env:ENGRAM_BIN = "$env:USERPROFILE\.pi\agent\bin\engram.exe"
 export ENGRAM_BIN="$HOME/.pi/agent/bin/engram"
 ```
 
-## Graphify Brain — Project Memory
+### Persistent-memory protocol
 
-piNen includes a Graphify Brain at `graphify-brain/` as its project memory system. The brain starts empty — populate it by running `/graphify` in your project directories to build knowledge graphs and wiki documentation. Treat the graphify-brain and its knowledge graphs as persistent context that can be consulted across sessions.
+Use Engram as durable working memory, not as a dump of transient output.
+
+Save immediately after completing a bug fix, making an architecture/design decision, discovering a non-obvious codebase fact, changing configuration/environment setup, establishing a reusable pattern, or learning a user preference/constraint.
+
+Use `mem_save` with a short searchable title, an appropriate type (`bugfix`, `decision`, `architecture`, `discovery`, `pattern`, `config`, or `preference`), project/personal scope, and a stable `topic_key` where the fact may evolve. Structure content as:
+
+- **What**: what changed or was learned
+- **Why**: motivation
+- **Where**: relevant files/paths
+- **Learned**: edge cases and gotchas
+
+When recalling prior work, call `mem_context` first, then `mem_search` and `mem_get_observation` if needed. Before declaring meaningful work complete, save a `mem_session_summary` with Goal, Instructions, Discoveries, Accomplished, Next Steps, and Relevant Files. After context compaction, restore project memory before continuing.
+
+Never commit or publish Engram databases, observations, session summaries, saved prompts, or health traces.
+
+## Graphify Brain is first-class project memory context
+
+This Pi installation uses the Graphify Brain at `~/.pi/graphify-brain` as its global project memory system.
+Treat the graphify-brain and its knowledge graphs as persistent context that should be consulted in every substantive session.
 
 ## Startup behavior
 
@@ -88,7 +109,7 @@ If a project is linked and Graphify artifacts are available:
 
 ## Spotify — All Operations via MCP Server
 
-The Spotify MCP server at `agent/spotify-mcp/` is the single source of truth for ALL Spotify operations.
+The Spotify MCP server at `~/.pi/agent/spotify-mcp` is the single source of truth for ALL Spotify operations. Do not use the built-in `spotify_*` Pi tools — they lack playlist management and use a separate token system.
 
 ### Available MCP tools (prefix: `spotify_`)
 
@@ -116,8 +137,9 @@ The Spotify MCP server at `agent/spotify-mcp/` is the single source of truth for
 
 ### Workflow
 
-1. Ensure the MCP server is connected by loading the `spotify-play` skill
-2. **Device recovery**: If `spotify_getAvailableDevices` returns no devices, launch Spotify on your system, wait 5s, retry. If still none, wait 5s more and retry once more. Only after two retries (10s total) may you ask the user to open Spotify manually.
+1. Ensure the MCP server is connected: `mcp({ connect: "spotify" })`
+2. For playback requests, load and consult the `spotify-play` skill
+3. **Device recovery**: If `spotify_getAvailableDevices` returns no devices, launch Spotify (`powershell -Command "Start-Process 'spotify:'"` on Windows), wait 5s, retry. If still none, wait 5s more and retry once more. Only after two retries (10s total) may you ask the user to open Spotify manually.
 
 ## Git Safety / Smart Git Usage
 
@@ -130,6 +152,29 @@ When working in a Git repository:
 5. Prefer small, focused commits with clear messages when the user requests commits.
 6. If modifying Pi extension code (`agent/extensions/**/*.ts`), remember that `/reload` does not reliably re-evaluate extension source in already-running Pi processes; a full Pi process restart may be required.
 7. Be explicit about what was changed, what was not changed, and whether changes are merely on disk, committed locally, or pushed remotely.
+
+## Automated Git Backup Policy
+
+The user has granted standing authorization for the deterministic `git-backup` extension to create and push **isolated backup refs only**. This authorization does not permit agents to commit to, merge, rebase, reset, force-push, or push the working branch without a separate explicit request.
+
+### Required backup model
+
+1. Local rollback protection and off-machine backup are different states:
+   - `local-snapshot` means an isolated `refs/pi-backups/...` commit exists locally.
+   - `remote-verified` means the dedicated `pi-backup/...` remote branch was pushed and `ls-remote` independently matched the local snapshot commit.
+2. Routine automation must use the `git_backup` tool or `/git-backup`; do not reproduce it with manual `git add`, `git commit`, or `git push` commands.
+3. Backup snapshots must not mutate the working branch, real index, working tree, tags, or normal release branches.
+4. Remote automation may use only an already-configured approved remote under the `existing-origin-only` policy. It must never create a repository, add/change a remote, change repository visibility, or force-push.
+5. Secret scanning, protected-path checks, embedded-repository checks, changed-file limits, and object-size limits are hard gates. Do not bypass them merely to obtain a green backup result.
+6. New/untracked source files should be included only when they are not ignored or protected and all safety gates pass.
+7. Graphify maintenance and Git backups should coordinate but remain independent: successful Graphify completion should request a backup, while Graphify pause/failure must never prevent ordinary backup scheduling.
+8. Mark backup needed after meaningful project changes. Before saying work is "backed up," call `git_backup` with `action=status` when available and report the exact state honestly.
+9. If backup is blocked or fails, preserve the local work, report the reason and blocked paths without exposing secret contents, and never claim remote protection.
+10. Repositories without an approved existing remote receive local snapshots only; creating or selecting a remote remains a separate user-authorized action.
+
+### Expected automatic boundaries
+
+The extension schedules debounced backups after meaningful tool mutations and `agent_settled`, performs startup/shutdown catch-up, and listens for Graphify completion events. These boundaries replace the retired behavior that created a working-branch commit before every edit.
 
 ## Bug Notes Protocol
 

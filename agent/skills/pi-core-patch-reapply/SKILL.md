@@ -124,7 +124,7 @@ The patcher resolves the install root robustly (env override → `require.resolv
 ## Workflow: after a Pi update
 
 Follow these steps **in order**. Run each command from the Pi home directory
-(`%USERPROFILE%/.pi` on this machine) unless noted.
+(`<PI_HOME>`, normally `~/.pi`) unless noted.
 
 ### 1. Check whether the patch is still present
 

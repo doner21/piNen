@@ -1,152 +1,127 @@
 # Harness Architecture
 
-piNen is a sanitized Pi coding-agent harness — a pre-configured, batteries-included
-installation of the Pi coding agent with extensions, skills, and orchestration
-tools.
+piNen is a sanitized Pi home with four cooperating layers: Pi core, extensions/tools, reusable skills/agents, and durable memory/orchestration services.
 
-## High-Level Architecture
+## High-level view
 
-```
-piNen Harness
-├── Pi Core (npm: @earendil-works/pi-coding-agent)
-│   ├── Agent loop (REPL + tool execution)
-│   ├── Provider routing (OpenAI, Anthropic, DeepSeek, etc.)
-│   └── Core tools (read, bash, edit, write, etc.)
-│
-├── Extensions (agent/extensions/)
-│   ├── pinen-logo.ts          — piNen wordmark (above-editor widget)
-│   ├── agent-scheduler/       — Autonomous wake-up scheduling
-│   ├── agent-new-session/     — Agent-operated clean-session flow
-│   ├── agent-reload/          — Agent-operated reload flow
-│   ├── autonomous-graphify/   — Auto Graphify Brain maintenance
-│   ├── nenflow-v3.ts          — NenFlow v3 orchestration engine
-│   ├── subagent.ts            — Subagent spawning and management
-│   ├── telegram-pi/           — Telegram ↔ Pi bridge
-│   ├── context-awareness.ts   — Context budget monitoring
-│   ├── git-checkpoint.ts      — Git checkpoint before risky operations
-│   ├── model-router.ts        — Intelligent model selection
-│   └── ... (20+ extensions)
-│
-├── Skills (agent/skills/)     — 50+ skill directories
-├── Agents (agent/agents/)     — 50+ subagent definitions (JSON)
-├── Prompts (agent/prompts/)   — System prompt templates
-│
-├── NenFlow v3 (agent/nenflow-v3/)
-│   ├── context-policy.js      — Context budget enforcement
-│   ├── validator.js           — Run validation
-│   ├── schemas/               — Artifact schemas
-│   ├── templates/             — Run templates
-│   └── tests/                 — Validation tests
-│
-├── Orchestration Extension (pi-orchestrator-extension/)
-│   ├── src/index.ts           — Shape registry and CLI
-│   ├── src/substrate.ts       — Subagent spawning primitives
-│   ├── src/types.ts           — OrchestrationShape interface
-│   ├── src/judgment.ts        — Effect-based verdict hardening
-│   └── src/shapes/            — Orchestration shapes
-│       ├── plan-execute-verify.ts
-│       ├── safe-github-publish.ts   (default GitHub publishing)
-│       ├── multi-verify-vote.ts
-│       ├── composable-pipeline.ts
-│       └── verify-only.ts
-│
-├── Engram Memory (agent/bin/engram)
-│   └── Persistent memory across sessions and compactions
-│
-├── Graphify Brain (graphify-brain/)
-│   └── Knowledge graph storage (starts empty)
-│
-├── MCP Servers
-│   ├── agent/spotify-mcp/     — Spotify playback + playlists
-│   ├── Tavily (via npm)       — Internet research
-│   └── Engram (built-in)      — Memory tools
-│
-└── Infrastructure
-    ├── agent/setup.ps1/sh     — Bootstrap scripts
-    ├── agent/core-patch/      — Pi core patching
-    ├── install.ps1/sh         — One-click installers
-    └── docs/                  — User-facing documentation
+```text
+User / Telegram / Scheduler
+            │
+            ▼
+┌─────────────────────────────────────────────┐
+│ Pi core (@earendil-works/pi-coding-agent)  │
+│ agent loop · providers · core file tools    │
+└──────────────┬──────────────────────────────┘
+               │ loads
+     ┌─────────┴─────────────────────────┐
+     ▼                                   ▼
+agent/extensions/                 pi-orchestrator-extension/
+continuity · browser · MCP        15 bounded orchestration shapes
+memory · safety · integrations    route/preflight/evidence/resume
+     │                                   │
+     ├──────────────┬────────────────────┤
+     ▼              ▼                    ▼
+agent/skills/   agent/agents/        isolated Pi JSON
+48 workflows    51 role profiles     subprocesses
+     │
+     ├─────────────────┬──────────────────┐
+     ▼                 ▼                  ▼
+Engram              Graphify Brain      External MCP/services
+observations        project graphs      Spotify/Tavily/etc.
 ```
 
-## piNen Logo
+## Extension layer
 
-The piNen logo is displayed as an **above-editor widget** (not a header
-replacement) via `agent/extensions/pinen-logo.ts`. It shows the "warm terminal
-intelligence" wordmark between the agent output area and the user input area.
+`agent/extensions/` registers commands, tools, event handlers, and UI:
 
-This is verified as part of the `safe-github-publish` pipeline.
+- **continuity:** scheduler, new-session, reload, context usage;
+- **delegation:** subagents, model router, deterministic orchestrator package;
+- **memory:** Graphify, autonomous maintenance, human wiki sync;
+- **browser/research:** Playwright, browser/image search, MCP server status;
+- **safety:** destructive-command confirmation, isolated Git backups, checkpoints;
+- **integrations:** Gmail, Telegram, Spotify, Railway, GoDaddy;
+- **UX:** thinking, verbosity, todos, and piNen logo.
 
-## Orchestration Flow
+The optional core patch exposes command dispatch needed by the autonomous reload/new-session bridges. It is explicit, idempotent, backup-before-write, and never applied silently.
 
-### NenFlow v3 (PEV Stream)
+## Orchestration layer
 
+`pi-orchestrator-extension/` provides the primary deterministic spine:
+
+```text
+intake/normalize
+      │
+route + provider preflight
+      │
+shape-selected bounded phases
+      │
+checkpoint/effect evidence
+      │
+independent verification
+      │
+report + role-integrity ledger
 ```
-User Task → Intake/Scout → Plan → Execute → Verify → Report
-               │              │       │         │
-               └─ Researcher   └─ Planner  └─ Executor  └─ Verifier
+
+Core properties:
+
+- subprocess isolation via `pi --mode json`;
+- spawn ceilings and finite retry/iteration bounds;
+- planner/executor/verifier route overrides and fallbacks;
+- dependency waves and bounded concurrency;
+- deterministic non-LLM hash/manifest phases;
+- resumable run state;
+- direct effect evidence rather than trusting prose claims;
+- explicit fail-closed parser/verifier contracts.
+
+Shapes are siblings built on shared substrate primitives. See `../pi-orchestrator-extension/PARADIGMS.md`.
+
+NenFlow v3 is retired; compatibility prompts redirect to `/orchestrate`.
+
+## Memory layer
+
+### Engram
+
+Engram stores compact observations and session summaries. `gentle-engram` exposes Pi-native `mem_*` tools; the MCP template starts the binary lazily. Memory content is local and excluded from Git.
+
+### Graphify Brain
+
+Graphify turns repositories/content into graph reports, JSON graphs, and wikis. The global brain indexes known project graphs for future sessions. piNen commits only an empty brain placeholder and the machinery that populates it.
+
+Engram and Graphify are complementary:
+
+- Engram: decisions, discoveries, preferences, summaries, relations.
+- Graphify: structural project/code/document knowledge.
+
+## Runtime-state separation
+
+Capability source is committed. Mutable state is not:
+
+```text
+committed                           ignored/local
+---------                           -------------
+extension and skill source          sessions and scheduled messages
+agent profiles and prompts          orchestration runs/checkpoints
+safe config examples                auth/OAuth/app-password configs
+setup/install scripts               Engram databases and binaries
+tests and runbooks                  Graphify project graphs
+empty memory placeholders           diagnostics, caches, builds, logs
 ```
 
-### Orchestration Shapes
+This boundary lets the full harness move between machines without moving a user's projects or memory.
 
-The `pi-orchestrator-extension` provides reusable shapes built on a shared
-**substrate** (subagent spawning, concurrency control, bounded execution):
+## Installation flow
 
-```
-OrchestrationShape
-├── plan-execute-verify     (classic 3-phase)
-├── safe-github-publish     (default GitHub publishing)
-├── multi-verify-vote       (majority-rule verification)
-├── composable-pipeline     (dynamic phase composition)
-└── verify-only             (verification-only)
-```
+1. Clone into `~/.pi`.
+2. Install root, `agent/npm`, extension, and Spotify MCP dependencies.
+3. Install/download Engram separately.
+4. Copy credential templates to gitignored real config files.
+5. Optionally apply the Pi command-dispatch core patch.
+6. Start Pi; packages and extensions load from `agent/settings.json`.
 
-**Shape → Substrate rule:** Shapes are siblings — they stand on the substrate,
-never build on each other. The substrate enforces hard bounds on spawns and
-iterations.
+## Extending piNen
 
-## GitHub Publishing (safe-github-publish)
-
-The `safe-github-publish` shape is the **default recommended method** for
-publishing repositories to GitHub. It implements a 3-phase pipeline:
-
-1. **Plan/Contract (Planner):** Produces a sanitization plan with allowlists
-   and deny lists. Never copies source `.git/` history.
-
-2. **Execute (Executor):** Builds a clean staging tree from the allowlist,
-   runs local safety checks (gitleaks, path scans, secret scans), initializes
-   a fresh git repository, creates a **private-first** GitHub repo, and pushes.
-
-3. **Verify (Verifier):** Independently clones the remote, runs all safety
-   gates, and produces a PASS/FAIL verdict with evidence.
-
-**Role integrity:** The visible/current orchestrator never executes staging,
-sanitization, commit, repo creation, or push. These are always delegated.
-
-## Security Model
-
-See [SECURITY.md](SECURITY.md) for the full security model.
-
-Key points:
-- **Zero secrets in repo** — Configs are templates only
-- **Private-first publishing** — Repos are created private
-- **No personal data** — Publisher paths/emails sanitized
-- **gitleaks scanning** — Pre-commit and pre-push secret detection
-
-## Extending the Harness
-
-### Adding New Skills
-
-Create a new directory in `agent/skills/` with a `SKILL.md` file.
-See `agent/skills/skill-creator/SKILL.md` for the skill creation guide.
-
-### Adding New Extensions
-
-Create a TypeScript file in `agent/extensions/`. Extensions use the Pi SDK.
-See the existing extensions for examples.
-
-### Adding New Orchestration Shapes
-
-Create a new file in `pi-orchestrator-extension/src/shapes/` implementing
-the `OrchestrationShape` interface, then register it in
-`pi-orchestrator-extension/src/index.ts`. See
-`pi-orchestrator-extension/PARADIGMS.md` for the full guide.
+- Skill: create `agent/skills/<name>/SKILL.md`.
+- Agent: create a generic profile in `agent/agents/`.
+- Extension: add TypeScript under `agent/extensions/` and dependencies to its package.
+- Orchestration shape: implement a sibling shape, register it, add tests/docs, reload, discover, and canary it.
+- MCP server: add a safe template entry; never commit a real credential.

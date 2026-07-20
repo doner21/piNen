@@ -15,10 +15,10 @@
  * requests are clamped to safe, finite limits.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, type SpawnOptions } from "node:child_process";
 import { createInterface } from "node:readline";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -30,6 +30,7 @@ import {
   type ToolCallSummary,
   type ProviderHealthError,
 } from "./judgment";
+import { getPiChildFirstJsonTimeoutMs, isPiJsonProtocolEvent, killOwnedProcessTree, resolvePiChildCommand } from "./child-launch.ts";
 
 // ── Re-exported agent profile (role-agnostic shape) ────────────────────────
 
@@ -194,6 +195,47 @@ export interface SpawnSubagentOptions {
   onProgress?: (text: string) => void;
   /** Optional per-spawn model/provider override. */
   modelOverride?: { model?: string; provider?: string };
+  /**
+   * Abort-survivor mode (ABORT-RESUME-DESIGN.md): when the AbortSignal fires,
+   * do NOT kill the child. Instead persist a survivor manifest, reject the
+   * awaiting promise with SubagentDetachedError, keep collecting the child's
+   * JSONL output in the background, and write the full SubagentResult to
+   * `resultFile` when the child eventually closes. Opt-in per spawn; spawns
+   * without this option keep exact kill-on-abort semantics.
+   */
+  abortSurvival?: {
+    resultFile: string;
+    manifestFile: string;
+    phaseName?: string;
+    phaseIndex?: number;
+  };
+}
+
+/**
+ * Thrown instead of "Subagent <name> aborted." when abort-survivor mode is
+ * active: the child is still running and its result will be persisted to
+ * `resultFile`. Callers should persist the detachment and surface a resume
+ * hint rather than treating this as a plain failure.
+ */
+export class SubagentDetachedError extends Error {
+  readonly manifest: {
+    pid: number | undefined;
+    agentName: string;
+    phaseName: string;
+    phaseIndex: number;
+    startedAt: number;
+    detachedAt: string;
+    resultFile: string;
+  };
+
+  constructor(agentName: string, manifest: SubagentDetachedError["manifest"]) {
+    super(
+      `Subagent ${agentName} detached (abort-survivor mode): child pid=${manifest.pid} continues in the background; ` +
+        `its result will be written to ${manifest.resultFile}.`,
+    );
+    this.name = "SubagentDetachedError";
+    this.manifest = manifest;
+  }
 }
 
 /**
@@ -271,130 +313,504 @@ export async function spawnSubagent(
     `Subagent ${profile.name}: launching ${path.basename(command.command)} ${args.includes("--no-extensions") ? "--no-extensions" : ""} --mode json in ${options.cwd}`,
   );
 
-  let stderr = "";
-  let lastAssistantText = "";
-  let eventCount = 0;
-  let killedByAbort = false;
-  let agentEnded = false;
-  const assistantFailures: string[] = [];
-  const toolCalls = emptyToolCallSummary();
-
-  const child = spawn(command.command, args, {
+  const baseSpawnOptions: SpawnOptions = {
     cwd: options.cwd,
-    env: process.env,
+    env: command.env ?? process.env,
     stdio: [pipeStdin ? "pipe" : "ignore", "pipe", "pipe"],
     windowsHide: true,
     shell: command.shell,
-  });
-
-  // Pipe the task via stdin when it exceeds the safe arg limit
-  if (pipeStdin && child.stdin) {
-    child.stdin.write(task);
-    child.stdin.end();
-  }
-
-  const abortHandler = () => {
-    killedByAbort = true;
-    child.kill("SIGTERM");
-    setTimeout(() => {
-      if (!child.killed) child.kill("SIGKILL");
-    }, 2000).unref?.();
   };
-  if (options.signal) {
-    if (options.signal.aborted) abortHandler();
-    else options.signal.addEventListener("abort", abortHandler, { once: true });
-  }
+  const launchAttempts = buildWindowsEpermSpawnAttempts(command.command, args, baseSpawnOptions);
 
-  const stdoutReader = createInterface({ input: child.stdout });
-  stdoutReader.on("line", (line) => {
-    const trimmed = line.trim();
-    if (!trimmed) return;
-    try {
-      const event = JSON.parse(trimmed);
-      eventCount++;
-      const progress = describeJsonEvent(profile.name, event);
-      if (progress) options.onProgress?.(progress);
+  try {
+    for (let attemptIndex = 0; attemptIndex < launchAttempts.length; attemptIndex++) {
+      const launch = launchAttempts[attemptIndex];
+      let stderr = "";
+      let lastAssistantText = "";
+      let eventCount = 0;
+      let killedByAbort = false;
+      let agentEnded = false;
+      let protocolTimedOut = false;
+      let firstJsonProtocolEventSeen = false;
+      let firstJsonTimer: NodeJS.Timeout | undefined;
+      const firstJsonTimeoutMs = getPiChildFirstJsonTimeoutMs(command.env ?? process.env);
+      const markFirstJsonProtocolEvent = () => {
+        if (firstJsonProtocolEventSeen) return;
+        firstJsonProtocolEventSeen = true;
+        if (firstJsonTimer) clearTimeout(firstJsonTimer);
+      };
+      const assistantFailures: string[] = [];
+      const toolCalls = emptyToolCallSummary();
 
-      // Effect-evidence telemetry: count tool executions by tool name.
-      if (event?.type === "tool_execution_start") {
-        const toolName = optionalString((event as Record<string, unknown>).toolName);
-        if (toolName) recordToolCall(toolCalls, toolName);
-      }
-
-      // Once agent_end is emitted, the subagent has finished its work.
-      // Any further message_end events (e.g. from internal shutdown/retries)
-      // are post-termination noise and must not be treated as failures.
-      if (event?.type === "agent_end") {
-        agentEnded = true;
-      }
-
-      if (
-        event?.type === "message_end" &&
-        event.message?.role === "assistant" &&
-        !agentEnded
-      ) {
-        lastAssistantText = extractMessageText(event.message);
-        const stopReason =
-          optionalString(event.message.stopReason) ??
-          optionalString(event.stopReason);
-        const errorMessage =
-          optionalString(event.message.errorMessage) ??
-          optionalString(event.errorMessage) ??
-          optionalString(event.message.error?.message) ??
-          optionalString(event.error?.message);
-        const normalizedStopReason = stopReason?.toLowerCase();
-        if (normalizedStopReason === "error" || normalizedStopReason === "aborted") {
-          assistantFailures.push(`assistant stopReason=${stopReason}`);
+      let child;
+      try {
+        child = spawn(launch.command, launch.args, launch.options);
+        firstJsonTimer = setTimeout(() => {
+          protocolTimedOut = true;
+          stderr += `\nPI_CHILD_FIRST_JSON_TIMEOUT: no valid JSON protocol event within ${firstJsonTimeoutMs}ms from ${path.basename(launch.command)}; terminating owned child tree.`;
+          try { child.kill("SIGTERM"); } catch {}
+          killOwnedProcessTree(child.pid, "first-json-timeout");
+        }, firstJsonTimeoutMs);
+        firstJsonTimer.unref?.();
+      } catch (err) {
+        if (isWindowsSpawnEperm(err) && attemptIndex < launchAttempts.length - 1) {
+          const next = launchAttempts[attemptIndex + 1];
+          options.onProgress?.(
+            `Subagent ${profile.name}: Windows spawn EPERM from ${formatSpawnAttempt(launch)}; ` +
+              `retrying with ${formatSpawnAttempt(next)}.`,
+          );
+          continue;
         }
-        if (errorMessage) assistantFailures.push(`assistant errorMessage=${errorMessage}`);
+        // Terminal EPERM: capture evidence before throwing.
+        const evidence = buildWindowsEpermEvidence(err, launch, options.cwd);
+        const evidencePath = await writeWindowsEpermEvidence(evidence);
+        const evidenceSuffix = evidencePath ? ` Evidence: ${evidencePath}` : " Evidence capture skipped.";
+        throw new Error(formatSpawnFailure(err, launch, options.cwd) + evidenceSuffix);
       }
-    } catch {
-      // JSON mode should emit JSONL; ignore any incidental non-JSON line defensively.
+
+      // Pipe the task via stdin when it exceeds the safe arg limit.
+      if (pipeStdin && child.stdin) {
+        child.stdin.write(task);
+        child.stdin.end();
+      }
+
+      // Abort-survivor plumbing (ABORT-RESUME-DESIGN.md): when enabled, an
+      // abort detaches instead of killing. detachReject unwinds the awaiting
+      // promise; the background close-handler persists the final result.
+      let detachReject: ((err: SubagentDetachedError) => void) | undefined;
+      const detachPromise = new Promise<never>((_resolve, reject) => {
+        detachReject = reject;
+      });
+      // Prevent unhandled-rejection noise when the race resolves normally.
+      detachPromise.catch(() => {});
+
+      const abortHandler = () => {
+        const survival = options.abortSurvival;
+        if (survival) {
+          const manifest = {
+            pid: child.pid,
+            agentName: profile.name,
+            phaseName: survival.phaseName ?? "(unnamed)",
+            phaseIndex: survival.phaseIndex ?? -1,
+            startedAt,
+            detachedAt: new Date().toISOString(),
+            resultFile: survival.resultFile,
+          };
+          try {
+            writeFileSync(survival.manifestFile, JSON.stringify(manifest, null, 2), "utf8");
+          } catch {}
+          // Background completion: when the orphaned child finally closes,
+          // persist the complete SubagentResult from the still-attached
+          // collectors. (v1 limitation: requires this Pi process to stay
+          // alive; the child's cwd artifacts are durable regardless.)
+          child.once("close", (code) => {
+            const backgroundResult: SubagentResult = {
+              agentName: profile.name,
+              task,
+              text: lastAssistantText.trim(),
+              stderr: stderr.trim(),
+              exitCode: code,
+              durationMs: Date.now() - startedAt,
+              events: eventCount,
+              toolCalls,
+            };
+            if (profile.provider) backgroundResult.provider = profile.provider;
+            if (profile.model) backgroundResult.model = profile.model;
+            try {
+              writeFileSync(survival.resultFile, JSON.stringify(backgroundResult, null, 2), "utf8");
+            } catch {}
+          });
+          detachReject?.(new SubagentDetachedError(profile.name, manifest));
+          return;
+        }
+        killedByAbort = true;
+        if (firstJsonTimer) clearTimeout(firstJsonTimer);
+        try { child.kill("SIGTERM"); } catch {}
+        killOwnedProcessTree(child.pid, "abort");
+        setTimeout(() => {
+          if (!child.killed) child.kill("SIGKILL");
+          killOwnedProcessTree(child.pid, "abort-hard-kill");
+        }, 2000).unref?.();
+      };
+      if (options.signal) {
+        if (options.signal.aborted) abortHandler();
+        else options.signal.addEventListener("abort", abortHandler, { once: true });
+      }
+
+      const stdoutReader = createInterface({ input: child.stdout });
+      stdoutReader.on("line", (line) => {
+        const trimmed = line.trim();
+        if (!trimmed) return;
+        try {
+          const event = JSON.parse(trimmed);
+          if (isPiJsonProtocolEvent(event)) markFirstJsonProtocolEvent();
+          eventCount++;
+          const progress = describeJsonEvent(profile.name, event);
+          if (progress) options.onProgress?.(progress);
+
+          // Effect-evidence telemetry: count tool executions by tool name.
+          if (event?.type === "tool_execution_start") {
+            const toolName = optionalString((event as Record<string, unknown>).toolName);
+            if (toolName) recordToolCall(toolCalls, toolName);
+          }
+
+          // Once agent_end is emitted, the subagent has finished its work.
+          // Any further message_end events (e.g. from internal shutdown/retries)
+          // are post-termination noise and must not be treated as failures.
+          if (event?.type === "agent_end") {
+            agentEnded = true;
+          }
+
+          if (
+            event?.type === "message_end" &&
+            event.message?.role === "assistant" &&
+            !agentEnded
+          ) {
+            lastAssistantText = extractMessageText(event.message);
+            const stopReason =
+              optionalString(event.message.stopReason) ??
+              optionalString(event.stopReason);
+            const errorMessage =
+              optionalString(event.message.errorMessage) ??
+              optionalString(event.errorMessage) ??
+              optionalString(event.message.error?.message) ??
+              optionalString(event.error?.message);
+            const normalizedStopReason = stopReason?.toLowerCase();
+            if (normalizedStopReason === "error" || normalizedStopReason === "aborted") {
+              assistantFailures.push(`assistant stopReason=${stopReason}`);
+            }
+            if (errorMessage) assistantFailures.push(`assistant errorMessage=${errorMessage}`);
+          }
+        } catch {
+          // JSON mode should emit JSONL; ignore any incidental non-JSON line defensively.
+        }
+      });
+
+      child.stderr?.on("data", (chunk) => {
+        stderr += chunk.toString();
+      });
+
+      let exitCode: number | null;
+      try {
+        exitCode = await Promise.race([
+          new Promise<number | null>((resolve, reject) => {
+            child.on("error", reject);
+            child.on("close", (code) => resolve(code));
+          }),
+          detachPromise,
+        ]);
+      } catch (err) {
+        if (firstJsonTimer) clearTimeout(firstJsonTimer);
+        if (options.signal) options.signal.removeEventListener("abort", abortHandler);
+        if (err instanceof SubagentDetachedError) {
+          // Deliberately do NOT close the stdoutReader: the background
+          // collectors keep accumulating until the orphaned child closes.
+          options.onProgress?.(
+            `Subagent ${profile.name}: DETACHED on abort (pid=${err.manifest.pid}); ` +
+              `result will be persisted to ${err.manifest.resultFile}.`,
+          );
+          throw err;
+        }
+        stdoutReader.close();
+        if (isWindowsSpawnEperm(err) && attemptIndex < launchAttempts.length - 1) {
+          const next = launchAttempts[attemptIndex + 1];
+          options.onProgress?.(
+            `Subagent ${profile.name}: Windows spawn EPERM from ${formatSpawnAttempt(launch)}; ` +
+              `retrying with ${formatSpawnAttempt(next)}.`,
+          );
+          continue;
+        }
+        // Terminal EPERM: capture evidence before throwing.
+        const evidence = buildWindowsEpermEvidence(err, launch, options.cwd);
+        const evidencePath = await writeWindowsEpermEvidence(evidence);
+        const evidenceSuffix = evidencePath ? ` Evidence: ${evidencePath}` : " Evidence capture skipped.";
+        throw new Error(formatSpawnFailure(err, launch, options.cwd) + evidenceSuffix);
+      }
+
+      if (firstJsonTimer) clearTimeout(firstJsonTimer);
+      if (options.signal) options.signal.removeEventListener("abort", abortHandler);
+      stdoutReader.close();
+
+      if (killedByAbort) throw new Error(`Subagent ${agentName} aborted.`);
+      if (protocolTimedOut) {
+        throw new Error(JSON.stringify({
+          type: "pi_child_first_json_timeout",
+          agent: agentName,
+          timeoutMs: firstJsonTimeoutMs,
+          pid: child.pid,
+          cwd: options.cwd,
+          commandBasename: path.basename(launch.command),
+          launchRuntime: command.launchRuntime,
+        }));
+      }
+      if (exitCode !== 0) {
+        throw new Error(
+          `Subagent ${agentName} exited with code ${exitCode}. stderr: ${truncateWithNotice(stderr.trim(), 2000, "stderr")}`,
+        );
+      }
+      if (assistantFailures.length > 0) {
+        const stderrSuffix = stderr.trim()
+          ? ` stderr: ${truncateWithNotice(stderr.trim(), 1000, "stderr")}`
+          : "";
+        throw new Error(
+          `Subagent ${agentName} reported assistant failure despite exit code 0: ` +
+            `${truncateWithNotice(assistantFailures.join("; "), 2000, "assistant failure details")}.${stderrSuffix}`,
+        );
+      }
+
+      const result: SubagentResult = {
+        agentName: profile.name,
+        task,
+        text: lastAssistantText.trim(),
+        stderr: stderr.trim(),
+        exitCode,
+        durationMs: Date.now() - startedAt,
+        events: eventCount,
+        toolCalls,
+      };
+      if (profile.provider) result.provider = profile.provider;
+      if (profile.model) result.model = profile.model;
+      return result;
     }
-  });
-
-  child.stderr?.on("data", (chunk) => {
-    stderr += chunk.toString();
-  });
-
-  const exitCode = await new Promise<number | null>((resolve, reject) => {
-    child.on("error", reject);
-    child.on("close", (code) => resolve(code));
-  }).finally(async () => {
-    if (options.signal) options.signal.removeEventListener("abort", abortHandler);
-    stdoutReader.close();
+  } finally {
     await rm(tempDir, { recursive: true, force: true });
+  }
+
+  throw new Error(`Subagent ${agentName} did not launch: no spawn attempts were available.`);
+}
+
+// ── Windows spawn hardening ───────────────────────────────────────────────
+
+export interface SpawnAttemptDescriptor {
+  label: string;
+  command: string;
+  args: string[];
+  options: SpawnOptions;
+}
+
+export function buildWindowsEpermSpawnAttempts(
+  command: string,
+  args: string[],
+  baseOptions: SpawnOptions,
+): SpawnAttemptDescriptor[] {
+  const attempts: SpawnAttemptDescriptor[] = [
+    { label: "primary", command, args, options: baseOptions },
+  ];
+  if (process.platform !== "win32") return attempts;
+
+  // Some Windows hosts return EPERM for direct hidden console-subsystem
+  // CreateProcess calls from TUI/job-object contexts. Keep the normal hidden
+  // launch first, then retry through cmd.exe (still hidden) before the final
+  // no-CREATE_NO_WINDOW fallback.
+  if (!baseOptions.shell) {
+    attempts.push({
+      label: "windows-shell-hidden-fallback",
+      command,
+      args,
+      options: { ...baseOptions, shell: true, windowsHide: true, detached: false },
+    });
+  }
+
+  attempts.push({
+    label: "windows-visible-fallback",
+    command,
+    args,
+    options: { ...baseOptions, windowsHide: false, detached: false },
   });
+  return attempts;
+}
 
-  if (killedByAbort) throw new Error(`Subagent ${agentName} aborted.`);
-  if (exitCode !== 0) {
-    throw new Error(
-      `Subagent ${agentName} exited with code ${exitCode}. stderr: ${truncateWithNotice(stderr.trim(), 2000, "stderr")}`,
-    );
-  }
-  if (assistantFailures.length > 0) {
-    const stderrSuffix = stderr.trim()
-      ? ` stderr: ${truncateWithNotice(stderr.trim(), 1000, "stderr")}`
-      : "";
-    throw new Error(
-      `Subagent ${agentName} reported assistant failure despite exit code 0: ` +
-        `${truncateWithNotice(assistantFailures.join("; "), 2000, "assistant failure details")}.${stderrSuffix}`,
-    );
-  }
+export function isWindowsSpawnEperm(err: unknown): boolean {
+  if (process.platform !== "win32") return false;
+  const record = err as { code?: unknown; message?: unknown };
+  return record?.code === "EPERM" || /\bspawn\b[\s\S]*\bEPERM\b/i.test(String(record?.message ?? err));
+}
 
-  const result: SubagentResult = {
-    agentName: profile.name,
-    task,
-    text: lastAssistantText.trim(),
-    stderr: stderr.trim(),
-    exitCode,
-    durationMs: Date.now() - startedAt,
-    events: eventCount,
-    toolCalls,
+export function formatSpawnAttempt(attempt: SpawnAttemptDescriptor): string {
+  const command = path.basename(attempt.command || "<unknown>");
+  const shell = attempt.options.shell ? "shell" : "direct";
+  const hidden = attempt.options.windowsHide === false ? "visible" : "hidden";
+  return `${attempt.label} ${command} (${shell}, ${hidden})`;
+}
+
+export function formatSpawnFailure(err: unknown, attempt: SpawnAttemptDescriptor, cwd: string): string {
+  const record = err as { code?: unknown; message?: unknown };
+  const code = record?.code ? ` code=${String(record.code)}` : "";
+  const message = String(record?.message ?? err);
+  const hint = isWindowsSpawnEperm(err)
+    ? " Hint: Windows returned EPERM while launching a Pi subagent subprocess. " +
+      "Common causes are antivirus/EDR interception, a restrictive parent Job object, " +
+      "or CREATE_NO_WINDOW/windowsHide interactions in a console-less TUI process. " +
+      "Try launching Pi from a normal terminal, checking Defender/EDR events, or " +
+      "testing node child-process creation from the same parent context."
+    : "";
+  return `spawn failed (${formatSpawnAttempt(attempt)}) cwd=${cwd}${code}: ${message}.${hint}`;
+}
+
+// ── Windows EPERM evidence capture ──────────────────────────────────────
+
+/**
+ * JSON-serializable evidence record written to disk when a Windows spawn
+ * EPERM cannot be retried (terminal failure). Contains only safe,
+ * read-only fields — never logs API keys, prompts, full env, or task text.
+ */
+export interface WindowsEpermEvidence {
+  schemaVersion: number;
+  kind: "windows-spawn-eperm-evidence";
+  timestampUtc: string;
+  pid: number;
+  ppid: number;
+  platform: string;
+  nodeVersion: string;
+  execPath: {
+    basename: string;
+    equalsProcessExecPath: boolean;
+    exists: boolean;
   };
-  if (profile.provider) result.provider = profile.provider;
-  if (profile.model) result.model = profile.model;
-  return result;
+  cwd: {
+    basename: string;
+    exists: boolean;
+  };
+  attempt: {
+    label: string;
+    commandBasename: string;
+    argsCount: number;
+    options: {
+      shell: boolean;
+      windowsHide: boolean;
+      detached: boolean;
+      stdioShape: string;
+    };
+  };
+  envAllowlist: {
+    PATH_present: boolean;
+    PI_CLI_PATH_present: boolean;
+    PI_CLI_present: boolean;
+  };
+  error: {
+    code: string | null;
+    message: string;
+  };
+  correlationWindowMinutes: number;
+}
+
+/**
+ * Redacted view of a spawn attempt — never includes the full command path
+ * unless it equals process.execPath, and never logs argument text.
+ */
+export interface SafeAttemptView {
+  label: string;
+  commandBasename: string;
+  argsCount: number;
+  shell: boolean;
+  windowsHide: boolean;
+  detached: boolean;
+  stdioShape: string;
+}
+
+/**
+ * Redact a SpawnAttemptDescriptor into a SafeAttemptView for evidence
+ * capture. Only computes basename, counts, and boolean flags.
+ */
+export function redactSpawnAttempt(attempt: SpawnAttemptDescriptor): SafeAttemptView {
+  return {
+    label: attempt.label,
+    commandBasename: path.basename(attempt.command || "<unknown>"),
+    argsCount: attempt.args?.length ?? 0,
+    shell: attempt.options?.shell === true,
+    windowsHide: attempt.options?.windowsHide !== false,
+    detached: attempt.options?.detached === true,
+    stdioShape: JSON.stringify((attempt.options?.stdio ?? ["ignore", "pipe", "pipe"]).map((s: unknown) => s === "pipe" ? "pipe" : s === "ignore" ? "ignore" : "inherit")),
+  };
+}
+
+/**
+ * Sanitize a spawn error message to remove full command paths and other
+ * potentially sensitive strings while preserving useful diagnostic info.
+ */
+function sanitizeSpawnErrorMessage(err: unknown, attempt: SpawnAttemptDescriptor): string {
+  let sanitized = String((err as { message?: unknown })?.message ?? err);
+  // Replace the full command path with its basename.
+  const commandPath = attempt.command;
+  if (commandPath && commandPath.length > 4) {
+    const escaped = commandPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    sanitized = sanitized.replace(new RegExp(escaped, "g"), path.basename(commandPath));
+  }
+  // Additional scrubbing: remove anything that looks like a Windows full path.
+  sanitized = sanitized.replace(/[A-Za-z]:\\[^\s"'>;,!]{8,}/g, "[path-redacted]");
+  return sanitized.slice(0, 500);
+}
+
+/**
+ * Build a WindowsEpermEvidence record from the error, spawn attempt, and
+ * working directory. Pure — performs no I/O.
+ */
+export function buildWindowsEpermEvidence(
+  err: unknown,
+  attempt: SpawnAttemptDescriptor,
+  cwd: string,
+): WindowsEpermEvidence {
+  const record = err as { code?: unknown; message?: unknown };
+  const safe = redactSpawnAttempt(attempt);
+  return {
+    schemaVersion: 1,
+    kind: "windows-spawn-eperm-evidence",
+    timestampUtc: new Date().toISOString(),
+    pid: process.pid,
+    ppid: process.ppid,
+    platform: process.platform,
+    nodeVersion: process.version,
+    execPath: {
+      basename: path.basename(process.execPath),
+      equalsProcessExecPath: safe.commandBasename === path.basename(process.execPath),
+      exists: existsSync(process.execPath),
+    },
+    cwd: {
+      basename: path.basename(cwd),
+      exists: existsSync(cwd),
+    },
+    attempt: {
+      label: safe.label,
+      commandBasename: safe.commandBasename,
+      argsCount: safe.argsCount,
+      options: {
+        shell: safe.shell,
+        windowsHide: safe.windowsHide,
+        detached: safe.detached,
+        stdioShape: safe.stdioShape,
+      },
+    },
+    envAllowlist: {
+      PATH_present: "PATH" in process.env,
+      PI_CLI_PATH_present: "PI_CLI_PATH" in process.env,
+      PI_CLI_present: "PI_CLI" in process.env,
+    },
+    error: {
+      code: typeof record?.code === "string" ? record.code : null,
+      message: sanitizeSpawnErrorMessage(err, attempt),
+    },
+    correlationWindowMinutes: 10,
+  };
+}
+
+/**
+ * Best-effort write of WindowsEpermEvidence to disk. Creates
+ * `agent/diagnostics/spawn-eperm/` if needed, writes a JSON file, and
+ * returns the path. Swallows all errors silently — never throws.
+ */
+export async function writeWindowsEpermEvidence(
+  evidence: WindowsEpermEvidence,
+): Promise<string | null> {
+  try {
+    const dir = path.resolve(process.cwd(), "agent", "diagnostics", "spawn-eperm");
+    await mkdir(dir, { recursive: true });
+    const fileName = `spawn-eperm-${evidence.pid}-${Date.now()}.json`;
+    const filePath = path.join(dir, fileName);
+    await writeFile(filePath, JSON.stringify(evidence, null, 2), "utf8");
+    return filePath;
+  } catch {
+    return null;
+  }
 }
 
 // ── Pre-flight provider health checks (F5) ────────────────────────────────
@@ -428,6 +844,8 @@ export async function preflightProviderHealth(
     allowLocalModel: boolean;
     signal?: AbortSignal;
     onProgress?: (text: string) => void;
+    /** Hard wall-clock bound for each provider/model ping. Production default: 20 seconds. */
+    timeoutMs?: number;
   },
 ): Promise<PreflightResult[]> {
   // Dedupe identical provider/model pairs, merging role labels.
@@ -441,6 +859,7 @@ export async function preflightProviderHealth(
   }
 
   const results: PreflightResult[] = [];
+  const timeoutMs = Math.max(1, Math.trunc(options.timeoutMs ?? 20_000));
   const preflightAgents = new Map<string, AgentProfile>([
     ["preflight", { name: "preflight", description: "Provider health ping", tools: [] }],
   ]);
@@ -448,13 +867,25 @@ export async function preflightProviderHealth(
   for (const route of unique.values()) {
     const startedAt = Date.now();
     const label = formatRoutedModel(route.provider, route.model);
-    options.onProgress?.(`Preflight ping: checking ${label} (roles: ${route.roles.join(", ")})...`);
+    options.onProgress?.(`Preflight ping: checking ${label} (roles: ${route.roles.join(", ")}, timeout=${timeoutMs}ms)...`);
+    const pingController = new AbortController();
+    let timedOut = false;
+    const outerAbort = () => pingController.abort();
+    if (options.signal) {
+      if (options.signal.aborted) outerAbort();
+      else options.signal.addEventListener("abort", outerAbort, { once: true });
+    }
+    const timer = setTimeout(() => {
+      timedOut = true;
+      pingController.abort();
+    }, timeoutMs);
+    timer.unref?.();
     try {
       const ping = await spawnSubagent("preflight", "Reply with the single word: pong", {
         agents: preflightAgents,
         cwd: options.cwd,
         allowLocalModel: options.allowLocalModel,
-        signal: options.signal,
+        signal: pingController.signal,
         // Suppress per-spawn progress so preflight lines can never be
         // mistaken for model-routing attestation evidence
         // ("Subagent X: using ...") in the final report.
@@ -470,7 +901,13 @@ export async function preflightProviderHealth(
       });
       options.onProgress?.(`Preflight ping: ${label} healthy (${Date.now() - startedAt}ms, ${ping.events} event(s)).`);
     } catch (err) {
-      const error = parseProviderError(String(err), route.provider, route.model);
+      if (options.signal?.aborted && !timedOut) {
+        throw new Error(`PREFLIGHT ABORTED while checking ${label}.`);
+      }
+      const raw = timedOut
+        ? `PREFLIGHT_TIMEOUT: ${label} timed out after ${timeoutMs}ms`
+        : String(err);
+      const error = parseProviderError(raw, route.provider, route.model);
       results.push({
         roles: route.roles,
         provider: route.provider,
@@ -480,6 +917,9 @@ export async function preflightProviderHealth(
         error,
       });
       options.onProgress?.(`Preflight ping FAILED: ${formatProviderError(error)}`);
+    } finally {
+      clearTimeout(timer);
+      if (options.signal) options.signal.removeEventListener("abort", outerAbort);
     }
   }
 
@@ -637,6 +1077,8 @@ interface ResolvedPiCommand {
   command: string;
   argsPrefix: string[];
   shell?: boolean;
+  env?: NodeJS.ProcessEnv;
+  launchRuntime?: string;
 }
 
 function buildSubagentSystemPrompt(profile: AgentProfile): string {
@@ -707,14 +1149,14 @@ function resolvePiCommand(): ResolvedPiCommand {
 
   const currentCliScript = process.argv[1];
   if (currentCliScript && isExistingPiCliScript(currentCliScript)) {
-    return { command: process.execPath, argsPrefix: [currentCliScript] };
+    return resolvePiChildCommand(currentCliScript, "process.argv[1]");
   }
 
   const cliScript = process.argv.find((arg) => isExistingPiCliScript(arg));
-  if (cliScript) return { command: process.execPath, argsPrefix: [cliScript] };
+  if (cliScript) return resolvePiChildCommand(cliScript, "process.argv");
 
   const installedCliScript = resolveInstalledPiCliScript();
-  if (installedCliScript) return { command: process.execPath, argsPrefix: [installedCliScript] };
+  if (installedCliScript) return resolvePiChildCommand(installedCliScript, "installed Pi CLI");
 
   return process.platform === "win32"
     ? { command: "pi.cmd", argsPrefix: [], shell: true }
@@ -726,8 +1168,8 @@ function resolvePiCliPath(cliPath: string, envName: string): ResolvedPiCommand {
     throw new Error(`${envName} points to a missing Pi CLI path: ${cliPath}`);
   const ext = path.extname(cliPath).toLowerCase();
   if (ext === ".js" || ext === ".mjs" || ext === ".cjs")
-    return { command: process.execPath, argsPrefix: [cliPath] };
-  return { command: cliPath, argsPrefix: [], shell: shouldUseWindowsShell(cliPath) };
+    return resolvePiChildCommand(cliPath, envName);
+  return { command: cliPath, argsPrefix: [], shell: shouldUseWindowsShell(cliPath), launchRuntime: shouldUseWindowsShell(cliPath) ? "shell" : "native" };
 }
 
 function shouldUseWindowsShell(command: string): boolean | undefined {

@@ -1,9 +1,9 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync, type SpawnOptions } from "node:child_process";
 import { createInterface } from "node:readline";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -27,13 +27,31 @@ import {
 } from "./executor-recovery/splitter";
 
 import { buildRecoveryMetadata } from "./executor-recovery/metadata";
+import { RunStateStore, collectSurvivorResult, type LoadedRunState } from "./run-state";
+// Alias registry moved to a leaf module to break the composable-pipeline ->
+// index.ts circular import (WAVE3-SPEC ITEM C). Re-exported below for external
+// callsite stability.
+import { modelAliasFromText, normalizeRoutingText } from "./model-aliases";
+export { modelAliasFromText } from "./model-aliases";
 
 // ── Shape imports (orchestration paradigms) ───────────────────────────
 import { composablePipelineShape } from "./shapes/composable-pipeline";
+import { dualPlanSynthesisExecuteVerifyShape } from "./shapes/dual-plan-synthesis-execute-verify";
+import { evidenceAuditShape } from "./shapes/evidence-audit";
+import { frozenGateFixLoopShape } from "./shapes/frozen-gate-fix-loop";
+import { independentReplicationShape } from "./shapes/independent-replication";
 import { multiVerifyVoteShape } from "./shapes/multi-verify-vote";
+import { paradigmCreatorShape } from "./shapes/paradigm-creator";
 import { planExecuteVerifyShape } from "./shapes/plan-execute-verify";
-import { verifyOnlyShape } from "./shapes/verify-only";
 import { safeGithubPublishShape } from "./shapes/safe-github-publish";
+// shape-builder generated imports:start
+import { preregisteredConcurrencySpikeShape } from "./shapes/preregistered-concurrency-spike";
+import { m66ExplicitRoutingProofShape } from "./shapes/m66-explicit-routing-proof";
+// shape-builder generated imports:end
+import { shapeBuilderShape } from "./shapes/shape-builder";
+import { verifyOnlyShape } from "./shapes/verify-only";
+import { winConsoleSpawnRootCauseShape } from "./shapes/win-console-spawn-root-cause";
+import { winLifecycleProcessTraceShape } from "./shapes/win-lifecycle-process-trace";
 import type {
   OrchestrationShape,
   OrchestrationShapeContext,
@@ -60,15 +78,58 @@ import {
   type ProviderHealthError,
 } from "./judgment";
 
-import { preflightProviderHealth } from "./substrate";
+import {
+  buildWindowsEpermEvidence,
+  buildWindowsEpermSpawnAttempts,
+  formatSpawnAttempt,
+  formatSpawnFailure,
+  isWindowsSpawnEperm,
+  preflightProviderHealth,
+  writeWindowsEpermEvidence,
+  SubagentDetachedError,
+} from "./substrate";
+import { getPiChildFirstJsonTimeoutMs, isPiJsonProtocolEvent, killOwnedProcessTree, resolvePiChildCommand } from "./child-launch.ts";
+
+// ── Orchestration paradigm names (kept in sync with shapeRegistry) ───
+const ORCHESTRATION_PARADIGM_NAMES: readonly string[] = [
+  "plan-execute-verify",
+  "multi-verify-vote",
+  "composable-pipeline",
+  "dual-plan-synthesis-execute-verify",
+  "verify-only",
+  "paradigm-creator",
+  "shape-builder",
+  "win-console-spawn-root-cause",
+  "win-lifecycle-process-trace",
+  "frozen-gate-fix-loop",
+  "evidence-audit",
+  "independent-replication",
+  "safe-github-publish",
+  // shape-builder generated paradigm names:start
+  "preregistered-concurrency-spike",
+  "m66-explicit-routing-proof",
+// shape-builder generated paradigm names:end
+];
 
 // ── Shape registry (maps paradigm names to orchestration shapes) ─────
 const shapeRegistry = new Map<string, OrchestrationShape>([
   ["plan-execute-verify", planExecuteVerifyShape],
   ["multi-verify-vote", multiVerifyVoteShape],
   ["composable-pipeline", composablePipelineShape],
+  ["dual-plan-synthesis-execute-verify", dualPlanSynthesisExecuteVerifyShape],
   ["verify-only", verifyOnlyShape],
+  ["paradigm-creator", paradigmCreatorShape],
+  ["win-console-spawn-root-cause", winConsoleSpawnRootCauseShape],
+  ["win-lifecycle-process-trace", winLifecycleProcessTraceShape],
+  ["frozen-gate-fix-loop", frozenGateFixLoopShape],
+  ["evidence-audit", evidenceAuditShape],
+  ["independent-replication", independentReplicationShape],
   ["safe-github-publish", safeGithubPublishShape],
+  // shape-builder generated registry entries:start
+  ["preregistered-concurrency-spike", preregisteredConcurrencySpikeShape],
+  ["m66-explicit-routing-proof", m66ExplicitRoutingProofShape],
+// shape-builder generated registry entries:end
+  ["shape-builder", shapeBuilderShape],
 ]);
 
 interface AgentProfile {
@@ -104,12 +165,17 @@ interface SubagentResult {
   events: number;
   /** Effect-evidence telemetry: tool executions observed in the child stream. */
   toolCalls?: ToolCallSummary;
+  /** Resolved route that produced this result (residual 2b, mirrors substrate.ts). */
+  provider?: string;
+  model?: string;
 }
 
 interface ResolvedPiCommand {
   command: string;
   argsPrefix: string[];
   shell?: boolean;
+  env?: NodeJS.ProcessEnv;
+  launchRuntime?: string;
 }
 
 interface ExecutorOutput {
@@ -164,6 +230,8 @@ interface RoutingRequirement {
   model?: string;
   essential: boolean;
   source: "explicit_flag" | "natural_language" | "agent_profile" | "inherited";
+  /** Required spawn evidence count for multi-instance core roles. */
+  count?: number;
 }
 
 interface Intake {
@@ -181,6 +249,7 @@ interface Intake {
   ambiguities: string[];
   routingDecision: string;
   routingRequirements: RoutingRequirement[];
+  orchestrationControls: NaturalLanguageOrchestrationControls;
   executorOutputContract?: string;
   /** Provenance of the executor output contract (F6). */
   executorOutputContractSource?: "explicit" | "inferred";
@@ -213,9 +282,15 @@ interface NormalizedParams {
   plannerProvider?: string;
   executorModel?: string;
   executorProvider?: string;
+  /** Alias for executor wave concurrency requested by role-specific controls. */
+  executorConcurrency?: number;
   verifierModel?: string;
   verifierProvider?: string;
   concurrency: number;
+  /** Number of planner subagents to run in parallel before selecting a deterministic plan. */
+  plannerCount: number;
+  /** Number of verifier subagents to run in parallel before deterministic verdict aggregation. */
+  verifierCount: number;
   maxRetries: number;
   maxRetriesExplicit: boolean;
   maxSubagents: number;
@@ -223,6 +298,15 @@ interface NormalizedParams {
   cwd: string;
   allowLocalModel: boolean;
   orchestrationControls: NaturalLanguageOrchestrationControls;
+  /**
+   * NL model routing inferred from the task text, AFTER per-role suppression.
+   * Computed exactly once in normalizeParams: any role carrying an explicit
+   * route param has its NL-inferred route dropped here. Every downstream
+   * consumer (buildRoutingRequirements, the shape context) reuses THIS object
+   * instead of re-running inferModelRoutingFromTask, so a suppressed NL model
+   * can never be recombined with an explicit provider-only override.
+   */
+  inferredRouting: InferredModelRouting;
   paradigm?: string;
   /** Hard-gate mode (F1). Default "advisory". */
   hardGates: HardGatesMode;
@@ -241,8 +325,12 @@ interface OrchestrationState {
   spawnedCount: number;
   plan: Plan | null;
   planText: string;
+  /** All planner outputs for the latest attempt when plannerCount > 1. */
+  plannerOutputs?: SubagentResult[];
   executorOutputs: ExecutorOutput[];
   verifierResult: { status: "pass" | "fail"; reasons: string[]; raw: string } | null;
+  /** Individual verifier outputs for the latest attempt when verifierCount > 1. */
+  verifierResults?: Array<{ agentName: string; status: "pass" | "fail"; reasons: string[]; raw: string }>;
   failureReasons: string[];
   finalResult: string;
   progressLog: string[];
@@ -262,8 +350,10 @@ interface OrchestrationState {
     attempt: number;
     plan: Plan;
     plannerText: string;
+    plannerOutputs?: SubagentResult[];
     executorOutputs: ExecutorOutput[];
     verifierResult: { status: "pass" | "fail"; reasons: string[]; raw: string };
+    verifierResults?: Array<{ agentName: string; status: "pass" | "fail"; reasons: string[]; raw: string }>;
   }>;
   recoveryLog: string[];
   recoveryDepth: number;
@@ -318,11 +408,16 @@ const DEFAULT_MAX_SUBAGENTS = 12;
 const MAX_SUBAGENTS_LIMIT = 100;
 
 const orchestrateParamsSchema = Type.Object({
-  task: Type.String({ description: "Task for deterministic multi-agent orchestration." }),
+  task: Type.Optional(Type.String({ description: "Task for deterministic multi-agent orchestration. Optional when `resume` is provided (the stored task is reused)." })),
+  resume: Type.Optional(Type.String({ description: "Resume a previously aborted run by its run id (e.g. orc-mr3hsj4y-6j3b). Restores checkpointed phases, re-attaches detached survivor subagents, and continues from the first incomplete phase (ABORT-RESUME-DESIGN.md). Supported paradigms: plan-execute-verify, preregistered-concurrency-spike, dual-plan-synthesis-execute-verify, frozen-gate-fix-loop, evidence-audit, independent-replication." })),
   plannerAgent: Type.Optional(Type.String({ default: "planner" })),
   executorAgent: Type.Optional(Type.String({ default: "coder" })),
   verifierAgent: Type.Optional(Type.String({ default: "reviewer" })),
-  concurrency: Type.Optional(Type.Number({ default: 2, minimum: 1, maximum: 8 })),
+  concurrency: Type.Optional(Type.Number({ default: 2, minimum: 1, maximum: 16, description: "Executor concurrency per dependency wave (legacy alias for executorConcurrency)." })),
+  executorConcurrency: Type.Optional(Type.Number({ default: 2, minimum: 1, maximum: 16, description: "Executor concurrency per dependency wave; supports up to 16 simultaneous independent executors." })),
+  executorCount: Type.Optional(Type.Number({ minimum: 1, maximum: 16, description: "Natural alias for executorConcurrency / available executor slots." })),
+  plannerCount: Type.Optional(Type.Number({ default: 1, minimum: 1, maximum: 16, description: "Number of planner subagents to run simultaneously before deterministic plan selection." })),
+  verifierCount: Type.Optional(Type.Number({ default: 1, minimum: 1, maximum: 16, description: "Number of verifier subagents to run simultaneously before deterministic strict aggregation." })),
   maxRetries: Type.Optional(Type.Number({ default: 2, minimum: 0, maximum: 5 })),
   maxSubagents: Type.Optional(Type.Number({ default: DEFAULT_MAX_SUBAGENTS, minimum: 3, maximum: MAX_SUBAGENTS_LIMIT })),
   cwd: Type.Optional(Type.String({ description: "Working directory for spawned Pi subprocesses." })),
@@ -333,7 +428,7 @@ const orchestrateParamsSchema = Type.Object({
   executorProvider: Type.Optional(Type.String({ description: "Override provider for executor agent(s) (e.g. deepseek)." })),
   verifierModel: Type.Optional(Type.String({ description: "Override model for the verifier agent (e.g. gpt-5.5 for thorough review)." })),
   verifierProvider: Type.Optional(Type.String({ description: "Override provider for the verifier agent (e.g. openai-codex)." })),
-  paradigm: Type.Optional(Type.String({ description: "Explicitly select the orchestration paradigm/shape. Valid values: plan-execute-verify, multi-verify-vote, composable-pipeline, verify-only. When omitted, the paradigm is inferred from task keywords." })),
+  paradigm: Type.Optional(Type.String({ description: `Explicitly select the orchestration paradigm/shape. Valid values: ${ORCHESTRATION_PARADIGM_NAMES.join(", ")}. When omitted, the paradigm is inferred from task keywords. V1 paradigm-creator, shape-builder, win-console-spawn-root-cause, and win-lifecycle-process-trace must be selected explicitly.` })),
   hardGates: Type.Optional(Type.String({ description: 'Hard-gate mode: "strict" | "advisory" | "off". Default "advisory": text-shape heuristics are demoted to warnings, the verifier verdict gates, and only effect-based contradictions (zero observed mutations for implementation work) can force FAIL.' })),
   preflight: Type.Optional(Type.Boolean({ description: "Run a 1-token provider health ping for each routed provider/model before spawning any subagent (default true). Failures produce a structured machine-readable error and a partial report." })),
   plannerFallbackModel: Type.Optional(Type.String({ description: "Fallback model(s) for the planner when its primary route fails pre-flight. Comma-separated for a chain (e.g. 'claude-opus-4-20250514,deepseek-v4-pro,deepseek-v4-flash')." })),
@@ -351,9 +446,26 @@ export default function (pi: ExtensionAPI) {
     onUpdate?: (update: unknown) => void,
     ctx?: { cwd?: string; model?: { provider?: string; id?: string } },
   ) {
+    // Resume dispatch (ABORT-RESUME-DESIGN.md): reload the stored run state
+    // and re-dispatch the SAME paradigm with the stored task/params. Caller
+    // params (other than resume) act as overrides.
+    const resumeId = typeof params.resume === "string" && params.resume.trim() ? params.resume.trim() : undefined;
+    let resumeState: LoadedRunState | undefined;
+    if (resumeId) {
+      resumeState = RunStateStore.load(resumeId);
+      const { resume: _resume, ...overrides } = params;
+      params = {
+        ...resumeState.state.params,
+        ...overrides,
+        task: resumeState.state.task,
+        paradigm: resumeState.state.paradigm,
+      };
+    } else if (typeof params.task !== "string" || !params.task.trim()) {
+      throw new Error("orchestrate requires `task` (or `resume` with a stored run id).");
+    }
     const normalized = normalizeParams(params, ctx?.cwd ?? process.cwd());
     const inheritedModel = ctx?.model ? { provider: ctx.model.provider, model: ctx.model.id } : undefined;
-    return runOrchestration(normalized, signal, onUpdate, inheritedModel);
+    return runOrchestration(normalized, signal, onUpdate, inheritedModel, resumeState);
   }
 
   pi.registerTool({
@@ -376,7 +488,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("orchestrate", {
-    description: "Run deterministic planner/executor/verifier orchestration. Flags: --max-subagents N, --max-retries N, --concurrency N, --planner-model, --executor-model, --verifier-model, --planner-fallback-model (comma-sep chain), etc.",
+    description: "Run deterministic planner/executor/verifier orchestration. Flags: --max-subagents N, --max-retries N, --concurrency/--executor-concurrency N, --planner-count N, --verifier-count N, --planner-model, --executor-model, --verifier-model, --planner-fallback-model (comma-sep chain), etc.",
     handler: async (args, ctx) => {
       let commandParams: Record<string, unknown>;
       try {
@@ -541,6 +653,20 @@ function parseOrchestrateCommandArgs(args: string): Record<string, unknown> {
       case "concurrency":
         params.concurrency = parseNumberFlag(`--${flag}`, value);
         break;
+      case "executorConcurrency":
+        params.executorConcurrency = parseNumberFlag(`--${flag}`, value);
+        break;
+      case "executorCount":
+        params.executorCount = parseNumberFlag(`--${flag}`, value);
+        break;
+      case "plannerCount":
+      case "plannerConcurrency":
+        params.plannerCount = parseNumberFlag(`--${flag}`, value);
+        break;
+      case "verifierCount":
+      case "verifierConcurrency":
+        params.verifierCount = parseNumberFlag(`--${flag}`, value);
+        break;
       case "plannerAgent":
         params.plannerAgent = value;
         break;
@@ -596,7 +722,7 @@ function parseOrchestrateCommandArgs(args: string): Record<string, unknown> {
         params.verifierFallbackProvider = value;
         break;
       default:
-        throw new Error(`Unknown flag --${flag}. Supported flags: --max-subagents, --max-retries, --concurrency, --planner-agent, --executor-agent, --verifier-agent, --cwd, --allow-local-model, --paradigm, --hard-gates, --preflight/--no-preflight, --planner-model, --planner-provider, --executor-model, --executor-provider, --verifier-model, --verifier-provider, --planner-fallback-model, --planner-fallback-provider, --executor-fallback-model, --executor-fallback-provider, --verifier-fallback-model, --verifier-fallback-provider. Fallback params accept comma-separated chains (e.g. --planner-fallback-model opus,deepseek-v4-pro,deepseek-v4-flash).`);
+        throw new Error(`Unknown flag --${flag}. Supported flags: --max-subagents, --max-retries, --concurrency, --executor-concurrency, --executor-count, --planner-count, --planner-concurrency, --verifier-count, --verifier-concurrency, --planner-agent, --executor-agent, --verifier-agent, --cwd, --allow-local-model, --paradigm, --hard-gates, --preflight/--no-preflight, --planner-model, --planner-provider, --executor-model, --executor-provider, --verifier-model, --verifier-provider, --planner-fallback-model, --planner-fallback-provider, --executor-fallback-model, --executor-fallback-provider, --verifier-fallback-model, --verifier-fallback-provider. Fallback params accept comma-separated chains (e.g. --planner-fallback-model opus,deepseek-v4-pro,deepseek-v4-flash).`);
     }
   }
 
@@ -648,28 +774,55 @@ function splitCommandLine(input: string): string[] {
 function normalizeParams(params: Record<string, unknown>, defaultCwd: string): NormalizedParams {
   const task = String(params.task ?? "").trim();
   if (!task) throw new Error("orchestrate requires a non-empty task.");
-  const inferredRouting = inferModelRoutingFromTask(task);
-  const orchestrationControls = inferOrchestrationControlsFromTask(task, params, inferredRouting);
+  const inferredRoutingRaw = inferModelRoutingFromTask(task);
+  const orchestrationControls = inferOrchestrationControlsFromTask(task, params, inferredRoutingRaw);
+
+  // BUG FIX (2026-07-02, natural-language-route-parser-hijacks-roles-from-task-prose.md):
+  // When ANY explicit route param is present for a role, natural-language route
+  // extraction is fully SUPPRESSED for that role — explicit params always win,
+  // and prose can never fill the un-set side of an explicitly-routed role.
+  //
+  // The suppression is applied ONCE here and stored on NormalizedParams
+  // (`inferredRouting`) so buildRoutingRequirements and the shape context reuse
+  // the SAME filtered object. Previously buildRoutingRequirements re-ran
+  // inferModelRoutingFromTask and could recombine a suppressed NL model with an
+  // explicit provider-only override (e.g. executorProvider set + prose model),
+  // producing a false routing requirement / 404 preflight.
+  const plannerExplicit = optionalString(params.plannerModel) !== undefined || optionalString(params.plannerProvider) !== undefined;
+  const executorExplicit = optionalString(params.executorModel) !== undefined || optionalString(params.executorProvider) !== undefined;
+  const verifierExplicit = optionalString(params.verifierModel) !== undefined || optionalString(params.verifierProvider) !== undefined;
+  const inferredRouting: InferredModelRouting = {
+    ...inferredRoutingRaw,
+    planner: plannerExplicit ? undefined : inferredRoutingRaw.planner,
+    executor: executorExplicit ? undefined : inferredRoutingRaw.executor,
+    verifier: verifierExplicit ? undefined : inferredRoutingRaw.verifier,
+  };
+  const nlPlanner = inferredRouting.planner;
+  const nlExecutor = inferredRouting.executor;
+  const nlVerifier = inferredRouting.verifier;
 
   return {
     task,
     plannerAgent: stringParam(params.plannerAgent, "planner"),
     executorAgent: stringParam(params.executorAgent, "coder"),
     verifierAgent: stringParam(params.verifierAgent, "reviewer"),
-    concurrency: clampInt(params.concurrency ?? orchestrationControls.concurrency, 2, 1, 16),
+    concurrency: clampInt(params.executorConcurrency ?? params.executorCount ?? params.concurrency ?? orchestrationControls.executorConcurrency ?? orchestrationControls.executorCount ?? orchestrationControls.concurrency, 2, 1, 16),
+    plannerCount: clampInt(params.plannerCount ?? orchestrationControls.plannerCount, 1, 1, 16),
+    verifierCount: clampInt(params.verifierCount ?? orchestrationControls.verifierCount, 1, 1, 16),
     maxRetries: clampInt(params.maxRetries ?? orchestrationControls.maxRetries ?? (orchestrationControls.maxAttempts !== undefined ? orchestrationControls.maxAttempts - 1 : undefined), 2, 0, 5),
     maxRetriesExplicit: params.maxRetries !== undefined || orchestrationControls.maxAttempts !== undefined || orchestrationControls.maxRetries !== undefined,
     maxSubagents: clampInt(params.maxSubagents ?? orchestrationControls.maxSubagents, DEFAULT_MAX_SUBAGENTS, 3, MAX_SUBAGENTS_LIMIT),
     maxSubagentsExplicit: params.maxSubagents !== undefined || orchestrationControls.maxSubagents !== undefined,
     cwd: stringParam(params.cwd, defaultCwd),
     allowLocalModel: typeof params.allowLocalModel === "boolean" ? params.allowLocalModel : false,
-    plannerModel: optionalString(params.plannerModel) ?? inferredRouting.planner?.model,
-    plannerProvider: optionalString(params.plannerProvider) ?? inferredRouting.planner?.provider,
-    executorModel: optionalString(params.executorModel) ?? inferredRouting.executor?.model,
-    executorProvider: optionalString(params.executorProvider) ?? inferredRouting.executor?.provider,
-    verifierModel: optionalString(params.verifierModel) ?? inferredRouting.verifier?.model,
-    verifierProvider: optionalString(params.verifierProvider) ?? inferredRouting.verifier?.provider,
+    plannerModel: optionalString(params.plannerModel) ?? nlPlanner?.model,
+    plannerProvider: optionalString(params.plannerProvider) ?? nlPlanner?.provider,
+    executorModel: optionalString(params.executorModel) ?? nlExecutor?.model,
+    executorProvider: optionalString(params.executorProvider) ?? nlExecutor?.provider,
+    verifierModel: optionalString(params.verifierModel) ?? nlVerifier?.model,
+    verifierProvider: optionalString(params.verifierProvider) ?? nlVerifier?.provider,
     orchestrationControls,
+    inferredRouting,
     paradigm: typeof params.paradigm === "string" ? params.paradigm : undefined,
     hardGates: normalizeHardGatesMode(params.hardGates),
     preflight: typeof params.preflight === "boolean" ? params.preflight : true,
@@ -687,8 +840,13 @@ async function runOrchestration(
   signal?: AbortSignal,
   onUpdate?: (update: unknown) => void,
   inheritedModel?: { provider?: string; model?: string },
+  resumeState?: LoadedRunState,
 ) {
   const agents = await loadAgents();
+  // Named orchestration roles resolve from their agent profile and the current
+  // Pi default route. They must not silently inherit the conversational model.
+  resolveConfiguredRoleDefaults(params, agents);
+  inheritedModel = undefined;
 
   // ── Run/judgment state is created up-front so even early failures
   //    (pre-flight, planning) ALWAYS yield a partial report (F5). ────────
@@ -704,7 +862,7 @@ async function runOrchestration(
     progressLog: [],
     intake: null,
     routingCheck: null,
-    runId: `orc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+    runId: resumeState?.state.runId ?? `orc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
     gateWarnings: [],
     taskLedger: new Map(),
     commitEvidence: [],
@@ -722,6 +880,14 @@ async function runOrchestration(
 
   const paradigm = inferOrchestrationParadigm(params);
   emit(`Run ${state.runId}: paradigm=${paradigm}, hardGates=${params.hardGates}, preflight=${params.preflight}.`);
+  const plannerSelected = resolveNamedRoleRoute(agents, params.plannerAgent, params.plannerModel, params.plannerProvider);
+  const executorSelected = resolveNamedRoleRoute(agents, params.executorAgent, params.executorModel, params.executorProvider);
+  const verifierSelected = resolveNamedRoleRoute(agents, params.verifierAgent, params.verifierModel, params.verifierProvider);
+  emit(
+    `Selected routes before preflight: planner=${formatRoutedModel(plannerSelected.provider, plannerSelected.model)}, ` +
+      `executor=${formatRoutedModel(executorSelected.provider, executorSelected.model)}, ` +
+      `verifier=${formatRoutedModel(verifierSelected.provider, verifierSelected.model)}.`,
+  );
 
   try {
   // ── Pre-flight provider health checks (F5) ──────────────────────────
@@ -738,7 +904,9 @@ async function runOrchestration(
       );
     }
 
-    const inferredModelRouting = inferModelRoutingFromTask(params.task);
+    // Reuse the suppressed routing from normalizeParams so shapes never see an
+    // NL route for a role that carried an explicit override param.
+    const inferredModelRouting = params.inferredRouting ?? inferModelRoutingFromTask(params.task);
     const context: OrchestrationShapeContext = {
       params,
       signal,
@@ -746,12 +914,19 @@ async function runOrchestration(
       inheritedModel,
       agents,
       inferredModelRouting,
+      runId: state.runId,
+      resumeState,
     };
 
-    const emit = (text: string) => {
+    const emitShape = (text: string) => {
       onUpdate?.({ content: [{ type: "text", text }] });
     };
-    emit(`[orchestrate] Dispatching to "${paradigm}" shape…`);
+    if (resumeState) {
+      emitShape(`[orchestrate] RESUME of run ${resumeState.state.runId}: ` +
+        `${resumeState.state.phases.filter((p) => p.status === "done").length} phase(s) checkpointed, ` +
+        `${resumeState.state.phases.filter((p) => p.status === "detached").length} detached survivor(s).`);
+    }
+    emitShape(`[orchestrate] Dispatching to "${paradigm}" shape…`);
 
     const result: OrchestrationShapeResult = await shape.run(context);
     emit(`[orchestrate] "${paradigm}" shape completed.`);
@@ -770,30 +945,189 @@ async function runOrchestration(
   }
   const maxAttempts = params.maxRetries + 1;
 
+  // ── Checkpoint/resume wiring (ABORT-RESUME-DESIGN.md) ───────────────────
+  // Phases are NAME-keyed so the executor phase can be split PER TASK
+  // (attempt-N-executor-<taskId>), each spawned in abort-survivor mode and each
+  // checkpointed with its resolved provider/model. Planner and verifier remain
+  // single per-attempt phases (attempt-N-planner / attempt-N-verifier). Phase
+  // indices are allocated deterministically in first-touch order; on resume they
+  // are recovered by NAME from the persisted state.json so they line up with the
+  // checkpoints/survivors already on disk (even the pre-any-phase abort edge,
+  // production run orc-mr3x90b5-00iz). On resume, completed phases are RESTORED
+  // (not re-spawned) and a detached survivor is re-attached via bounded polling.
+  const pevStore = resumeState
+    ? RunStateStore.open(resumeState.state.runId)
+    : RunStateStore.create(state.runId, "plan-execute-verify", params.task, JSON.parse(JSON.stringify(params)) as Record<string, unknown>, []);
+  const pevPhaseIndex = new Map<string, number>();
+  let pevNextIndex = 0;
+  for (const phase of resumeState?.state.phases ?? []) {
+    pevPhaseIndex.set(phase.name, phase.index);
+    pevNextIndex = Math.max(pevNextIndex, phase.index + 1);
+  }
+  const pevIndexOf = (name: string): number => {
+    let idx = pevPhaseIndex.get(name);
+    if (idx === undefined) { idx = pevNextIndex++; pevPhaseIndex.set(name, idx); }
+    return idx;
+  };
+  const pevRestore = <T,>(name: string): T | undefined => {
+    const idx = pevPhaseIndex.get(name);
+    return idx === undefined ? undefined : (resumeState?.checkpoints.get(idx) as unknown as T | undefined);
+  };
+  const pevCheckpoint = (name: string, result: unknown, route?: { provider?: string; model?: string }): void => {
+    // Every checkpointed result carries its resolved provider/model so a resumed
+    // run can see exactly which route produced each phase. This applies to BOTH
+    // single-spawn/per-task objects AND verifier ARRAY checkpoints (residual 2a);
+    // the route is only ever ADDED, never allowed to overwrite an already-resolved
+    // provider/model with undefined (empty {} routes must not strip metadata).
+    const stamp = (item: unknown): unknown =>
+      item && typeof item === "object" && !Array.isArray(item)
+        ? {
+            ...(item as Record<string, unknown>),
+            provider: route?.provider ?? (item as { provider?: unknown }).provider,
+            model: route?.model ?? (item as { model?: unknown }).model,
+          }
+        : item;
+    const payload = Array.isArray(result)
+      ? result.map(stamp)
+      : result
+        ? stamp(result)
+        : result;
+    pevStore.checkpointPhase(pevIndexOf(name), name, payload as unknown as SubagentResult);
+  };
+  const pevSurvival = (name: string) => {
+    const idx = pevIndexOf(name);
+    return {
+      resultFile: pevStore.survivorResultPath(idx, name),
+      manifestFile: pevStore.survivorManifestPath(idx, name),
+      phaseName: name,
+      phaseIndex: idx,
+    };
+  };
+  const pevCollectSurvivor = async <T,>(name: string): Promise<T | undefined> => {
+    const idx = pevPhaseIndex.get(name);
+    if (idx === undefined) return undefined;
+    const survivor = resumeState?.survivors.get(idx);
+    if (!survivor) return undefined;
+    const collected = await collectSurvivorResult<T>(survivor, emit, signal, "plan-execute-verify");
+    if (collected) pevCheckpoint(name, collected);
+    return collected;
+  };
+  // Executor-task survivor: the abort-survivor writer persists a raw SubagentResult,
+  // so collect it WITHOUT auto-checkpointing (the generic collector stores the raw
+  // object), convert to an ExecutorOutput, then checkpoint that with the route.
+  const pevCollectExecutorSurvivor = async (name: string, task: PlanTask): Promise<ExecutorOutput | undefined> => {
+    const idx = pevPhaseIndex.get(name);
+    if (idx === undefined) return undefined;
+    const survivor = resumeState?.survivors.get(idx);
+    if (!survivor) return undefined;
+    const collected = await collectSurvivorResult<SubagentResult>(survivor, emit, signal, "plan-execute-verify");
+    if (!collected) return undefined;
+    const out = executorOutputFromSubagent(task, collected);
+    pevCheckpoint(name, out, toModelOverride(params.executorModel, params.executorProvider));
+    return out;
+  };
+  const pevDetachGuard = (name: string, error: unknown): never => {
+    if (error instanceof SubagentDetachedError) {
+      pevStore.markDetached(pevIndexOf(name), name, error.manifest);
+      throw new Error(
+        `Orchestration aborted mid-phase but the ${name} subagent (pid=${error.manifest.pid}) ` +
+          `continues in the background. Resume this run by re-invoking the orchestrate tool with { resume: "${pevStore.runId}" }. ` +
+          `Completed phases are checkpointed and will not be re-executed.`,
+      );
+    }
+    throw error as Error;
+  };
+
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     throwIfAborted(signal);
     state.attempt = attempt;
     emit(`Orchestration attempt ${attempt}/${maxAttempts}: planning...`);
     const preAttemptHead = gitHeadHash(params.cwd);
+    const plannerName = `attempt-${attempt}-planner`;
+    const verifierName = `attempt-${attempt}-verifier`;
+    const executorTaskName = (taskId: string) => `attempt-${attempt}-executor-${taskId}`;
 
     const completedTasks = [...state.taskLedger.values()].filter((entry) => entry.verdict === "passed");
     const plannerPrompt = buildPlanningPrompt(state.intake, attempt, state.failureReasons, completedTasks);
-    const planner = await spawnChecked(state, params, agents, params.plannerAgent, plannerPrompt, signal, emit, inheritedModel, toModelOverride(params.plannerModel, params.plannerProvider));
+    const plannerRoute = toModelOverride(params.plannerModel, params.plannerProvider);
+    let plannerOutputs: SubagentResult[];
+    let planner: SubagentResult;
+    let selectedPlannerIndex = 0;
+    const restoredPlanner = pevRestore<SubagentResult>(plannerName) ?? (await pevCollectSurvivor<SubagentResult>(plannerName));
+    if (restoredPlanner) {
+      emit(`Attempt ${attempt}: planner phase restored from checkpoint (resume) — skipping re-spawn.`);
+      planner = restoredPlanner;
+      plannerOutputs = [planner];
+      state.plannerOutputs = plannerOutputs;
+    } else {
+      emit(`Attempt ${attempt}: spawning ${params.plannerCount} planner subagent(s) in parallel...`);
+      const plannerJobs = Array.from({ length: params.plannerCount }, (_unused, index) => index);
+      // Per-child survivor/checkpoint names so a mid-phase abort during a
+      // MULTI-planner phase (plannerCount>1) can detach and later re-attach each
+      // individual planner survivor. For plannerCount===1 the child name collapses
+      // to the phase name, preserving the single-spawn checkpoint semantics.
+      const plannerChildName = (i: number) => (params.plannerCount === 1 ? plannerName : `${plannerName}-${i}`);
+      try {
+        plannerOutputs = await runBoundedPool(plannerJobs, params.plannerCount, signal, async (plannerIndex, _index, workerSignal) => {
+          const childName = plannerChildName(plannerIndex);
+          // Resume path 1: completed per-child checkpoint — restore without re-spawn.
+          const restoredChild = pevRestore<SubagentResult>(childName);
+          if (restoredChild && !Array.isArray(restoredChild)) {
+            emit(`Attempt ${attempt}: planner instance ${plannerIndex + 1}/${params.plannerCount} restored from checkpoint (resume) — skipping re-spawn.`);
+            return restoredChild;
+          }
+          // Resume path 2: detached survivor for this planner child — collect or respawn.
+          const survivorChild = await pevCollectSurvivor<SubagentResult>(childName);
+          if (survivorChild) {
+            emit(`Attempt ${attempt}: planner instance ${plannerIndex + 1}/${params.plannerCount} survivor collected (resume) — skipping re-spawn.`);
+            return survivorChild;
+          }
+          const prompt = params.plannerCount > 1
+            ? `${plannerPrompt}\n\nPlanner instance ${plannerIndex + 1}/${params.plannerCount}: produce an independent tiny plan. The orchestrator will deterministically select the lowest-index parseable plan; do not coordinate with other planners.`
+            : plannerPrompt;
+          let out: SubagentResult;
+          try {
+            out = await spawnChecked(state, params, agents, params.plannerAgent, prompt, workerSignal, emit, inheritedModel, plannerRoute, pevSurvival(childName));
+          } catch (error) {
+            pevDetachGuard(childName, error);
+            throw error;
+          }
+          pevCheckpoint(childName, out, plannerRoute);
+          return out;
+        });
+      } catch (error) {
+        pevDetachGuard(plannerName, error);
+        throw error;
+      }
+      state.plannerOutputs = plannerOutputs;
+      selectedPlannerIndex = selectPlannerOutputIndex(plannerOutputs, params.task);
+      planner = plannerOutputs[selectedPlannerIndex];
+      pevCheckpoint(plannerName, planner, plannerRoute ?? {});
+    }
     state.planText = planner.text;
     let plan = parsePlan(planner.text, params.task);
     plan = enforceTaskSizeCap(plan, computeAdaptiveTaskSizeCap(params.executorModel));
+    const planRoleControls = extractPlanRoleControls(plan);
+    const executorConcurrency = clampInt(planRoleControls.executorConcurrency ?? params.concurrency, params.concurrency, 1, 16);
+    const verifierCount = clampInt(planRoleControls.verifierCount ?? params.verifierCount, params.verifierCount, 1, 16);
     const executionWaves = buildExecutionWaves(plan);
     state.plan = plan;
 
+    if (params.plannerCount > 1) {
+      emit(`Attempt ${attempt}: selected planner ${selectedPlannerIndex + 1}/${plannerOutputs.length} by deterministic lowest-index parseable-plan rule.`);
+    }
+    if (planRoleControls.executorConcurrency || planRoleControls.verifierCount) {
+      emit(`Planner-supplied role controls applied: executorConcurrency=${executorConcurrency}, verifierCount=${verifierCount}.`);
+    }
     const taskAssignments = plan.tasks.map((t) => `${t.id}=${t.description}`).join("; ");
     emit(`Plan tasks: ${taskAssignments}`);
 
-    const requiredBudget = computeRequiredSubagentBudget(state.spawnedCount, plan.tasks.length, attempt, maxAttempts);
+    const requiredBudget = computeRequiredSubagentBudget(state.spawnedCount, plan.tasks.length, attempt, maxAttempts, params.plannerCount, verifierCount);
     if (!params.maxSubagentsExplicit && requiredBudget > params.maxSubagents) {
       const previous = params.maxSubagents;
       params.maxSubagents = Math.min(requiredBudget, MAX_SUBAGENTS_LIMIT);
       emit(
-        `Auto-raised maxSubagents from ${previous} to ${params.maxSubagents} based on plan size (${plan.tasks.length} executor task(s)) and retry budget (${maxAttempts} attempt(s)).`,
+        `Auto-raised maxSubagents from ${previous} to ${params.maxSubagents} based on plan size (${plan.tasks.length} executor task(s)), plannerCount=${params.plannerCount}, verifierCount=${verifierCount}, and retry budget (${maxAttempts} attempt(s)).`,
       );
       if (requiredBudget > MAX_SUBAGENTS_LIMIT) {
         emit(`Required subagent budget ${requiredBudget} exceeds hard safety limit ${MAX_SUBAGENTS_LIMIT}; orchestration may still stop if the ceiling is reached.`);
@@ -803,22 +1137,48 @@ async function runOrchestration(
     }
 
     const remainingAfterPlan = params.maxSubagents - state.spawnedCount;
-    const neededForExecutionAndVerify = plan.tasks.length + 1;
+    const neededForExecutionAndVerify = plan.tasks.length + verifierCount;
     if (neededForExecutionAndVerify > remainingAfterPlan) {
       throw new Error(
         `Subagent ceiling exceeded after planning: need ${neededForExecutionAndVerify} more spawn(s), remaining ${remainingAfterPlan}, maxSubagents=${params.maxSubagents}. Try /orchestrate --max-subagents ${requiredBudget} ... or reduce --max-retries.`,
       );
     }
 
-    emit(`Attempt ${attempt}: executing ${plan.tasks.length} task(s) across ${executionWaves.length} dependency wave(s) with concurrency ${params.concurrency}...`);
-    const executorOutputs = await runExecutorTasksInWaves(
+    // Executor phase is checkpointed PER TASK (attempt-N-executor-<taskId>). Each
+    // task spawn runs in abort-survivor mode and its output is checkpointed with the
+    // resolved executor provider/model, so a mid-execution abort can resume without
+    // re-running already-completed tasks and without losing detached survivors.
+    const executorRoute = toModelOverride(params.executorModel, params.executorProvider);
+    emit(`Attempt ${attempt}: executing ${plan.tasks.length} task(s) across ${executionWaves.length} dependency wave(s) with executor concurrency ${executorConcurrency}...`);
+    const executorOutputs: ExecutorOutput[] = await runExecutorTasksInWaves(
       executionWaves,
-      params.concurrency,
+      executorConcurrency,
       signal,
       async (task, _index, workerSignal) => {
-        return executeExecutorTaskWithRecovery(
-          state, params, agents, task, plan, workerSignal, emit, inheritedModel,
-        );
+        const taskName = executorTaskName(task.id);
+        // Resume path 1: completed per-task checkpoint — restore without re-execution.
+        const restoredTask = pevRestore<ExecutorOutput>(taskName);
+        if (restoredTask && !Array.isArray(restoredTask)) {
+          emit(`Attempt ${attempt}: executor task ${task.id} restored from checkpoint (resume) — skipping re-execution.`);
+          return restoredTask;
+        }
+        // Resume path 2: detached survivor for this task — collect or respawn.
+        const survivorOut = await pevCollectExecutorSurvivor(taskName, task);
+        if (survivorOut) {
+          emit(`Attempt ${attempt}: executor task ${task.id} survivor collected (resume) — skipping re-execution.`);
+          return survivorOut;
+        }
+        let out: ExecutorOutput;
+        try {
+          out = await executeExecutorTaskWithRecovery(
+            state, params, agents, task, plan, workerSignal, emit, inheritedModel, pevSurvival(taskName),
+          );
+        } catch (error) {
+          pevDetachGuard(taskName, error);
+          throw error;
+        }
+        pevCheckpoint(taskName, out, executorRoute);
+        return out;
       },
     );
     state.executorOutputs = executorOutputs;
@@ -862,7 +1222,8 @@ async function runOrchestration(
         verifierResult.reasons.push(...state.routingCheck.reasons.map((reason) => `Deterministic model routing check failed: ${reason}`));
       }
       state.verifierResult = verifierResult;
-      state.attempts.push({ attempt, plan, plannerText: planner.text, executorOutputs, verifierResult });
+      state.verifierResults = [];
+      state.attempts.push({ attempt, plan, plannerText: planner.text, plannerOutputs, executorOutputs, verifierResult, verifierResults: [] });
       state.failureReasons.push(...verifierResult.reasons.map((reason) => `Attempt ${attempt}: ${reason}`));
       updateTaskLedgerFromFailure(state, plan, executorOutputs, verifierResult.reasons, attempt, emit);
 
@@ -873,10 +1234,64 @@ async function runOrchestration(
       continue;
     }
 
-    emit(`Attempt ${attempt}: verifying executor outputs...`);
-    const verifierPrompt = buildVerificationPrompt(state.intake!, plan, executorOutputs, buildRoutingEvidenceForVerifier(params, state), artifactEvidence.summary);
-    const verifier = await spawnChecked(state, params, agents, params.verifierAgent, verifierPrompt, signal, emit, inheritedModel, toModelOverride(params.verifierModel, params.verifierProvider));
-    const verifierResult = parseVerifierResult(verifier.text);
+    const verifierRoute = toModelOverride(params.verifierModel, params.verifierProvider);
+    let verifierOutputs: SubagentResult[];
+    const restoredVerifier = pevRestore<SubagentResult[]>(verifierName);
+    if (restoredVerifier && Array.isArray(restoredVerifier)) {
+      emit(`Attempt ${attempt}: verifier phase restored from checkpoint (resume) — skipping re-spawn.`);
+      verifierOutputs = restoredVerifier;
+    } else {
+      emit(`Attempt ${attempt}: verifying executor outputs with ${verifierCount} verifier subagent(s) in parallel...`);
+      const verifierPrompt = buildVerificationPrompt(state.intake!, plan, executorOutputs, buildRoutingEvidenceForVerifier(params, state), artifactEvidence.summary);
+      const verifierJobs = Array.from({ length: verifierCount }, (_unused, index) => index);
+      // Per-child survivor/checkpoint names so a mid-phase abort during a
+      // MULTI-verifier phase (verifierCount>1) can detach and re-attach each
+      // individual verifier survivor. For verifierCount===1 the child name
+      // collapses to the phase name; the phase-level checkpoint (an array,
+      // written after the pool) then overwrites it, preserving prior semantics.
+      const verifierChildName = (i: number) => (verifierCount === 1 ? verifierName : `${verifierName}-${i}`);
+      try {
+        verifierOutputs = await runBoundedPool(verifierJobs, verifierCount, signal, async (verifierIndex, _index, workerSignal) => {
+          const childName = verifierChildName(verifierIndex);
+          // Resume path 1: completed per-child checkpoint — restore without re-spawn.
+          const restoredChild = pevRestore<SubagentResult>(childName);
+          if (restoredChild && !Array.isArray(restoredChild)) {
+            emit(`Attempt ${attempt}: verifier instance ${verifierIndex + 1}/${verifierCount} restored from checkpoint (resume) — skipping re-spawn.`);
+            return restoredChild;
+          }
+          // Resume path 2: detached survivor for this verifier child — collect or respawn.
+          const survivorChild = await pevCollectSurvivor<SubagentResult>(childName);
+          if (survivorChild) {
+            emit(`Attempt ${attempt}: verifier instance ${verifierIndex + 1}/${verifierCount} survivor collected (resume) — skipping re-spawn.`);
+            return survivorChild;
+          }
+          const prompt = verifierCount > 1
+            ? `${verifierPrompt}\n\nVerifier instance ${verifierIndex + 1}/${verifierCount}: independently verify. The orchestrator aggregates with strict consensus: any FAIL makes the aggregate FAIL.`
+            : verifierPrompt;
+          let out: SubagentResult;
+          try {
+            out = await spawnChecked(state, params, agents, params.verifierAgent, prompt, workerSignal, emit, inheritedModel, verifierRoute, pevSurvival(childName));
+          } catch (error) {
+            pevDetachGuard(childName, error);
+            throw error;
+          }
+          pevCheckpoint(childName, out, verifierRoute);
+          return out;
+        });
+      } catch (error) {
+        pevDetachGuard(verifierName, error);
+        throw error;
+      }
+      pevCheckpoint(verifierName, verifierOutputs, verifierRoute ?? {});
+    }
+    const verifierResults = verifierOutputs.map((verifierOutput, index) => ({
+      agentName: verifierOutput.agentName,
+      ...parseVerifierResult(verifierOutput.text),
+      raw: verifierOutput.text,
+      reasons: parseVerifierResult(verifierOutput.text).reasons.map((reason) => verifierCount > 1 ? `verifier-${index + 1}: ${reason}` : reason),
+    }));
+    state.verifierResults = verifierResults;
+    const verifierResult = aggregateVerifierResults(verifierResults);
     state.routingCheck = checkRequiredModelRouting(params, state);
     if (verifierResult.status === "pass" && state.routingCheck.status === "fail") {
       verifierResult.status = "fail";
@@ -904,7 +1319,7 @@ async function runOrchestration(
     }
     state.verifierResult = verifierResult;
 
-    state.attempts.push({ attempt, plan, plannerText: planner.text, executorOutputs, verifierResult });
+    state.attempts.push({ attempt, plan, plannerText: planner.text, plannerOutputs, executorOutputs, verifierResult, verifierResults });
 
     if (verifierResult.status === "pass") {
       for (const output of executorOutputs) {
@@ -965,6 +1380,14 @@ async function runOrchestration(
  * run with a structured machine-readable error (and a partial report).
  * Pings do not count against the maxSubagents budget.
  */
+const PREFLIGHT_PING_TIMEOUT_MS = 20_000;
+const PREFLIGHT_TOTAL_TIMEOUT_MS = 75_000;
+
+function preflightBoundFromEnv(name: string, productionDefault: number): number {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : productionDefault;
+}
+
 async function runProviderPreflight(
   params: NormalizedParams,
   agents: Map<string, AgentProfile>,
@@ -972,6 +1395,15 @@ async function runProviderPreflight(
   signal: AbortSignal | undefined,
   emit: (text: string) => void,
 ): Promise<void> {
+  const perPingTimeoutMs = preflightBoundFromEnv("ORCHESTRATE_PREFLIGHT_TIMEOUT_MS", PREFLIGHT_PING_TIMEOUT_MS);
+  const totalTimeoutMs = preflightBoundFromEnv("ORCHESTRATE_PREFLIGHT_TOTAL_TIMEOUT_MS", PREFLIGHT_TOTAL_TIMEOUT_MS);
+  const deadline = Date.now() + totalTimeoutMs;
+  const remainingTimeout = () => {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error(`PREFLIGHT TOTAL TIMEOUT after ${totalTimeoutMs}ms (primary/fallback budget exhausted).`);
+    return Math.min(perPingTimeoutMs, remaining);
+  };
+
   const resolveRoute = (agentName: string, model?: string, provider?: string) => {
     const profile = agents.get(agentName);
     return {
@@ -1033,7 +1465,13 @@ async function runProviderPreflight(
 
   const results = await preflightProviderHealth(
     roles.map((role) => ({ roles: [role.role], provider: role.provider, model: role.model })),
-    { cwd: params.cwd, allowLocalModel: params.allowLocalModel, signal, onProgress: emit },
+    {
+      cwd: params.cwd,
+      allowLocalModel: params.allowLocalModel,
+      signal,
+      onProgress: emit,
+      timeoutMs: remainingTimeout(),
+    },
   );
 
   const unrecovered: ProviderHealthError[] = [];
@@ -1057,7 +1495,13 @@ async function runProviderPreflight(
           emit(`Preflight: ${roleName} trying fallback ${i + 1}/${chain.length}: ${fbLabel}...`);
           const fbResults = await preflightProviderHealth(
             [{ roles: [roleName], provider: fb.provider, model: fb.model }],
-            { cwd: params.cwd, allowLocalModel: params.allowLocalModel, signal, onProgress: emit },
+            {
+              cwd: params.cwd,
+              allowLocalModel: params.allowLocalModel,
+              signal,
+              onProgress: emit,
+              timeoutMs: remainingTimeout(),
+            },
           );
           if (fbResults[0]?.ok) {
             role.applyFallback(fb.model, fb.provider);
@@ -1098,10 +1542,17 @@ async function runProviderPreflight(
   emit(`Preflight: all ${roles.length} routed role route(s) healthy.`);
 }
 
-function computeRequiredSubagentBudget(spawnedThroughCurrentPlanner: number, executorTaskCount: number, currentAttempt: number, maxAttempts: number): number {
-  const finishCurrentAttempt = executorTaskCount + 1; // executors + verifier; current planner already spawned.
+function computeRequiredSubagentBudget(
+  spawnedThroughCurrentPlanner: number,
+  executorTaskCount: number,
+  currentAttempt: number,
+  maxAttempts: number,
+  plannerCount = 1,
+  verifierCount = 1,
+): number {
+  const finishCurrentAttempt = executorTaskCount + verifierCount; // current planner batch already spawned.
   const remainingAttempts = Math.max(0, maxAttempts - currentAttempt);
-  const fullFutureAttempt = executorTaskCount + 2; // planner + executors + verifier.
+  const fullFutureAttempt = plannerCount + executorTaskCount + verifierCount;
   return spawnedThroughCurrentPlanner + finishCurrentAttempt + remainingAttempts * fullFutureAttempt;
 }
 
@@ -1237,6 +1688,26 @@ function ledgerArtifactsStillPresent(entry: TaskLedgerEntry, cwd: string): boole
  *   Tier 4 — Replan-with-learning (REPLAN): add recovery metadata to
  *           failureReasons so the next planner attempt can adapt.
  */
+/**
+ * Build a minimal ExecutorOutput from a raw SubagentResult. Used when a detached
+ * executor-task survivor is collected on resume (the abort-survivor writer only
+ * persists the raw SubagentResult, not the wrapped ExecutorOutput).
+ */
+function executorOutputFromSubagent(task: PlanTask, result: SubagentResult): ExecutorOutput {
+  return {
+    taskId: task.id,
+    description: task.description,
+    agentName: result.agentName,
+    output: result.text,
+    stderr: result.stderr || undefined,
+    exitCode: result.exitCode,
+    durationMs: result.durationMs,
+    truncated: result.truncated,
+    contextExhaustionSignal: result.contextExhaustionSignal,
+    toolCalls: result.toolCalls,
+  };
+}
+
 async function executeExecutorTaskWithRecovery(
   state: OrchestrationState,
   params: NormalizedParams,
@@ -1246,6 +1717,12 @@ async function executeExecutorTaskWithRecovery(
   signal: AbortSignal | undefined,
   emit: (text: string) => void,
   inheritedModel: { provider?: string; model?: string } | undefined,
+  survival?: {
+    resultFile: string;
+    manifestFile: string;
+    phaseName?: string;
+    phaseIndex?: number;
+  },
 ): Promise<ExecutorOutput> {
   // ── F2 retry targeting: reuse previously-passed task outputs ──────────
   const ledgerEntry = state.taskLedger.get(task.id);
@@ -1315,8 +1792,14 @@ async function executeExecutorTaskWithRecovery(
     result = await spawnChecked(
       state, params, agents, params.executorAgent, prompt, signal, emit,
       inheritedModel, toModelOverride(params.executorModel, params.executorProvider),
+      survival,
     );
   } catch (err) {
+    // A mid-phase abort in abort-survivor mode detaches the child and rejects
+    // with SubagentDetachedError. This MUST propagate so the caller can persist
+    // the survivor manifest and surface the resume hint — never swallow it into
+    // an ordinary task failure.
+    if (err instanceof SubagentDetachedError) throw err;
     emit("Task " + task.id + ": spawn failed — " + String(err));
     return {
       taskId: task.id,
@@ -1745,6 +2228,12 @@ async function spawnChecked(
   onProgress?: (text: string) => void,
   inheritedModel?: { provider?: string; model?: string },
   modelOverride?: RoleModelOverride,
+  abortSurvival?: {
+    resultFile: string;
+    manifestFile: string;
+    phaseName?: string;
+    phaseIndex?: number;
+  },
 ): Promise<SubagentResult> {
   if (state.spawnedCount >= params.maxSubagents) {
     throw new Error(`Subagent ceiling exceeded: already spawned ${state.spawnedCount}/${params.maxSubagents}.`);
@@ -1759,14 +2248,58 @@ async function spawnChecked(
     inheritedModel,
     onProgress,
     modelOverride,
+    ...(abortSurvival ? { abortSurvival } : {}),
   });
+}
+
+function resolveNamedRoleRoute(
+  agents: Map<string, AgentProfile>,
+  agentName: string,
+  model?: string,
+  provider?: string,
+): { model?: string; provider?: string } {
+  const profile = agents.get(agentName);
+  return {
+    model: model ?? profile?.model,
+    provider: provider ?? profile?.provider,
+  };
+}
+
+function resolveConfiguredRoleDefaults(
+  params: NormalizedParams,
+  agents: Map<string, AgentProfile>,
+): void {
+  const agentRoot = process.env.PI_AGENT_DIR?.trim() || path.join(os.homedir(), ".pi", "agent");
+  let piDefault: { provider?: string; model?: string } = {};
+  try {
+    const settings = JSON.parse(readFileSync(path.join(agentRoot, "settings.json"), "utf8")) as Record<string, unknown>;
+    piDefault = {
+      provider: optionalString(settings.defaultProvider),
+      model: optionalString(settings.defaultModel),
+    };
+  } catch {
+    // Pi itself will use its configured default when no explicit CLI route is available.
+  }
+
+  // Put current Pi defaults on the named role profiles rather than params.
+  // Params remain true explicit/NL overrides, so shapes with their own fixed
+  // route defaults are not accidentally overridden by the global Pi route.
+  for (const agentName of new Set([params.plannerAgent, params.executorAgent, params.verifierAgent])) {
+    const profile = agents.get(agentName) ?? { name: agentName };
+    agents.set(agentName, {
+      ...profile,
+      model: profile.model ?? piDefault.model,
+      provider: profile.provider ?? piDefault.provider,
+    });
+  }
 }
 
 async function loadAgents(): Promise<Map<string, AgentProfile>> {
   const agents = new Map<string, AgentProfile>();
   for (const agent of DEFAULT_AGENTS) agents.set(agent.name, agent);
 
-  const agentsDir = path.join(os.homedir(), ".pi", "agent", "agents");
+  const agentRoot = process.env.PI_AGENT_DIR?.trim() || path.join(os.homedir(), ".pi", "agent");
+  const agentsDir = path.join(agentRoot, "agents");
   if (!existsSync(agentsDir)) return agents;
 
   const entries = await readdir(agentsDir, { withFileTypes: true });
@@ -1866,6 +2399,19 @@ async function runSubagent(
     inheritedModel?: { provider?: string; model?: string };
     onProgress?: (text: string) => void;
     modelOverride?: RoleModelOverride;
+    /**
+     * Abort-survivor mode (ABORT-RESUME-DESIGN.md): when the AbortSignal fires,
+     * detach the child instead of killing it — persist a survivor manifest,
+     * reject with SubagentDetachedError, and background-write the full result to
+     * `resultFile` when the child eventually closes. Opt-in per spawn; spawns
+     * without this option keep exact kill-on-abort semantics.
+     */
+    abortSurvival?: {
+      resultFile: string;
+      manifestFile: string;
+      phaseName?: string;
+      phaseIndex?: number;
+    };
   },
 ): Promise<SubagentResult> {
   const startedAt = Date.now();
@@ -1923,106 +2469,249 @@ async function runSubagent(
     `Subagent ${profile.name}: launching ${path.basename(command.command)} ${args.includes("--no-extensions") ? "--no-extensions" : ""} --mode json in ${options.cwd}`,
   );
 
-  let stderr = "";
-  let lastAssistantText = "";
-  let eventCount = 0;
-  let killedByAbort = false;
-  const assistantFailures: string[] = [];
-  const toolCalls = emptyToolCallSummary();
-
-  const child = spawn(command.command, args, {
+  const baseSpawnOptions: SpawnOptions = {
     cwd: options.cwd,
-    env: process.env,
+    env: command.env ?? process.env,
     stdio: [pipeStdin ? "pipe" : "ignore", "pipe", "pipe"],
     windowsHide: true,
     shell: command.shell,
-  });
-
-  // Pipe the task via stdin when it exceeds the safe arg limit
-  if (pipeStdin && child.stdin) {
-    child.stdin.write(task);
-    child.stdin.end();
-  }
-
-  const abortHandler = () => {
-    killedByAbort = true;
-    child.kill("SIGTERM");
-    setTimeout(() => {
-      if (!child.killed) child.kill("SIGKILL");
-    }, 2000).unref?.();
   };
-  if (options.signal) {
-    if (options.signal.aborted) abortHandler();
-    else options.signal.addEventListener("abort", abortHandler, { once: true });
-  }
+  const launchAttempts = buildWindowsEpermSpawnAttempts(command.command, args, baseSpawnOptions);
 
-  const stdoutReader = createInterface({ input: child.stdout });
-  stdoutReader.on("line", (line) => {
-    const trimmed = line.trim();
-    if (!trimmed) return;
-    try {
-      const event = JSON.parse(trimmed);
-      eventCount++;
-      const progress = describeJsonEvent(profile.name, event);
-      if (progress) options.onProgress?.(progress);
-      // Effect-evidence telemetry: count tool executions by tool name (F1).
-      if (event?.type === "tool_execution_start") {
-        const toolName = optionalString((event as Record<string, unknown>).toolName);
-        if (toolName) recordToolCall(toolCalls, toolName);
-      }
-      if (event?.type === "message_end" && event.message?.role === "assistant") {
-        lastAssistantText = extractMessageText(event.message);
-        const stopReason = optionalString(event.message.stopReason) ?? optionalString(event.stopReason);
-        const errorMessage =
-          optionalString(event.message.errorMessage) ??
-          optionalString(event.errorMessage) ??
-          optionalString(event.message.error?.message) ??
-          optionalString(event.error?.message);
-        const normalizedStopReason = stopReason?.toLowerCase();
-        if (normalizedStopReason === "error" || normalizedStopReason === "aborted") {
-          assistantFailures.push(`assistant stopReason=${stopReason}`);
+  try {
+    for (let attemptIndex = 0; attemptIndex < launchAttempts.length; attemptIndex++) {
+      const launch = launchAttempts[attemptIndex];
+      let stderr = "";
+      let lastAssistantText = "";
+      let eventCount = 0;
+      let killedByAbort = false;
+      let agentEnded = false;
+      let protocolTimedOut = false;
+      let firstJsonProtocolEventSeen = false;
+      let firstJsonTimer: NodeJS.Timeout | undefined;
+      const firstJsonTimeoutMs = getPiChildFirstJsonTimeoutMs(command.env ?? process.env);
+      const markFirstJsonProtocolEvent = () => {
+        if (firstJsonProtocolEventSeen) return;
+        firstJsonProtocolEventSeen = true;
+        if (firstJsonTimer) clearTimeout(firstJsonTimer);
+      };
+      const assistantFailures: string[] = [];
+      const toolCalls = emptyToolCallSummary();
+
+      let child;
+      try {
+        child = spawn(launch.command, launch.args, launch.options);
+        firstJsonTimer = setTimeout(() => {
+          protocolTimedOut = true;
+          stderr += `\nPI_CHILD_FIRST_JSON_TIMEOUT: no valid JSON protocol event within ${firstJsonTimeoutMs}ms from ${path.basename(launch.command)}; terminating owned child tree.`;
+          try { child.kill("SIGTERM"); } catch {}
+          killOwnedProcessTree(child.pid, "first-json-timeout");
+        }, firstJsonTimeoutMs);
+        firstJsonTimer.unref?.();
+      } catch (err) {
+        if (isWindowsSpawnEperm(err) && attemptIndex < launchAttempts.length - 1) {
+          const next = launchAttempts[attemptIndex + 1];
+          options.onProgress?.(
+            `Subagent ${profile.name}: Windows spawn EPERM from ${formatSpawnAttempt(launch)}; ` +
+              `retrying with ${formatSpawnAttempt(next)}.`,
+          );
+          continue;
         }
-        if (errorMessage) assistantFailures.push(`assistant errorMessage=${errorMessage}`);
+        // Terminal EPERM: capture evidence before throwing.
+        const evidence = buildWindowsEpermEvidence(err, launch, options.cwd);
+        const evidencePath = await writeWindowsEpermEvidence(evidence);
+        const evidenceSuffix = evidencePath ? ` Evidence: ${evidencePath}` : " Evidence capture skipped.";
+        throw new Error(formatSpawnFailure(err, launch, options.cwd) + evidenceSuffix);
       }
-    } catch {
-      // JSON mode should emit JSONL; ignore any incidental non-JSON line defensively.
+
+      // Pipe the task via stdin when it exceeds the safe arg limit.
+      if (pipeStdin && child.stdin) {
+        child.stdin.write(task);
+        child.stdin.end();
+      }
+
+      // Abort-survivor plumbing (ABORT-RESUME-DESIGN.md), ported from the
+      // substrate spawn so the inline plan-execute-verify path can detach and
+      // resume. detachReject unwinds the awaiting promise; the background
+      // close-handler persists the final result.
+      let detachReject: ((err: SubagentDetachedError) => void) | undefined;
+      const detachPromise = new Promise<never>((_resolve, reject) => {
+        detachReject = reject;
+      });
+      detachPromise.catch(() => {});
+
+      const abortHandler = () => {
+        const survival = options.abortSurvival;
+        if (survival) {
+          const manifest = {
+            pid: child.pid,
+            agentName: profile.name,
+            phaseName: survival.phaseName ?? "(unnamed)",
+            phaseIndex: survival.phaseIndex ?? -1,
+            startedAt,
+            detachedAt: new Date().toISOString(),
+            resultFile: survival.resultFile,
+          };
+          try {
+            writeFileSync(survival.manifestFile, JSON.stringify(manifest, null, 2), "utf8");
+          } catch {}
+          child.once("close", (code) => {
+            const backgroundResult: SubagentResult = {
+              agentName: profile.name,
+              task,
+              text: lastAssistantText.trim(),
+              stderr: stderr.trim(),
+              exitCode: code,
+              durationMs: Date.now() - startedAt,
+              events: eventCount,
+              toolCalls,
+            };
+            if (profile.provider) backgroundResult.provider = profile.provider;
+            if (profile.model) backgroundResult.model = profile.model;
+            try {
+              writeFileSync(survival.resultFile, JSON.stringify(backgroundResult, null, 2), "utf8");
+            } catch {}
+          });
+          detachReject?.(new SubagentDetachedError(profile.name, manifest));
+          return;
+        }
+        killedByAbort = true;
+        if (firstJsonTimer) clearTimeout(firstJsonTimer);
+        try { child.kill("SIGTERM"); } catch {}
+        killOwnedProcessTree(child.pid, "abort");
+        setTimeout(() => {
+          if (!child.killed) child.kill("SIGKILL");
+          killOwnedProcessTree(child.pid, "abort-hard-kill");
+        }, 2000).unref?.();
+      };
+      if (options.signal) {
+        if (options.signal.aborted) abortHandler();
+        else options.signal.addEventListener("abort", abortHandler, { once: true });
+      }
+
+      const stdoutReader = createInterface({ input: child.stdout });
+      stdoutReader.on("line", (line) => {
+        const trimmed = line.trim();
+        if (!trimmed) return;
+        try {
+          const event = JSON.parse(trimmed);
+          if (isPiJsonProtocolEvent(event)) markFirstJsonProtocolEvent();
+          eventCount++;
+          const progress = describeJsonEvent(profile.name, event);
+          if (progress) options.onProgress?.(progress);
+          // Effect-evidence telemetry: count tool executions by tool name (F1).
+          if (event?.type === "tool_execution_start") {
+            const toolName = optionalString((event as Record<string, unknown>).toolName);
+            if (toolName) recordToolCall(toolCalls, toolName);
+          }
+          if (event?.type === "agent_end") {
+            agentEnded = true;
+          }
+          if (event?.type === "message_end" && event.message?.role === "assistant" && !agentEnded) {
+            lastAssistantText = extractMessageText(event.message);
+            const stopReason = optionalString(event.message.stopReason) ?? optionalString(event.stopReason);
+            const errorMessage =
+              optionalString(event.message.errorMessage) ??
+              optionalString(event.errorMessage) ??
+              optionalString(event.message.error?.message) ??
+              optionalString(event.error?.message);
+            const normalizedStopReason = stopReason?.toLowerCase();
+            if (normalizedStopReason === "error" || normalizedStopReason === "aborted") {
+              assistantFailures.push(`assistant stopReason=${stopReason}`);
+            }
+            if (errorMessage) assistantFailures.push(`assistant errorMessage=${errorMessage}`);
+          }
+        } catch {
+          // JSON mode should emit JSONL; ignore any incidental non-JSON line defensively.
+        }
+      });
+
+      child.stderr?.on("data", (chunk) => {
+        stderr += chunk.toString();
+      });
+
+      let exitCode: number | null;
+      try {
+        exitCode = await Promise.race([
+          new Promise<number | null>((resolve, reject) => {
+            child.on("error", reject);
+            child.on("close", (code) => resolve(code));
+          }),
+          detachPromise,
+        ]);
+      } catch (err) {
+        if (firstJsonTimer) clearTimeout(firstJsonTimer);
+        if (options.signal) options.signal.removeEventListener("abort", abortHandler);
+        if (err instanceof SubagentDetachedError) {
+          // Do NOT close stdoutReader: background collectors keep accumulating
+          // until the orphaned child closes and writes its result file.
+          options.onProgress?.(
+            `Subagent ${profile.name}: DETACHED on abort (pid=${err.manifest.pid}); ` +
+              `result will be persisted to ${err.manifest.resultFile}.`,
+          );
+          throw err;
+        }
+        stdoutReader.close();
+        if (isWindowsSpawnEperm(err) && attemptIndex < launchAttempts.length - 1) {
+          const next = launchAttempts[attemptIndex + 1];
+          options.onProgress?.(
+            `Subagent ${profile.name}: Windows spawn EPERM from ${formatSpawnAttempt(launch)}; ` +
+              `retrying with ${formatSpawnAttempt(next)}.`,
+          );
+          continue;
+        }
+        // Terminal EPERM: capture evidence before throwing.
+        const evidence = buildWindowsEpermEvidence(err, launch, options.cwd);
+        const evidencePath = await writeWindowsEpermEvidence(evidence);
+        const evidenceSuffix = evidencePath ? ` Evidence: ${evidencePath}` : " Evidence capture skipped.";
+        throw new Error(formatSpawnFailure(err, launch, options.cwd) + evidenceSuffix);
+      }
+
+      if (firstJsonTimer) clearTimeout(firstJsonTimer);
+      if (options.signal) options.signal.removeEventListener("abort", abortHandler);
+      stdoutReader.close();
+
+      if (killedByAbort) throw new Error(`Subagent ${agentName} aborted.`);
+      if (protocolTimedOut) {
+        throw new Error(JSON.stringify({
+          type: "pi_child_first_json_timeout",
+          agent: agentName,
+          timeoutMs: firstJsonTimeoutMs,
+          pid: child.pid,
+          cwd: options.cwd,
+          commandBasename: path.basename(launch.command),
+          launchRuntime: command.launchRuntime,
+        }));
+      }
+      if (exitCode !== 0) {
+        throw new Error(`Subagent ${agentName} exited with code ${exitCode}. stderr: ${truncateWithNotice(stderr.trim(), 2000, "stderr")}`);
+      }
+      if (assistantFailures.length > 0) {
+        const stderrSuffix = stderr.trim() ? ` stderr: ${truncateWithNotice(stderr.trim(), 1000, "stderr")}` : "";
+        throw new Error(
+          `Subagent ${agentName} reported assistant failure despite exit code 0: ${truncateWithNotice(assistantFailures.join("; "), 2000, "assistant failure details")}.${stderrSuffix}`,
+        );
+      }
+
+      const result: SubagentResult = {
+        agentName: profile.name,
+        task,
+        text: lastAssistantText.trim(),
+        stderr: stderr.trim(),
+        exitCode,
+        durationMs: Date.now() - startedAt,
+        events: eventCount,
+        toolCalls,
+      };
+      if (profile.provider) result.provider = profile.provider;
+      if (profile.model) result.model = profile.model;
+      return result;
     }
-  });
-
-  child.stderr?.on("data", (chunk) => {
-    stderr += chunk.toString();
-  });
-
-  const exitCode = await new Promise<number | null>((resolve, reject) => {
-    child.on("error", reject);
-    child.on("close", (code) => resolve(code));
-  }).finally(async () => {
-    if (options.signal) options.signal.removeEventListener("abort", abortHandler);
-    stdoutReader.close();
+  } finally {
     await rm(tempDir, { recursive: true, force: true });
-  });
-
-  if (killedByAbort) throw new Error(`Subagent ${agentName} aborted.`);
-  if (exitCode !== 0) {
-    throw new Error(`Subagent ${agentName} exited with code ${exitCode}. stderr: ${truncateWithNotice(stderr.trim(), 2000, "stderr")}`);
-  }
-  if (assistantFailures.length > 0) {
-    const stderrSuffix = stderr.trim() ? ` stderr: ${truncateWithNotice(stderr.trim(), 1000, "stderr")}` : "";
-    throw new Error(
-      `Subagent ${agentName} reported assistant failure despite exit code 0: ${truncateWithNotice(assistantFailures.join("; "), 2000, "assistant failure details")}.${stderrSuffix}`,
-    );
   }
 
-  return {
-    agentName: profile.name,
-    task,
-    text: lastAssistantText.trim(),
-    stderr: stderr.trim(),
-    exitCode,
-    durationMs: Date.now() - startedAt,
-    events: eventCount,
-    toolCalls,
-  };
+  throw new Error(`Subagent ${agentName} did not launch: no spawn attempts were available.`);
 }
 
 function buildSubagentSystemPrompt(profile: AgentProfile): string {
@@ -2095,6 +2784,21 @@ function buildIntake(
   } else if (executorOutputContract) {
     inferredAdvisoryCriteria.push(`(inferred) Executor outputs should follow the output format implied by the task: ${executorOutputContract} — advisory only; violations are warnings, never failures.`);
   }
+  if (params.concurrency > 1) {
+    const criterion = `Executor dependency waves may run up to ${params.concurrency} executor subagent(s) concurrently when dependencies allow.`;
+    successCriteria.push(criterion);
+    criteriaProvenance.push({ text: criterion, kind: "success", source: "explicit" });
+  }
+  if (params.plannerCount > 1) {
+    const criterion = `Orchestrator must run ${params.plannerCount} planner subagent(s) in parallel before deterministic plan selection.`;
+    successCriteria.push(criterion);
+    criteriaProvenance.push({ text: criterion, kind: "success", source: "explicit" });
+  }
+  if (params.verifierCount > 1) {
+    const criterion = `Orchestrator must run ${params.verifierCount} verifier subagent(s) in parallel before deterministic verdict aggregation.`;
+    successCriteria.push(criterion);
+    criteriaProvenance.push({ text: criterion, kind: "success", source: "explicit" });
+  }
 
   const failureCriteria = extractFailureCriteria(params.task);
   for (const criterion of failureCriteria) criteriaProvenance.push({ text: criterion, kind: "failure", source: "explicit" });
@@ -2130,6 +2834,7 @@ function buildIntake(
       ? "Model routing is essential and must be satisfied by orchestrator subprocess configuration."
       : "No explicit or inferred essential model routing was requested; use profile/inherited/default routing.",
     routingRequirements,
+    orchestrationControls: params.orchestrationControls,
     executorOutputContract,
     executorOutputContractSource,
     inferredAdvisoryCriteria,
@@ -2191,7 +2896,11 @@ function buildRoutingRequirements(
   agents: Map<string, AgentProfile>,
   inheritedModel?: { provider?: string; model?: string },
 ): RoutingRequirement[] {
-  const inferredFromTask = inferModelRoutingFromTask(params.task);
+  // Reuse the already-suppressed routing computed in normalizeParams. Re-running
+  // inferModelRoutingFromTask here would reintroduce NL routes for roles that
+  // carry an explicit param, letting a provider-only override recombine with a
+  // suppressed NL model (bug: natural-language-route-parser-hijacks-roles-from-task-prose.md).
+  const inferredFromTask = params.inferredRouting ?? {};
   const roles: Array<{ role: RoutingRequirement["role"]; agentName: string; provider?: string; model?: string; explicit: boolean; inferred?: RoleModelOverride }> = [
     { role: "planner", agentName: params.plannerAgent, provider: params.plannerProvider, model: params.plannerModel, explicit: Boolean(params.plannerProvider || params.plannerModel), inferred: inferredFromTask.planner },
     { role: "executor", agentName: params.executorAgent, provider: params.executorProvider, model: params.executorModel, explicit: Boolean(params.executorProvider || params.executorModel), inferred: inferredFromTask.executor },
@@ -2211,7 +2920,11 @@ function buildRoutingRequirements(
           : profile?.provider || profile?.model
             ? "agent_profile"
             : "inherited";
-      return { role: role.role, agentName: role.agentName, provider, model, essential: role.explicit || source === "natural_language", source };
+      const requirement: RoutingRequirement = { role: role.role, agentName: role.agentName, provider, model, essential: role.explicit || source === "natural_language", source };
+      if (role.role === "planner" && params.plannerCount > 1) requirement.count = params.plannerCount;
+      if (role.role === "verifier" && params.verifierCount > 1) requirement.count = params.verifierCount;
+      if (role.role === "executor" && params.concurrency > 1) requirement.count = params.concurrency;
+      return requirement;
     })
     .filter((req): req is RoutingRequirement => Boolean(req));
 }
@@ -2247,7 +2960,13 @@ function checkRequiredModelRouting(params: NormalizedParams, state: Orchestratio
       const expected = `Subagent ${req.agentName}: using ${formatRoutedModel(req.provider, req.model)}.`;
       return line.includes(expected);
     });
-    const needed = req.role === "executor" ? Math.max(1, state.executorOutputs.length) : 1;
+    const needed = req.role === "executor"
+      ? Math.max(1, req.count ?? state.executorOutputs.length)
+      : req.role === "planner"
+        ? Math.max(1, req.count ?? params.plannerCount)
+        : req.role === "verifier"
+          ? Math.max(1, req.count ?? params.verifierCount)
+          : 1;
     if (matches.length < needed) {
       reasons.push(`${req.role} expected ${needed} spawn evidence item(s) for ${req.agentName} using ${formatRoutedModel(req.provider, req.model)}, found ${matches.length}.`);
     }
@@ -2764,28 +3483,10 @@ function splitRoutingSentences(text: string): string[] {
     .filter(Boolean);
 }
 
-function normalizeRoutingText(text: string): string {
-  return text
-    .replace(/deep[\s-]*seek|deepseak/gi, "deepseek")
-    .replace(/codecs?/gi, "codex")
-    .toLowerCase();
-}
-
-function modelAliasFromText(text: string): RoleModelOverride | undefined {
-  const normalized = normalizeRoutingText(text);
-  // GPT 5.5 Fast must be checked BEFORE generic GPT 5.5 so "gpt 5.5 fast"
-  // doesn't match the broader pattern first and return gpt-5.5.
-  if (/\bgpt[-\s]*5(?:\.5)?\b.{0,20}\bfast\b|\bfast\b.{0,20}\bgpt[-\s]*5(?:\.5)?\b/.test(normalized)) return { provider: "openai-codex", model: "gpt-5.5-fast" };
-  if (/\bgpt[-\s]*5(?:\.5)?\b/.test(normalized) || /\bcodex\b/.test(normalized)) return { provider: "openai-codex", model: "gpt-5.5" };
-  if (/\bdeepseek\b/.test(normalized) && /\bv?4\b/.test(normalized) && /\bpro\b/.test(normalized)) return { provider: "deepseek", model: "deepseek-v4-pro" };
-  if (/\bdeepseek\b/.test(normalized) && /\bv?4\b/.test(normalized) && /\bflash\b/.test(normalized)) return { provider: "deepseek", model: "deepseek-v4-flash" };
-  // Anthropic model aliases — prompt-based routing flexibility.
-  if (/\bopus\b.{0,20}\b4\.?8\b|\b4\.?8\b.{0,20}\bopus\b|\bclaude\b.{0,20}\bopus\b/i.test(normalized)) return { provider: "anthropic", model: "claude-opus-4-20250514" };
-  if (/\bsonnet\b|\bclaude\s+sonnet\b/i.test(normalized)) return { provider: "anthropic", model: "claude-sonnet-4-20250514" };
-  if (/\bhaiku\b|\bclaude\s+haiku\b/i.test(normalized)) return { provider: "anthropic", model: "claude-3-5-haiku-20241022" };
-  if (/\bfable\b|\bclaude\s+fable\b/i.test(normalized)) return { provider: "anthropic", model: "fable" };
-  return undefined;
-}
+// NOTE: `normalizeRoutingText` and `modelAliasFromText` were moved VERBATIM to
+// src/model-aliases.ts (WAVE3-SPEC ITEM C) to break the composable-pipeline ->
+// index.ts circular import. They are imported at the top of this file and
+// remain the single source of truth for the known-models alias registry.
 
 function genericModelFromRoutingSentence(sentence: string): RoleModelOverride | undefined {
   if (!/\b(use|uses|using|route|root|assign|assigned|model|provider)\b/i.test(sentence)) return undefined;
@@ -2807,6 +3508,16 @@ function genericModelFromRoutingSentence(sentence: string): RoleModelOverride | 
   return parseModelCandidate(candidate);
 }
 
+/**
+ * Resolve a structured NL model token ("provider <P> model <T>" / "<P>/<T>")
+ * against the known-models alias registry. Returns the canonical alias when the
+ * model side (or "<provider> <model>") is recognized, else undefined — so
+ * unknown tokens from task prose can never become a route (residual 1).
+ */
+function knownAliasForStructured(provider: string, model: string): RoleModelOverride | undefined {
+  return modelAliasFromText(model) ?? modelAliasFromText(`${provider} ${model}`);
+}
+
 function parseModelCandidate(candidate: string): RoleModelOverride | undefined {
   let cleaned = candidate
     .replace(/["'`]/g, "")
@@ -2818,17 +3529,51 @@ function parseModelCandidate(candidate: string): RoleModelOverride | undefined {
   cleaned = cleaned.replace(/[,:]+$/g, "").trim();
   const known = modelAliasFromText(cleaned);
   if (known) return known;
+  // BUG FIX (2026-07-02 residual 1): the structured "provider <P> model <T>" and
+  // "<P>/<T>" forms used to be routed WITHOUT validating the model token against
+  // the known-models registry, so ordinary prose ("provider anthropic model today",
+  // greedy tails like "today produces NO route change") hijacked a role route.
+  // Every structured form must now resolve its model side via modelAliasFromText
+  // before it can become a route; unknown tokens are ignored with a logged notice.
   const providerModel = cleaned.match(/^provider\s+([a-z0-9_.-]+)\s+(?:model\s+)?(.+)$/i);
-  if (providerModel) return { provider: providerModel[1].trim(), model: providerModel[2].trim() };
+  if (providerModel) {
+    const alias = knownAliasForStructured(providerModel[1].trim(), providerModel[2].trim());
+    if (alias) return alias;
+    noteRejectedNlRouteToken(cleaned);
+    return undefined;
+  }
   if (!cleaned || cleaned.split(/\s+/).length > 8) return undefined;
   if (!/[a-z0-9]/i.test(cleaned)) return undefined;
+  // Structured explicit "provider/model" form: route only when the model side
+  // validates against the known-models registry (residual 1).
   const slash = cleaned.indexOf("/");
   if (slash > 0) {
     const provider = cleaned.slice(0, slash).trim();
     const model = cleaned.slice(slash + 1).trim();
-    if (provider && model) return { provider, model };
+    if (provider && model) {
+      const alias = knownAliasForStructured(provider, model);
+      if (alias) return alias;
+      noteRejectedNlRouteToken(cleaned);
+      return undefined;
+    }
   }
-  return { model: cleaned };
+  // BUG FIX (2026-07-02, natural-language-route-parser-hijacks-roles-from-task-prose.md):
+  // A bare single token extracted from task prose (e.g. "today", "tomorrow") is
+  // NOT a model. Only route it if it validates against the known-models
+  // registry (modelAliasFromText / structured provider forms above). Unknown
+  // tokens are ignored with a logged notice — never routed — so ordinary prose
+  // can no longer hijack a role route (production evidence: run orc-mr43a2em-dvzs,
+  // planner routed to anthropic/today → preflight 404).
+  noteRejectedNlRouteToken(cleaned);
+  return undefined;
+}
+
+/** Log a notice that an unroutable natural-language model token was ignored. */
+function noteRejectedNlRouteToken(token: string): void {
+  if (!token) return;
+  try {
+    console.warn(`[orchestrate] Ignored unroutable natural-language model token "${token}" (not in known-models registry).`);
+  } catch {}
 }
 
 function findModelAliases(task: string): Array<{ index: number; provider: string; model: string }> {
@@ -2984,6 +3729,59 @@ function buildVerificationPrompt(intake: Intake, plan: Plan, outputs: ExecutorOu
     ? `\n\nARTIFACT EVIDENCE (collected post-execution by orchestrator):\n${artifactEvidence}`
     : "";
   return `Verify the orchestration result against the intake contract.\n\nINTAKE CONTRACT:\n${formatIntakeForPrompt(intake)}\n\nPlan:\n${JSON.stringify(plan, null, 2)}\n\nExecutor outputs:\n${JSON.stringify(outputs, null, 2)}\n\nModel routing evidence/configuration supplied by orchestrator:\n${routingEvidence}${artifactBlock}\n\nReturn JSON exactly and only in this shape:\n{"status":"pass"|"fail","reasons":["..."]}\n\nUse status "pass" only if the plan, outputs, and supplied routing evidence/configuration satisfy the intake success criteria and do not violate any constraints, invariants, or failure criteria. Use "fail" with concrete reasons for missing, unclear, or incorrect work.\n\nEFFECT EVIDENCE RULE: The ARTIFACT EVIDENCE block (if present) contains mechanical ground truth — per-task tool-call telemetry (write/edit/bash executions) and worktree file deltas. Judge implementation work by these OBSERVED EFFECTS, not by the shape or length of the executor's reply text. An executor that performed real tool-based file mutations and answered with a brief summary (or a table) is VALID. Conversely, prose claiming files were created is INSUFFICIENT when the effect evidence shows zero mutations — treat that as FAIL with reason "no observed effects for implementation task".\n\nADVISORY CRITERIA RULE (F6): entries under inferred_advisory_criteria (and any criterion tagged source="inferred" in criteria_provenance) are advisory only — you may mention violations as warnings inside reasons, but they MUST NOT cause status "fail" on their own.`;
+}
+
+function selectPlannerOutputIndex(outputs: SubagentResult[], originalTask: string): number {
+  for (const [index, output] of outputs.entries()) {
+    const plan = parsePlan(output.text, originalTask);
+    if (plan.tasks.length > 0) return index;
+  }
+  return 0;
+}
+
+function extractPlanRoleControls(plan: Plan): { executorConcurrency?: number; verifierCount?: number } {
+  const raw = plan.raw && typeof plan.raw === "object" ? plan.raw as Record<string, unknown> : undefined;
+  if (!raw) return {};
+  const controls = raw.orchestrationControls && typeof raw.orchestrationControls === "object"
+    ? raw.orchestrationControls as Record<string, unknown>
+    : raw.controls && typeof raw.controls === "object"
+      ? raw.controls as Record<string, unknown>
+      : undefined;
+  const readNumber = (...values: unknown[]): number | undefined => {
+    for (const value of values) {
+      if (typeof value === "number" && Number.isFinite(value)) return Math.trunc(value);
+      if (typeof value === "string") {
+        const parsed = parseNaturalNumber(value);
+        if (parsed !== undefined) return parsed;
+      }
+    }
+    return undefined;
+  };
+  return {
+    executorConcurrency: readNumber(raw.executorConcurrency, raw.executorCount, controls?.executorConcurrency, controls?.executorCount),
+    verifierCount: readNumber(raw.verifierCount, raw.verifiers, controls?.verifierCount, controls?.verifiers),
+  };
+}
+
+function aggregateVerifierResults(
+  results: Array<{ agentName: string; status: "pass" | "fail"; reasons: string[]; raw: string }>,
+): { status: "pass" | "fail"; reasons: string[]; raw: string } {
+  if (results.length === 0) {
+    return { status: "fail", reasons: ["No verifier results were produced."], raw: "[]" };
+  }
+  const failures = results.filter((result) => result.status !== "pass");
+  if (failures.length > 0) {
+    return {
+      status: "fail",
+      reasons: failures.flatMap((result, index) => result.reasons.length ? result.reasons : [`verifier-${index + 1}: verifier returned FAIL without reasons`]),
+      raw: JSON.stringify(results),
+    };
+  }
+  return {
+    status: "pass",
+    reasons: results.flatMap((result, index) => result.reasons.length ? result.reasons : [`verifier-${index + 1}: pass`]),
+    raw: JSON.stringify(results),
+  };
 }
 
 function parsePlan(text: string, originalTask: string): Plan {
@@ -3292,6 +4090,12 @@ function buildDetails(status: "pass" | "fail", params: NormalizedParams, state: 
       planText: truncateWithNotice(state.planText, MAX_DETAIL_TEXT_CHARS, "planner output"),
       executorOutputs: state.executorOutputs.map(compactExecutorOutput),
       verifierResult: compactVerifierResult(state.verifierResult),
+      verifierResults: (state.verifierResults ?? []).map((result) => ({
+        agentName: result.agentName,
+        status: result.status,
+        reasons: result.reasons.map((reason) => truncateWithNotice(reason, MAX_DETAIL_TEXT_CHARS, "verifier reason")),
+        raw: truncateWithNotice(result.raw, MAX_DETAIL_TEXT_CHARS, "verifier raw output"),
+      })),
       failureReasons: state.failureReasons.map((reason) => truncateWithNotice(reason, MAX_DETAIL_TEXT_CHARS, "failure reason")),
       progressLog: state.progressLog.map((line) => truncateWithNotice(line, MAX_DETAIL_TEXT_CHARS, "progress log line")),
       finalResult: truncateWithNotice(state.finalResult, MAX_DETAIL_TEXT_CHARS, "final result"),
@@ -3305,6 +4109,12 @@ function buildDetails(status: "pass" | "fail", params: NormalizedParams, state: 
       plannerText: truncateWithNotice(attempt.plannerText, MAX_DETAIL_TEXT_CHARS, "planner output"),
       executorOutputs: attempt.executorOutputs.map(compactExecutorOutput),
       verifierResult: compactVerifierResult(attempt.verifierResult),
+      verifierResults: (attempt.verifierResults ?? []).map((result) => ({
+        agentName: result.agentName,
+        status: result.status,
+        reasons: result.reasons.map((reason) => truncateWithNotice(reason, MAX_DETAIL_TEXT_CHARS, "verifier reason")),
+        raw: truncateWithNotice(result.raw, MAX_DETAIL_TEXT_CHARS, "verifier raw output"),
+      })),
     })),
   };
 }
@@ -3395,14 +4205,14 @@ function resolvePiCommand(): ResolvedPiCommand {
 
   const currentCliScript = process.argv[1];
   if (currentCliScript && isExistingPiCliScript(currentCliScript)) {
-    return { command: process.execPath, argsPrefix: [currentCliScript] };
+    return resolvePiChildCommand(currentCliScript, "process.argv[1]");
   }
 
   const cliScript = process.argv.find((arg) => isExistingPiCliScript(arg));
-  if (cliScript) return { command: process.execPath, argsPrefix: [cliScript] };
+  if (cliScript) return resolvePiChildCommand(cliScript, "process.argv");
 
   const installedCliScript = resolveInstalledPiCliScript();
-  if (installedCliScript) return { command: process.execPath, argsPrefix: [installedCliScript] };
+  if (installedCliScript) return resolvePiChildCommand(installedCliScript, "installed Pi CLI");
 
   return process.platform === "win32"
     ? { command: "pi.cmd", argsPrefix: [], shell: true }
@@ -3412,8 +4222,8 @@ function resolvePiCommand(): ResolvedPiCommand {
 function resolvePiCliPath(cliPath: string, envName: string): ResolvedPiCommand {
   if (!existsSync(cliPath)) throw new Error(`${envName} points to a missing Pi CLI path: ${cliPath}`);
   const ext = path.extname(cliPath).toLowerCase();
-  if (ext === ".js" || ext === ".mjs" || ext === ".cjs") return { command: process.execPath, argsPrefix: [cliPath] };
-  return { command: cliPath, argsPrefix: [], shell: shouldUseWindowsShell(cliPath) };
+  if (ext === ".js" || ext === ".mjs" || ext === ".cjs") return resolvePiChildCommand(cliPath, envName);
+  return { command: cliPath, argsPrefix: [], shell: shouldUseWindowsShell(cliPath), launchRuntime: shouldUseWindowsShell(cliPath) ? "shell" : "native" };
 }
 
 function shouldUseWindowsShell(command: string): boolean | undefined {
@@ -3509,6 +4319,21 @@ function inferOrchestrationControlsFromTask(
     /\b(?:concurrency|parallelism)\s*(?:of|to|=|:)?\s*([a-z0-9-]+)\b/i,
     /\b(?:run|use|spawn|execute)?\s*([a-z0-9-]+)\s+(?:at[\s-]*a[\s-]*time|concurrently|concurrent|in[\s-]*parallel|parallel)\b/i,
   ], rawMatches);
+  const executorCount = firstNumberMatch(task, [
+    /\b(?:at[\s-]*least|up[\s-]*to|use|run|spawn|available|allow|invoke)\s+([a-z0-9-]+)\s+(?:simultaneous\s+|parallel\s+|concurrent\s+)?executors?\b/i,
+    /\b([a-z0-9-]+)\s+(?:simultaneous\s+|parallel\s+|concurrent\s+)?executors?\b/i,
+    /\b(?:executors?|executor\s+agents?|executor\s+slots?)\s*(?:count|pool|concurrency|parallelism|available|of|=|:)?\s*([a-z0-9-]+)\b/i,
+  ], rawMatches);
+  const plannerCount = firstNumberMatch(task, [
+    /\b(?:use|run|spawn|allow|invoke)\s+([a-z0-9-]+)\s+(?:simultaneous\s+|parallel\s+|concurrent\s+)?planners?\b/i,
+    /\b([a-z0-9-]+)\s+(?:simultaneous\s+|parallel\s+|concurrent\s+)?planners?\b/i,
+    /\b(?:planners?|planner\s+agents?)\s*(?:count|pool|concurrency|parallelism|of|=|:)?\s*([a-z0-9-]+)\b/i,
+  ], rawMatches);
+  const verifierCount = firstNumberMatch(task, [
+    /\b(?:use|run|spawn|allow|invoke)\s+([a-z0-9-]+)\s+(?:simultaneous\s+|parallel\s+|concurrent\s+)?verifiers?\b/i,
+    /\b([a-z0-9-]+)\s+(?:simultaneous\s+|parallel\s+|concurrent\s+)?verifiers?\b/i,
+    /\b(?:verifiers?|verifier\s+agents?)\s*(?:count|pool|concurrency|parallelism|of|=|:)?\s*([a-z0-9-]+)\b/i,
+  ], rawMatches);
   const maxAttempts = firstNumberMatch(task, [
     /\b(?:at[\s-]*most|up[\s-]*to|maximum[\s-]*of|max(?:imum)?|limit(?:ed)?[\s-]*to)\s+([a-z0-9-]+)\s+(?:attempts?|tries|runs?|passes?|loops?)\b/i,
     /\b(?:loop|iterate|try)\s+(?:at[\s-]*most|up[\s-]*to|no[\s-]*more[\s-]*than)?\s*([a-z0-9-]+)\s+(?:times?|attempts?|passes?)\b/i,
@@ -3552,7 +4377,11 @@ function inferOrchestrationControlsFromTask(
     ...(maxSubagents ? { maxSubagents } : {}),
     maxSubagentsSource: params.maxSubagents !== undefined ? "parameter" : maxSubagents ? "natural_language" : "default",
     ...(concurrency ? { concurrency } : {}),
-    concurrencySource: params.concurrency !== undefined ? "parameter" : concurrency ? "natural_language" : "default",
+    concurrencySource: params.concurrency !== undefined || params.executorConcurrency !== undefined || params.executorCount !== undefined ? "parameter" : concurrency || executorCount ? "natural_language" : "default",
+    ...(executorCount ? { executorCount, executorConcurrency: executorCount } : {}),
+    ...(plannerCount ? { plannerCount } : {}),
+    ...(verifierCount ? { verifierCount } : {}),
+    roleConcurrencySource: params.plannerCount !== undefined || params.verifierCount !== undefined || params.executorConcurrency !== undefined || params.executorCount !== undefined ? "parameter" : executorCount || plannerCount || verifierCount ? "natural_language" : "default",
     ...(maxAttempts ? { maxAttempts } : {}),
     ...(maxRetries !== undefined ? { maxRetries } : {}),
     loopingSource: params.maxRetries !== undefined ? "parameter" : maxAttempts || maxRetries !== undefined ? "natural_language" : "default",

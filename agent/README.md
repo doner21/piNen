@@ -1,105 +1,116 @@
-# piNen Agent Configuration
+# piNen Agent Harness
 
-piNen is a sanitized Pi coding-agent harness. This `agent/` directory contains the
-configuration, extensions, skills, and orchestration tools that make up the harness.
+`agent/` is the Pi home configuration shipped by piNen. It contains reusable capability source and safe templates only.
 
-## Quick Start
+## Main directories
 
-After running the installer (`install.ps1` or `install.sh`), Pi will be installed at:
+| Path | Purpose |
+|---|---|
+| `agents/` | 51 generic subagent profiles |
+| `extensions/` | Active Pi extensions and extension tests |
+| `skills/` | 48 active skills |
+| `prompts/` | Stable slash-command prompt templates |
+| `orchestration/` | `orch-*` specialist sidecar registry |
+| `npm/` | `gentle-engram`, `pi-mcp-adapter`, and optional package dependencies |
+| `core-patch/` | Optional, user-invoked `pi.executeCommand` bridge patcher |
+| `spotify-mcp/` | Spotify MCP server source |
+| `telegram-pi/` | Telegram daemon/support source and safe config template |
+| `tools/` | Standalone diagnostics/helpers |
+| `docs/` | Harness-specific operational docs |
 
-- Windows: `%USERPROFILE%\.pi`
-- Linux/macOS: `$HOME/.pi`
+## Configuration
 
-## Configuration Files
-
-| File | Purpose |
-|------|---------|
-| `auth.example.json` | Template for AI provider API keys (never commit real keys) |
-| `mcp.example.json` | Template for MCP server configuration (env vars only) |
-| `gmail-config.example.json` | Template for Gmail integration |
-| `models.json` | Model definitions with env-var placeholders |
-| `model-router.json` | Model routing configuration |
-| `AGENTS.md` | Global agent policy — orchestrator rules, Engram setup, Graphify Brain |
-| `settings.json` | Agent defaults (model, provider, thinking level, theme) |
-
-### Setting Up API Keys
-
-Copy the example files and add your own keys:
+1. Copy templates:
 
 ```bash
-# Windows (PowerShell)
-Copy-Item agent\auth.example.json agent\auth.json
-Copy-Item agent\mcp.example.json agent\mcp.json
-# Edit agent/auth.json and agent/mcp.json with your API keys
-```
-
-```bash
-# Linux/macOS
 cp agent/auth.example.json agent/auth.json
 cp agent/mcp.example.json agent/mcp.json
-# Edit agent/auth.json and agent/mcp.json with your API keys
 ```
 
-## Extensions
+2. Optionally configure integrations:
 
-Extensions are TypeScript modules in `agent/extensions/` that add capabilities to Pi:
+```bash
+cp agent/gmail-config.example.json agent/gmail-config.json
+cp agent/spotify-mcp/spotify-config.example.json agent/spotify-mcp/spotify-config.json
+cp agent/telegram-pi/config.example.json agent/telegram-pi/config.json
+```
 
-| Extension | Purpose |
-|-----------|---------|
-| `pinen-logo.ts` | piNen wordmark displayed above the editor |
-| `agent-scheduler/` | Autonomous agent wake-up scheduling |
-| `agent-new-session/` | Agent-operated clean-session workflow |
-| `agent-reload/` | Agent-operated reload workflow |
-| `autonomous-graphify/` | Autonomous Graphify Brain maintenance |
-| `nenflow-v3.ts` | NenFlow v3 orchestration engine |
-| `subagent.ts` | Subagent spawning and management |
-| `telegram-pi/` | Telegram ↔ Pi bridge |
-| ... | (see `extensions/` for full list) |
-
-## Orchestration
-
-piNen includes the NenFlow v3 orchestration engine and a reusable orchestration
-extension (`pi-orchestrator-extension/`) with several shapes (paradigms):
-
-- `plan-execute-verify` — classic 3-phase flow
-- `safe-github-publish` — **default GitHub publishing method** (sanitized staging, private-first, gitleaks)
-- `multi-verify-vote` — majority-rule verification
-- `composable-pipeline` — dynamic pipeline composition
-- `verify-only` — verification-only with independent evidence
-
-## Graphify Brain
-
-The Graphify Brain at `graphify-brain/` stores project knowledge graphs. It starts
-empty — build graphs by running `/graphify` in your project directories.
-
-## Engram
-
-Engram provides persistent memory that survives across sessions. The binary is
-installed by the one-click installer. Configure it by setting `ENGRAM_BIN`:
+3. Bootstrap:
 
 ```powershell
 # Windows
-$env:ENGRAM_BIN = "$env:USERPROFILE\.pi\agent\bin\engram.exe"
+.\agent\setup.ps1
 ```
 
 ```bash
 # Linux/macOS
-export ENGRAM_BIN="$HOME/.pi/agent/bin/engram"
+./agent/setup.sh
 ```
 
-## Spotify MCP
+All real config targets above are gitignored.
 
-Spotify integration uses the MCP server at `agent/spotify-mcp/`. See
-`agent/spotify-mcp/README.md` for setup instructions.
+## Engram persistent memory
 
-## Telegram Bridge
+Engram is wired in three layers:
 
-The Telegram bridge at `agent/telegram-pi/` connects Pi to Telegram. See
-`agent/telegram-pi/README.md` for setup and configuration.
+1. `settings.json` loads `gentle-engram`.
+2. `npm/package.json` pins the Pi memory package and MCP adapter.
+3. `mcp.example.json` starts the Engram binary lazily and without embedding a machine path.
 
-## Safety Notes
+The installer downloads the Engram executable separately; no executable or memory database is committed. See `../docs/ENGRAM_MEMORY.md`.
 
-- Never commit `auth.json`, `mcp.json`, or `gmail-config.json` — they contain secrets.
-- The `.gitignore` file in this directory blocks runtime state, sessions, and diagnostics.
-- Run directories (`nenflow-v3/runs/`, `orchestration/runs/`) hold run-time artifacts only.
-- `graphify-brain/` holds personal project memory and is gitignored by default.
+## Deterministic orchestration
+
+`settings.json` loads `../pi-orchestrator-extension`, which provides `/orchestrate` and the `orchestrate` tool. The stable `planner`, `coder`, and `reviewer` agents form the default spine; specialist `orch-*` roles are optional sidecars.
+
+NenFlow v3 is retired. `/nenflow_v3` and `/pev` are compatibility prompts that redirect to `/orchestrate`. See `docs/nenflow-v3-retirement.md`.
+
+## Key tools and commands
+
+```text
+/orchestrate ...                  deterministic multi-agent workflow
+/subagents list                   list subagent profiles
+/subagents spawn <agent> <task>   isolated delegated task
+/graphify [path]                  build a knowledge graph
+/memory list                      list Graphify project memories
+/think <level>                    reasoning level
+/verbosity <level>                response detail
+/todos                            persistent task list
+```
+
+LLM-callable continuity tools:
+
+- `agent_scheduler`
+- `agent_new_session`
+- `agent_reload_runtime`
+- `context_usage`
+- `model_router`
+- `git_backup`
+- `graphify_auto`
+- `subagent`
+- `orchestrate`
+
+## Extensions
+
+The extension layer includes:
+
+- agent scheduler, reload, new-session, and canonical diagnostics;
+- autonomous Graphify and Graphify Brain;
+- deterministic subagents and model routing;
+- browser search, Playwright, MCP status, Railway, and GoDaddy;
+- Gmail, Spotify, and Telegram;
+- isolated-ref Git backup, Git checkpoint, and destructive-command confirmation;
+- context, thinking, verbosity, todos, and piNen UI.
+
+`extensions/package.json` contains all non-core runtime dependencies. Run `npm ci` there after cloning.
+
+## Safety boundary
+
+Do not commit:
+
+- `auth.json`, `mcp.json`, `gmail-config.json`, `spotify-config.json`, Telegram token/config state;
+- sessions, scheduler data, run artifacts, handoffs, diagnostics, or daemon state;
+- `agent/bin/`, databases, dependencies, builds, or nested `.git/` directories;
+- Graphify project graphs or Engram memory content.
+
+The root `.gitignore` enforces these boundaries. Use gitleaks before publishing.

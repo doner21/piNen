@@ -5,6 +5,9 @@
 auth.json
 mcp.json
 gmail-config.json
+railway-token.json
+spotify-mcp/.env*
+spotify-mcp/spotify-config.json
 
 # Session / state
 sessions/
@@ -20,6 +23,10 @@ nenflow-v3/runs/
 
 # Orchestration runs
 orchestration/runs/
+orchestrate-runs/
+orchestration-runs/
+orchestration-builder/runs/
+global-graphify-maintenance/runs/
 
 # Graphify brain (personal project memory)
 graphify-brain/
@@ -45,6 +52,7 @@ tmp_search*.json
 crash-wall.md
 *handoff*.md
 *intake*.md
+!extensions/**/intake.md
 *report*.md
 new-mock-process-last-run.json
 
@@ -56,8 +64,13 @@ telegram-pi/daemon-state.json
 telegram-pi/logs/
 telegram-pi/config.json
 
-# Graphify autonomy state
+# Graphify autonomy and backup state
 graphify-autonomy/
+git-backup/config.json
+git-backup/state.json
+git-backup/run-log.jsonl
+git-backup/locks/
+git-backup/tmp/
 
 # Disabled extensions
 extensions/*.disabled

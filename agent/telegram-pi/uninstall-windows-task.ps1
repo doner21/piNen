@@ -1,4 +1,4 @@
-# PowerShell: uninstall-windows-task.ps1
+﻿# PowerShell: uninstall-windows-task.ps1
 # Removes the Windows Task Scheduler entry created by install-windows-task.ps1.
 #
 # This script only removes the scheduled task. It does NOT delete the daemon,

@@ -1,0 +1,276 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://pi-harness/local/pi-lifecycle-evidence.schema.json",
+  "title": "Pi Lifecycle Evidence Schema",
+  "description": "HARNESS ARTIFACT — non-invasive diagnostic tooling schema for Pi lifecycle process-creation tracing. Defines marker and process-event record shapes. Do not modify schema after evidence capture without provenance notation.",
+  "definitions": {
+    "ShellIndicators": {
+      "type": "object",
+      "description": "Shell/console lineage classification from observable process-tree indicators. HYPOTHESIS: window visibility not directly observable through WMI.",
+      "properties": {
+        "is_shell_process": {
+          "type": "boolean",
+          "description": "Whether this child process itself is a recognized shell executable."
+        },
+        "shell_kind": {
+          "type": ["string", "null"],
+          "enum": ["cmd", "powershell", "pwsh", "windows-terminal", "conhost", "open-console", "unknown", null],
+          "description": "Kind of shell if is_shell_process is true."
+        },
+        "has_terminal_ancestor": {
+          "type": "boolean",
+          "description": "Whether any ancestor in the process chain is a recognized terminal/shell."
+        },
+        "has_conhost_nearby": {
+          "type": "boolean",
+          "description": "Whether conhost.exe appears within ±1s of this event."
+        }
+      },
+      "required": ["is_shell_process", "has_terminal_ancestor", "has_conhost_nearby"]
+    },
+    "WindowConsoleObservations": {
+      "type": "object",
+      "description": "Window/console observations. WMI cannot observe window handles or creation flags directly — most fields are HYPOTHESIS only.",
+      "properties": {
+        "observable": {
+          "type": "boolean",
+          "description": "Whether window/console state was directly observable (true only for ETW/ProcMon sources; false for WMI-only)."
+        },
+        "source": {
+          "type": "string",
+          "enum": ["process-tree-inference", "etw-process-event", "procmon-capture", "ui-automation", "video-review"],
+          "description": "Source of window/console observation claim."
+        },
+        "flags": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Observed or inferred creation/window flags (e.g., 'CREATE_NO_WINDOW', 'WindowStyle Hidden')."
+        },
+        "notes": {
+          "type": "string",
+          "description": "Human-readable notes about window/console observations."
+        }
+      },
+      "required": ["observable", "source", "flags"]
+    },
+    "RawWMIEvent": {
+      "type": "object",
+      "description": "Raw Win32_ProcessStartTrace fields as captured from WMI, preserved even when enrichment fails.",
+      "properties": {
+        "TIME_CREATED": {},
+        "ProcessID": { "type": "integer" },
+        "ProcessName": { "type": "string" },
+        "ParentProcessID": { "type": "integer" },
+        "SessionID": { "type": "integer" },
+        "Sid": { "type": "string" }
+      }
+    },
+    "MarkerRecord": {
+      "type": "object",
+      "description": "Action marker record written by the human operator or automation at lifecycle boundaries.",
+      "required": [
+        "record_type",
+        "run_id",
+        "lifecycle",
+        "label",
+        "sequence",
+        "timestamp_utc",
+        "timestamp_local",
+        "collector_pid",
+        "metadata"
+      ],
+      "properties": {
+        "record_type": {
+          "type": "string",
+          "const": "marker"
+        },
+        "run_id": {
+          "type": "string",
+          "description": "Unique run identifier, e.g., '2026-06-26T120000Z-pi-lifecycle'."
+        },
+        "lifecycle": {
+          "type": "string",
+          "enum": ["cold_start", "open_from_terminal", "reload", "new_session"],
+          "description": "Lifecycle path this marker belongs to."
+        },
+        "label": {
+          "type": "string",
+          "description": "Uppercase lifecycle-prefixed marker label, e.g., 'COLD_START_BEGIN', 'RELOAD_TRIGGER_SENT'."
+        },
+        "sequence": {
+          "type": "integer",
+          "description": "Monotonic sequence number within the run."
+        },
+        "timestamp_utc": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO-8601 UTC timestamp."
+        },
+        "timestamp_local": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO-8601 timestamp with local timezone offset."
+        },
+        "collector_pid": {
+          "type": "integer",
+          "description": "PID of the process writing this marker."
+        },
+        "operator_note": {
+          "type": "string",
+          "description": "Human-readable note from the operator."
+        },
+        "metadata": {
+          "type": "object",
+          "description": "Path-specific metadata (shell PID, launch command, etc.).",
+          "properties": {
+            "expected_parent_pid": {
+              "type": ["integer", "null"],
+              "description": "Expected parent PID for correlation."
+            },
+            "shell_kind": {
+              "type": ["string", "null"],
+              "description": "Kind of shell if launched from terminal."
+            },
+            "shell_pid": {
+              "type": ["integer", "null"],
+              "description": "PID of the shell process when launched from terminal."
+            },
+            "launch_command": {
+              "type": ["string", "null"],
+              "description": "Launch command, may be redacted."
+            },
+            "pi_pid": {
+              "type": ["integer", "null"],
+              "description": "PID of the Pi process at marker time."
+            }
+          }
+        }
+      }
+    },
+    "ProcessStartRecord": {
+      "type": "object",
+      "description": "Process-creation event record captured from WMI Win32_ProcessStartTrace, enriched with Win32_Process queries.",
+      "required": [
+        "record_type",
+        "run_id",
+        "capture_source",
+        "timestamp_utc",
+        "timestamp_local",
+        "child_pid",
+        "child_process_name",
+        "parent_pid",
+        "session_id",
+        "enrichment_status",
+        "shell_indicators",
+        "window_console_observations"
+      ],
+      "properties": {
+        "record_type": {
+          "type": "string",
+          "const": "process_start"
+        },
+        "run_id": {
+          "type": "string",
+          "description": "Unique run identifier matching markers."
+        },
+        "capture_source": {
+          "type": "string",
+          "const": "wmi-process-start-trace",
+          "description": "Capture source identifier."
+        },
+        "timestamp_utc": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO-8601 UTC timestamp of process creation event."
+        },
+        "timestamp_local": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO-8601 timestamp with local timezone offset."
+        },
+        "child_pid": {
+          "type": "integer",
+          "description": "Process ID of the newly created process."
+        },
+        "child_process_name": {
+          "type": "string",
+          "description": "Image name of the child process (e.g., 'cmd.exe')."
+        },
+        "child_executable_path": {
+          "type": ["string", "null"],
+          "description": "Full path to the child executable, if available via WMI enrichment."
+        },
+        "child_command_line": {
+          "type": ["string", "null"],
+          "description": "Full command line of the child process, if available via WMI enrichment. MAY CONTAIN SENSITIVE DATA."
+        },
+        "parent_pid": {
+          "type": "integer",
+          "description": "Process ID of the parent process."
+        },
+        "parent_process_name": {
+          "type": ["string", "null"],
+          "description": "Image name of the parent process, if available."
+        },
+        "parent_executable_path": {
+          "type": ["string", "null"],
+          "description": "Full path to the parent executable, if available."
+        },
+        "parent_command_line": {
+          "type": ["string", "null"],
+          "description": "Full command line of the parent process, if available. MAY CONTAIN SENSITIVE DATA."
+        },
+        "session_id": {
+          "type": "integer",
+          "description": "Terminal session ID."
+        },
+        "user_sid": {
+          "type": ["string", "null"],
+          "description": "User SID, if available from WMI."
+        },
+        "shell_indicators": {
+          "$ref": "#/definitions/ShellIndicators"
+        },
+        "window_console_observations": {
+          "$ref": "#/definitions/WindowConsoleObservations"
+        },
+        "enrichment_status": {
+          "type": "string",
+          "enum": ["complete", "partial", "missed-process-exited"],
+          "description": "Whether Win32_Process enrichment completed before process exit."
+        },
+        "raw_event": {
+          "$ref": "#/definitions/RawWMIEvent",
+          "description": "Raw WMI event fields preserved for audit."
+        },
+        "correlation": {
+          "type": "object",
+          "description": "Populated by Merge-PiLifecycleEvidence.ps1 after correlation.",
+          "properties": {
+            "lifecycle_path": {
+              "type": ["string", "null"],
+              "description": "Assigned lifecycle path."
+            },
+            "window_name": {
+              "type": ["string", "null"],
+              "description": "Name of the correlation window this event falls into."
+            },
+            "offset_ms_from_window_start": {
+              "type": ["number", "null"],
+              "description": "Millisecond offset from core window start."
+            },
+            "in_core_window": {
+              "type": "boolean",
+              "description": "Whether this event falls inside the core window (not just the expanded window)."
+            }
+          }
+        }
+      }
+    }
+  },
+  "type": "object",
+  "oneOf": [
+    { "$ref": "#/definitions/MarkerRecord" },
+    { "$ref": "#/definitions/ProcessStartRecord" }
+  ]
+}

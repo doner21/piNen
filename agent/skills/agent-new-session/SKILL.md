@@ -46,7 +46,9 @@ durable architecture because Pi npm updates overwrite it.
 **Without an upstream command-dispatch API:** calling `agent_new_session`
 returns a clear error message about `pi.executeCommand` not being available.
 The idle poll is NOT started — no false success, no silent timeout. Check
-`agent/agent-new-session-diagnostics.json`: `executeCommandAvailable` will
+the canonical Pi-home diagnostics file (`<PI_HOME>/agent/agent-new-session-diagnostics.json`,
+`~/.pi/agent/agent-new-session-diagnostics.json` by default):
+`executeCommandAvailable` will
 be `false` and `idleDetected` will be `null`.
 
 **The command path always works:** typing `/agent-new-session` in the TUI
@@ -184,7 +186,7 @@ Example:
 
 ```
 RESUME AFTER NEW SESSION:
-cwd: %USERPROFILE%/.pi
+cwd: <project-directory>
 Prior task: building the agent-new-session extension and skill (NenFlow run RUN_20260622-120000).
 Next steps: verify the extension loads correctly, test the deferred idle-poll pattern, and complete the SKILL.md documentation.
 Relevant files: agent/extensions/agent-new-session/index.ts, agent/skills/agent-new-session/SKILL.md
@@ -237,7 +239,8 @@ Only after the schedule succeeds, call `agent_new_session` with `{}`.
     agent becomes idle.
   - There is a 30-second maximum wait. If the agent does not become idle
     within that window, the poll times out and writes diagnostics to
-    `agent/agent-new-session-diagnostics.json`.
+    the canonical Pi-home file `<PI_HOME>/agent/agent-new-session-diagnostics.json`
+    (`~/.pi/agent/agent-new-session-diagnostics.json` by default).
   - **Diagnostics interpretation:** `newSessionConfirmed: true` and
     `confirmedBy: "session_shutdown:new"` are authoritative success
     signals. Even if `executeCommandRejected` or `hardTimeout` appear in
@@ -267,7 +270,8 @@ scheduler), resuming your task with a clean context window.
   standard delay for most workflows. It ensures the new session is fully
   initialized before the continuation message arrives.
 - **For acceptance/verification reads:** use **75–90 seconds** when you need to
-  read `agent/agent-new-session-diagnostics.json` after the session switch.
+  read the canonical Pi-home file `<PI_HOME>/agent/agent-new-session-diagnostics.json`
+  (`~/.pi/agent/agent-new-session-diagnostics.json` by default) after the session switch.
   The executeCommand handler has a 60-second hard timeout; its late timeout
   path can emit a failure write after the session has actually switched. A
   75–90s delay ensures the success-preserving diagnostics writer has finalized
@@ -293,7 +297,8 @@ scheduler), resuming your task with a clean context window.
 ## Reading diagnostics after acceptance
 
 When the continuation message's first action reads
-`agent/agent-new-session-diagnostics.json`, interpret as follows:
+the canonical Pi-home file `<PI_HOME>/agent/agent-new-session-diagnostics.json`
+(`~/.pi/agent/agent-new-session-diagnostics.json` by default), interpret as follows:
 
 - **PASS** — valid JSON, `phase === "done"`, `newSessionConfirmed === true`,
   `confirmedBy === "session_shutdown:new"`, `newSessionSilentlyFailed ===
@@ -335,12 +340,16 @@ When the new session starts and receives the scheduled continuation message:
   old-session work. The old session is about to be destroyed.
 - **No false success:** if the tool returns an error about
   `pi.executeCommand`, the new session DID NOT and WILL NOT fire. The idle
-  poll was never started. Check `agent/agent-new-session-diagnostics.json`:
+  poll was never started. Check the canonical Pi-home file
+  `<PI_HOME>/agent/agent-new-session-diagnostics.json`
+  (`~/.pi/agent/agent-new-session-diagnostics.json` by default):
   `executeCommandAvailable: false` and `idleDetected: null` confirm this.
 - The `session_shutdown` handler in the extension cleans up the idle poll
   interval to prevent resource leaks.
-- Diagnostics are written to `agent/agent-new-session-diagnostics.json` if the
-  idle poll times out (30s) or encounters errors.
+- Diagnostics are written only to the canonical Pi-home file
+  `<PI_HOME>/agent/agent-new-session-diagnostics.json`
+  (`~/.pi/agent/agent-new-session-diagnostics.json` by default), independent
+  of the active project cwd, if the idle poll times out (30s) or encounters errors.
 
 ## Quick reference
 
@@ -353,6 +362,7 @@ When the new session starts and receives the scheduled continuation message:
 4. agent_new_session {}   (schedules deferred idle-poll session switch; returns immediately)
 5. STOP. End the turn. The idle poll creates the new session after your turn ends.
    Wait for the scheduled continuation in the new session.
-6. In the new session, read agent/agent-new-session-diagnostics.json FIRST.
+6. In the new session, read <PI_HOME>/agent/agent-new-session-diagnostics.json FIRST
+   (~/.pi/agent/agent-new-session-diagnostics.json by default).
    newSessionConfirmed:true + confirmedBy:"session_shutdown:new" = authoritative success.
 ```

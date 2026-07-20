@@ -24,7 +24,7 @@ By default, the extension prefers the currently running Pi CLI script when avail
 ## Install
 
 ```bash
-pi install %USERPROFILE%/pi-orchestrator-extension
+pi install ~/.pi/pi-orchestrator-extension
 ```
 
 If Pi is already running, reload resources after installing:
@@ -46,14 +46,17 @@ Supported command flags:
 
 - `--max-subagents N` — explicit total subprocess ceiling for the run.
 - `--max-retries N` — retry count after the first attempt; `2` means up to 3 attempts.
-- `--concurrency N` — executor concurrency per dependency wave.
+- `--concurrency N` — executor concurrency per dependency wave (legacy alias, max 16).
+- `--executor-concurrency N` / `--executor-count N` — executor wave slots; supports up to 16 simultaneous independent executors when dependencies allow.
+- `--planner-count N` / `--planner-concurrency N` — run multiple planner subagents in parallel, then deterministically select the lowest-index parseable plan.
+- `--verifier-count N` / `--verifier-concurrency N` — run multiple verifier subagents in parallel; aggregate with strict consensus (any verifier FAIL makes the aggregate FAIL).
 - `--planner-agent NAME`, `--executor-agent NAME`, `--verifier-agent NAME` — agent profile names.
 - `--planner-model M`, `--planner-provider P` — per-run model override for the planner.
 - `--executor-model M`, `--executor-provider P` — per-run model override for executor agents.
 - `--verifier-model M`, `--verifier-provider P` — per-run model override for the verifier.
 - `--cwd PATH` — child subprocess working directory.
 - `--allow-local-model` / `--no-allow-local-model` — local model guard override.
-- `--paradigm NAME` — orchestration shape: `plan-execute-verify` (default), `multi-verify-vote`, `composable-pipeline`, `verify-only`, `safe-github-publish`.
+- `--paradigm NAME` — orchestration shape: `plan-execute-verify` (default), `multi-verify-vote`, `composable-pipeline`, `dual-plan-synthesis-execute-verify`, `verify-only`, `paradigm-creator`, `shape-builder`, `win-console-spawn-root-cause`, `win-lifecycle-process-trace`, `frozen-gate-fix-loop`, `evidence-audit`, `independent-replication`, `safe-github-publish`.
 - `--hard-gates MODE` — judgment-layer gate mode: `strict` | `advisory` (default) | `off`. See "Judgment layer" below.
 - `--preflight` / `--no-preflight` — toggle the 1-token provider health pings run before any subagent spawn (default on).
 - `--planner-fallback-model M`, `--planner-fallback-provider P` (and the `executor`/`verifier` variants) — per-role fallback route applied when the primary route fails pre-flight (graceful degradation).
@@ -87,11 +90,12 @@ reply-text shape heuristics.
   regenerated) as long as their artifacts still exist on disk. The planner is
   told which tasks are already complete and must not re-create them.
 - **Pre-flight + structured failures (F5)**: before spawning any subagent, a
-  1-token health ping runs for each routed provider/model pair. Failures
-  produce a machine-readable error (`provider`, `type`, `resets_at`) instead
-  of raw payload dumps, per-role fallback routes are tried, and a **partial
-  report is always emitted on abort** (`details.aborted`,
-  `details.providerError`).
+  1-token health ping runs for each routed provider/model pair. Every ping has
+  a 20-second wall-clock timeout and the complete primary/fallback preflight
+  has a 75-second wall-clock budget. Timeout and abort failures produce a
+  machine-readable error (`provider`, `model`, `type`) and a terminal partial
+  FAIL report (`details.aborted`, `details.providerError`) instead of hanging
+  or dumping raw provider payloads.
 - **Intake provenance (F6)**: every derived criterion carries
   `source: explicit | inferred` (`intake.criteriaProvenance`). Synthesized
   criteria (e.g. a generic executor output contract without literal format
@@ -100,54 +104,45 @@ reply-text shape heuristics.
 - **Commit evidence (F7)**: the report exposes pre/post-execution `HEAD`
   hashes per attempt (plus a run id), so verifiers can diff reliably despite
   interleaved checkpoint auto-commits.
+- **`dual-plan-synthesis-execute-verify` paradigm**: route-specific high-stakes loop with OpenRouter GLM 5.2 + OpenAI Codex GPT 5.5 independent planners, Opus 4.8 synthesis, DeepSeek V4 Pro execution, and GPT 5.5 direct-evidence verification with bounded executor retry feedback.
 - **`verify-only` paradigm (F8)**: input is an evidence checklist + paths;
   spawns verifier(s) only; output is per-check verdicts with citations; exempt
   from implementation-task heuristics. See `PARADIGMS.md`.
+- **`win-console-spawn-root-cause` paradigm**: 3-phase Windows console flash investigation. Routes execution to DeepSeek V4 Pro, higher-level reasoning to GPT-5.5. Falsifiable verifier with strict FAIL conditions: execution not DeepSeek V4 Pro, static-grep-only, lifecycle paths omitted, Windows console mechanics unaddressed, rollback missing, fix too broad.
+- **`win-lifecycle-process-trace` paradigm**: 3-phase non-invasive Windows lifecycle process-trace runbook and harness materialization. Planner (GPT-5.5) maps lifecycle boundaries, action markers, and correlation windows. Executor (DeepSeek V4 Pro) produces non-invasive diagnostic harness scripts and verification checklist. Verifier (GPT-5.5) judges harness materials: must fail if static-only, action markers/correlation windows missing, lifecycle paths omitted, rollback absent, or executor route wrong. Shape is non-invasive until a separate human-approved run — no live Pi interception, no config mutation.
+- **`frozen-gate-fix-loop` paradigm**: bounded-fix loop for an EXISTING near-passing implementation against a FROZEN (sha256-content-locked) gate/spec document plus enumerated residual findings. Phases 1 and 3 are DETERMINISTIC (non-LLM) sha256 verifications of the frozen document before and after each executor fix — a mismatch is an automatic FAIL (freeze mismatch spawns zero LLMs; a mid-run tamper FAILs before the verifier). The executor fixes ONLY the enumerated findings (restructuring beyond scope is a verifier FAIL); an independent verifier re-checks raw artifacts with fail-closed JSON parsing; the loop retries bounded on verifier FAIL (default `maxRetries` 2). Inputs are labeled fields in the task and/or a referenced `SPEC_FILE` (spec-file pattern preferred): `FROZEN_DOC_PATH`, `FROZEN_DOC_SHA256`, `FINDINGS`, optional `SPEC_FILE`/`RUN_ID_LABEL`. Route overrides (`executorModel`/`executorProvider`, `verifierModel`/`verifierProvider`) are honored and reflected in the report `Routes:` line; resume is supported (deterministic phases re-execute; completed LLM phases restore from checkpoint). Built on the new deterministic non-LLM phase primitive (`src/deterministic-phase.ts`: `hash-file`, `verify-hash`, `freeze-record`, `manifest` — pure Node stdlib, no spawn/network/arbitrary command execution, checkpointed with a `deterministic: true` marker and a `DETERMINISTIC (no LLM)` report tag). See `PARADIGMS.md`.
+- **`evidence-audit` paradigm**: hardened re-verifier over a COMPLETED run's evidence (falsifier-grade `verify-only`). Phase 1 DETERMINISTIC `verify-hash` of the frozen gate document (mismatch ⇒ zero-spawn FAIL); Phase 2 DETERMINISTIC `manifest` (sha256 + bytes) of the declared gate-evidence files relative to `EVIDENCE_CWD` — a missing/invalid file is a zero-spawn FAIL and the checkpointed manifest IS the audit fingerprint; Phase 3 spawns exactly ONE read-only verifier (NO executor) that audits run-id binding, internal consistency, and freshness from raw artifacts with fail-closed JSON; Phase 4 DETERMINISTIC `verify-hash` confirms the frozen doc was untouched. The shape never writes into the audited tree. Inputs: `FROZEN_DOC_PATH`, `FROZEN_DOC_SHA256`, `EVIDENCE_CWD`, optional `RUN_ID_LABEL`/`AUDIT_FOCUS`/`GATE_EVIDENCE_FILES`/`SPEC_FILE`. `verifierModel`/`verifierProvider` overrides honored; resume-supported. See `PARADIGMS.md`.
+- **`independent-replication` paradigm**: two INDEPENDENT implementations of ONE frozen gate in isolated lane subdirectories, routed to (ideally) different models, compared honestly (codifies the K1/G2 two-shape pattern). DETERMINISTIC `verify-hash` before, between, and after the two lanes (tamper-proof; a mid-run tamper ⇒ FAIL at the next deterministic check with lane B not run). Each lane runs its own lane-confined executor (lane B forbidden from reading lane A) then an independent fail-closed verifier. The overall verdict is aggregated IN CODE (PASS iff both lanes PASS and all freeze checks hold); the diversity caveat is COMPUTED from the resolved lane routes ("fully disjoint" vs shared-model narrowed). Inputs: `FROZEN_DOC_PATH`, `FROZEN_DOC_SHA256`, `BASE_CWD`, optional `LANE_A_SUBDIR`/`LANE_B_SUBDIR`, optional lane-B route overrides `LANE_B_EXECUTOR_PROVIDER/MODEL` and `LANE_B_VERIFIER_PROVIDER/MODEL`; lane A uses the standard `executorModel`/`verifierModel` params. Resume-supported. See `PARADIGMS.md`.
+- **`paradigm-creator` paradigm**: explicit-only conservative self-extension
+  helper. V1 is propose-only: it runs one bounded assessment planner, then
+  deterministic TypeScript helpers normalize the requested name, validate the
+  spec, gate confidence, render a candidate shape template, run static checks,
+  and return reload handoff details. It does not write files, reload Pi,
+  schedule continuations, or infer itself from fuzzy natural language.
+  V1 validation limits: `maxIterations` must be exactly `1` (generated
+  template runs a single sequential pass), and `maxSubagents` must be at
+  least the number of proposed phases.
 
 The per-spawn model-routing attestation lines (`Subagent X: using
 provider/model.`) and the deterministic routing check are unchanged and remain
 byte-compatible in the report. Pre-flight pings do not count against
 `maxSubagents` and never emit attestation-shaped lines.
 
-## GitHub Publishing (safe-github-publish)
+## Safe GitHub publishing
 
-The `safe-github-publish` paradigm is the **default recommended method** for
-publishing repositories to GitHub from piNen. It implements a 3-phase safe
-publishing pipeline:
+`safe-github-publish` is the publishing-specific shape:
 
-1. **Plan/Contract (Planner):** Produces a sanitization plan with allowlists
-   and deny lists. Never copies source `.git/` history.
-
-2. **Execute (Executor):** Builds a clean staging tree, runs local safety
-   checks (gitleaks, path scans, secret scans), initializes a fresh git
-   repository, creates a **private-first** GitHub repo, and pushes.
-
-3. **Verify (Verifier):** Independently clones the remote, runs all safety
-   gates, and produces a PASS/FAIL verdict with evidence.
-
-**Role integrity:** The visible/current orchestrator never executes staging,
-sanitization, commit, repo creation, or push. These are always delegated to
-the executor and verifier subagents.
-
-Usage:
-
-```
-/orchestrate --paradigm safe-github-publish "Publish my project as my-repo"
+```text
+/orchestrate --paradigm safe-github-publish "Publish this project as my-repo"
 ```
 
-Safety features:
-- Private-first repository creation
-- gitleaks secret scanning before push
-- Path denylist enforcement (no auth files, sessions, runtime state)
-- Personal path/email scrubbing
-- Independent remote verification after push
-
-See `PARADIGMS.md` for the full shape specification and `src/shapes/safe-github-publish.ts`
-for the implementation.
+It requires a sanitization contract, builds a clean staging tree without source Git history, runs gitleaks and path-deny checks, creates the target private-first, pushes through an executor, and independently verifies the remote. The visible orchestrator never performs the main publishing work directly.
 
 ## Per-run model routing and natural-language controls
 
-The `orchestrate` tool accepts optional `plannerModel`/`plannerProvider`, `executorModel`/`executorProvider`, and `verifierModel`/`verifierProvider` parameters so the calling model can decide which provider/model to use for each role. On the command line, use `--planner-model`, `--planner-provider`, etc. When these are omitted, the subagent inherits its configured model from the agent profile in `~/.pi/agent/agents/` (if set), otherwise from the parent session model.
+The `orchestrate` tool accepts optional `plannerModel`/`plannerProvider`, `executorModel`/`executorProvider`, and `verifierModel`/`verifierProvider` parameters so the caller can select each role route. On the command line, use `--planner-model`, `--planner-provider`, etc. Explicit overrides take precedence. Omitted fields resolve from the named agent profile in `~/.pi/agent/agents/`, then from `~/.pi/agent/settings.json` (`defaultProvider`/`defaultModel`); they no longer inherit the conversational model. The selected planner/executor/verifier routes are emitted before preflight begins.
+
+Because this package is loaded as a Pi extension, applying these source changes to an already-running Pi or embedded SSI harness may require a **full Pi/SSI process restart**. This repair does not reload or restart any active process.
 
 The intake also preserves pure natural-language orchestration controls inside the task text, including max agents/subagents, executor concurrency/parallelism, retry/attempt loop limits, researcher counts, distinct perspectives, and runtime-role model routing. Explicit natural-language model routing is treated as essential orchestrator configuration, not executor work.
 
@@ -164,6 +159,94 @@ User: "Use max five agents, concurrency two, loop at most one attempt. Run two r
 → intake.orchestration_controls.researcherCount = 2
 → intake.routing_requirements includes researcher=deepseek/deepseek-v4-pro and planner=openai-codex/gpt-5.5 as essential natural-language requirements
 ```
+
+## `win-console-spawn-root-cause` example
+
+```text
+/orchestrate --paradigm win-console-spawn-root-cause "Investigate remaining console flashes on Pi reload and new-session"
+```
+
+Explicit paradigm call with overrides:
+
+```json
+{
+  "task": "Investigate remaining console flashes on Pi reload, new-session, and open-from-Terminal",
+  "paradigm": "win-console-spawn-root-cause",
+  "executorModel": "deepseek-v4-pro",
+  "executorProvider": "deepseek",
+  "plannerModel": "gpt-5.5",
+  "plannerProvider": "openai-codex",
+  "preflight": false,
+  "maxSubagents": 6
+}
+```
+
+## `win-lifecycle-process-trace` example
+
+```text
+/orchestrate --paradigm win-lifecycle-process-trace "Create a non-invasive diagnostic harness for tracing Windows Pi process creation across cold start, reload, and new-session lifecycles"
+```
+
+Explicit paradigm call with overrides:
+
+```json
+{
+  "task": "Create non-invasive process-trace harness for Windows Pi lifecycles",
+  "paradigm": "win-lifecycle-process-trace",
+  "executorModel": "deepseek-v4-pro",
+  "executorProvider": "deepseek",
+  "plannerModel": "gpt-5.5",
+  "plannerProvider": "openai-codex",
+  "preflight": false,
+  "maxSubagents": 6
+}
+```
+
+This shape produces runbook/harness materials and a verification contract. It does NOT execute tracing or launch Pi processes. A separate human-approved run is required to execute the harness against live Pi processes.
+
+## `paradigm-creator` example
+
+```text
+/orchestrate --paradigm paradigm-creator "Propose a bounded red-team / blue-team / judge paradigm for migration audits"
+```
+
+The result is a proposal report, not an applied mutation. After a human or future explicit apply mode writes the proposed files and tests pass, the parent Pi session must schedule continuation, trigger a runtime reload, stop, read reload diagnostics first, and verify the new paradigm appears in runtime discovery before using it.
+
+## `shape-builder` example
+
+```text
+/orchestrate --paradigm shape-builder "SHAPE_BUILDER_SPEC_JSON\n{...spec json...}"
+```
+
+The shape-builder is a deterministic meta-constructor for creating new orchestration shapes with full lifecycle gating.
+
+### Lifecycle states
+
+A generated shape progresses through: `proposed` → `implementation_reported` → `implemented_verified` → (parent reload) → `reloaded_discovered` → `canary_passed`.
+
+- **proposed**: Spec parsed, validated, lifecycle JSON written. No files written yet.
+- **implementation_reported**: Generated files written, local checks passed. Not yet verified.
+- **implemented_verified**: Independent verifier confirmed implementation. `reloadRequired: true`.
+- **reloaded_discovered**: Post-reload; active runtime confirms shape is registered.
+- **canary_passed**: Active runtime canary succeeded. `usable: true`.
+
+### Return contract
+
+Successful pre-reload response includes:
+- `implemented_verified: true`, `usable: false`, `reloadRequired: true`
+- `nextRequiredGate: "agent_reload"`
+- `continuationTemplate` beginning `RESUME AFTER PI RELOAD:`
+
+The shape itself never reloads, schedules, or marks a shape usable before post-reload canary.
+
+### Reload handoff
+
+After verification reports `implemented_verified`:
+1. Visible ORCHESTRATOR schedules continuation, calls `agent_reload_runtime`, and stops.
+2. Resumed ORCHESTRATOR reads `agent-reload-diagnostics.json` first.
+3. Active runtime discovery with intentionally-unknown paradigm — confirm the generated name appears.
+4. Active runtime canary with `paradigm:<name>` and `task: "SHAPE_CANARY:<name>"`.
+5. Only after canary passes, mark the shape `usable: true`.
 
 ## Tool usage example
 
@@ -184,10 +267,25 @@ Ask Pi to use the tool, or call it from the model with parameters like:
   "concurrency": 2,
   "maxRetries": 2,
   "maxSubagents": 12,
-  "cwd": "%USERPROFILE%/my-project",
+  "cwd": "/path/to/my-project",
   "allowLocalModel": false
 }
 ```
+
+Explicit paradigm-creator call:
+
+```json
+{
+  "task": "Propose a bounded red-team / blue-team / judge paradigm for migration audits",
+  "paradigm": "paradigm-creator",
+  "preflight": false,
+  "maxSubagents": 3
+}
+```
+
+## Orchestrator Role Integrity
+
+When an orchestration paradigm runs, the visible/current agent remains the ORCHESTRATOR and must not execute the main task directly. Every run must produce an *Orchestrator Role Integrity Ledger*. On orchestration failure, repair the requested shape/tool — do not switch shapes or execute the main task directly. Provider/model fallback is allowed; shape substitution is forbidden. See `PARADIGMS.md` and `agent/AGENTS.md` for the canonical policy.
 
 ## Agent profiles
 
@@ -207,3 +305,9 @@ If profiles are absent, conservative default `planner`, `coder`, and `reviewer` 
 ## Determinism model
 
 The parent extension owns all orchestration state: attempt counter, spawned count, plan, executor outputs, verifier result, failure reasons, and final result. Subagents are isolated Pi processes and do not share a mutable blackboard.
+
+## Shape-Builder Generated Shapes
+
+<!-- shape-builder:generated-shapes:start -->
+- `m66-explicit-routing-proof`: Build-time generated M6.6 proof shape for explicit route, context-isolation, executor-control, and two-verifier dispatch acceptance.
+<!-- shape-builder:generated-shapes:end -->

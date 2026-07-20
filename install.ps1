@@ -1,4 +1,4 @@
-# piNen One-Click Windows Installer
+﻿# piNen One-Click Windows Installer
 # Safe, idempotent, no-admin by default.
 #
 # One-liner usage:
@@ -10,13 +10,15 @@
 #   -ApplyCorePatch       Apply the Pi core patch after install
 #   -DryRun               Show what would happen without making changes
 #   -SkipEngram           Skip Engram download and setup
+#   -PersistEnv           Persist ENGRAM_BIN to the user environment
 
 param(
     [string]$InstallDir = "",
     [switch]$Force,
     [switch]$ApplyCorePatch,
     [switch]$DryRun,
-    [switch]$SkipEngram
+    [switch]$SkipEngram,
+    [switch]$PersistEnv
 )
 
 $ErrorActionPreference = "Stop"
@@ -307,18 +309,24 @@ if (-not $SkipEngram) {
         }
     }
 
-    # Set ENGRAM_BIN for current session and persist
+    # Set ENGRAM_BIN for this installer process. Persistence is opt-in.
     if (Test-Path $engramBin) {
         $env:ENGRAM_BIN = $engramBin
-        Write-Host "--> ENGRAM_BIN set for current session" -ForegroundColor Green
+        Write-Host "--> ENGRAM_BIN set for the installer process" -ForegroundColor Green
 
-        try {
-            [Environment]::SetEnvironmentVariable("ENGRAM_BIN", $engramBin, [EnvironmentVariableTarget]::User)
-            Write-Host "--> ENGRAM_BIN persisted to user environment" -ForegroundColor Green
+        if ($PersistEnv) {
+            try {
+                [Environment]::SetEnvironmentVariable("ENGRAM_BIN", $engramBin, [EnvironmentVariableTarget]::User)
+                Write-Host "--> ENGRAM_BIN persisted to user environment" -ForegroundColor Green
+            }
+            catch {
+                Write-Host "--> WARNING: Could not persist ENGRAM_BIN to user environment" -ForegroundColor Yellow
+                Write-Host "    You may need to set it manually: setx ENGRAM_BIN `"$engramBin`"" -ForegroundColor Yellow
+            }
         }
-        catch {
-            Write-Host "--> WARNING: Could not persist ENGRAM_BIN to user environment" -ForegroundColor Yellow
-            Write-Host "    You may need to set it manually: setx ENGRAM_BIN `"$engramBin`"" -ForegroundColor Yellow
+        else {
+            Write-Host "--> ENGRAM_BIN was not persisted (use -PersistEnv to opt in)." -ForegroundColor Cyan
+            Write-Host "    The default MCP template also discovers Engram at this install path." -ForegroundColor Cyan
         }
     }
 }
@@ -396,8 +404,13 @@ Write-Host ""
 Write-Host "  Optional:" -ForegroundColor Cyan
 Write-Host "  - Apply core patch: rerun with -ApplyCorePatch" -ForegroundColor White
 Write-Host ""
-Write-Host "  ENGRAM_BIN has been persisted to your user environment." -ForegroundColor Green
-Write-Host "  Restart your terminal for it to take effect everywhere." -ForegroundColor Yellow
+if ($PersistEnv) {
+    Write-Host "  ENGRAM_BIN has been persisted to your user environment." -ForegroundColor Green
+    Write-Host "  Restart your terminal for it to take effect everywhere." -ForegroundColor Yellow
+}
+else {
+    Write-Host "  ENGRAM_BIN was not persisted. Use -PersistEnv if you want that." -ForegroundColor Cyan
+}
 Write-Host ""
 Write-Host "  For help, see:" -ForegroundColor Cyan
 Write-Host "  - docs\INSTALL_WINDOWS.md" -ForegroundColor White

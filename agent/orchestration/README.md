@@ -1,8 +1,10 @@
 # Orchestration Specialist Registry
 
-This directory defines the richer orchestration sidecar layer for Pi/NenFlow runs.
+This directory defines the richer orchestration sidecar layer for Pi orchestration runs.
 
-Primary invariant: **NenFlow keeps the PEV spine** (`pev-researcher`, `pev-planner`, `pev-executor`, `pev-verifier`). Specialist `orch-*` agents are optional sidecars selected by task needs.
+Primary invariant: **the deterministic `/orchestrate` system (`pi-orchestrator-extension`) is the primary spine**. Specialist `orch-*` agents are optional sidecars selected by task needs.
+
+> NenFlow v3 and its `pev-*` PEV spine were retired 2026-07-18. See `agent/docs/nenflow-v3-retirement.md`.
 
 ## Phase mapping
 
@@ -17,10 +19,10 @@ Primary invariant: **NenFlow keeps the PEV spine** (`pev-researcher`, `pev-plann
 ## Routing rules
 
 1. Start with the smallest useful set of agents.
-2. Never let sidecars replace canonical NenFlow PEV artifacts unless the user explicitly requests a non-PEV flow.
+2. Never let sidecars replace canonical deterministic-run artifacts unless the user explicitly requests a different flow.
 3. Use implementation agents only for bounded file mutations.
 4. Use witness/observer agents for evidence and drift, not correctness verdicts.
-5. In NenFlow run directories, sidecar artifacts should be named `ATT_SIDE_<PHASE>_<AGENT>.md`.
+5. In orchestration run directories, sidecar artifacts should be named `ATT_SIDE_<PHASE>_<AGENT>.md`.
 
 ## Simple routing presets
 

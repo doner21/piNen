@@ -1,19 +1,16 @@
 {
   "schema_version": 1,
-  "purpose": "Specialist sidecar registry for richer Pi/NenFlow/orchestrate-run workflows. PEV remains the primary spine; these agents are optional specialists selected by phase, risk, and task type.",
+  "purpose": "Specialist sidecar registry for richer Pi/orchestrate-run workflows. The deterministic /orchestrate system (pi-orchestrator-extension) is the primary spine; these agents are optional specialists selected by phase, risk, and task type. NenFlow v3 and its pev-* spine were retired 2026-07-18 (see agent/docs/nenflow-v3-retirement.md).",
   "primary_spine": [
-    "pev-researcher",
-    "pev-planner",
-    "pev-executor",
-    "pev-verifier"
+    "deterministic-orchestrate"
   ],
   "selection_rules": [
     "Use at most 1-3 sidecars for small tasks; avoid agent sprawl.",
-    "Sidecars do not replace canonical PEV artifacts unless the user explicitly chooses a non-PEV flow.",
+    "Sidecars do not replace canonical deterministic-run artifacts unless the user explicitly chooses a different flow.",
     "Only agents with agencyLevel=implementation may edit source/config/docs files.",
-    "Verifier sidecars advise; pev-verifier owns the final NenFlow PASS/FAIL verdict.",
+    "Verifier sidecars advise; the deterministic orchestrator owns the final PASS/FAIL verdict.",
     "Observer/witness agents record evidence, drift, and artifact health; they do not judge correctness.",
-    "If a sidecar writes an artifact in a NenFlow run, use ATT_SIDE_<PHASE>_<AGENT>.md."
+    "If a sidecar writes an artifact in an orchestration run, use ATT_SIDE_<PHASE>_<AGENT>.md."
   ],
   "agents": [
     {

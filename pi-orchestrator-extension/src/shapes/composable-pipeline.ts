@@ -32,6 +32,8 @@ import type {
   NormalizedParams,
   InferredModelRouting,
 } from "../types";
+import { resolveRouteOverride, formatRouteLabel } from "../routes";
+import { normalizeAnthropicModelId, resolveComposedPhaseModel } from "../model-aliases";
 import { spawnSync } from "node:child_process";
 import { estimateExecutorContextBudget } from "../executor-recovery/budget-estimator";
 import { injectContinuationGuardrail } from "../executor-recovery/contract-types";
@@ -135,8 +137,18 @@ function getMeta(kind: PhaseKind): PhaseMeta {
 function getPhaseModelOverride(phaseKind: PhaseKind, params: NormalizedParams, inferred: InferredModelRouting): { model?: string; provider?: string } | undefined {
   const roleMap: Record<string, string> = { hypothesize: "hypothesizer", critique: "critic", synthesize: "synthesizer" };
   const roleName = roleMap[phaseKind];
-  if (roleName && inferred.runtimeRoles?.[roleName]) {
-    return inferred.runtimeRoles[roleName];
+  if (roleName) {
+    // Composed middle phases (hypothesize/critique/synthesize) are NOT reachable
+    // by the planner/executor/verifier override params. Resolve against a
+    // runtime-role hint, else INHERIT an explicitly-routed valid role default
+    // (executor route first, then planner) rather than any label-derived id.
+    // Any residual dotted anthropic id is normalized to dashes (WAVE3-SPEC
+    // ITEM C; bug composable-pipeline-composed-phase-malformed-sonnet-model-id.md).
+    return resolveComposedPhaseModel({
+      runtimeRole: inferred.runtimeRoles?.[roleName],
+      executorRoute: toMO(params.executorModel, params.executorProvider),
+      plannerRoute: toMO(params.plannerModel, params.plannerProvider),
+    });
   }
   if (phaseKind === "plan") return { model: params.plannerModel, provider: params.plannerProvider };
   if (phaseKind === "verify") return { model: params.verifierModel, provider: params.verifierProvider };
@@ -248,7 +260,10 @@ async function runPhase<T extends { index: number; agentName: string; text: stri
   perPhaseModel: { model?: string; provider?: string } | undefined,
   buildPrompt: (index: number, total: number) => string,
 ): Promise<T[]> {
-  const effectiveModel = perPhaseModel ?? toMO(params.executorModel, params.executorProvider);
+  // Defense-in-depth: normalize any residual dotted anthropic id (e.g. a
+  // label-derived "claude-sonnet-4.5") to dashes before it reaches a spawn
+  // (WAVE3-SPEC ITEM C). Non-anthropic ids (gpt-5.5, deepseek-*) pass through.
+  const effectiveModel = normalizeAnthropicModelId(perPhaseModel ?? toMO(params.executorModel, params.executorProvider));
   const items = Array.from({ length: phase.count }, (_, i) => i);
   const results = await runBoundedPool(items, MAX_PHASE_CONCURRENCY, signal, async (index, _pi, ws) => {
     const prompt = buildPrompt(index, phase.count);
@@ -769,8 +784,11 @@ function mergeOverrides(
   return (m || p) ? { model: m, provider: p } : undefined;
 }
 
+// Route override resolution delegated to the shared helper (src/routes.ts) so
+// every plan/execute/verify spawn and the report Routes line derive from
+// identical values (silent-route-override bug class, 2026-07-02).
 function toMO(model?: string, provider?: string): { model?: string; provider?: string } | undefined {
-  return (model || provider) ? { model, provider } : undefined;
+  return resolveRouteOverride(model, provider);
 }
 
 // ── Result builders ────────────────────────────────────────────────────────
@@ -794,6 +812,11 @@ function buildFinalResult(
     "",
     `**Task:** ${params.task}`,
     `**Pipeline:** ${phases.map((p) => `${p.kind}×${p.count}`).join(" → ") || "(empty)"}`,
+    // Routes line derives from the SAME resolved override values passed to the
+    // plan/execute/verify spawns (via toMO → resolveRouteOverride).
+    `**Routes:** Planner=${formatRouteLabel(toMO(params.plannerModel, params.plannerProvider))}; ` +
+      `Executor=${formatRouteLabel(toMO(params.executorModel, params.executorProvider))}; ` +
+      `Verifier=${formatRouteLabel(toMO(params.verifierModel, params.verifierProvider))}`,
     `**Subagents:** ${spawnGuard.spawned}/${spawnGuard.cap}`,
   ];
 

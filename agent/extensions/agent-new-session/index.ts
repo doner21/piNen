@@ -1,8 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { promises as fsp } from "node:fs";
-import { resolve, dirname } from "node:path";
-import { randomUUID } from "node:crypto";
+import { writeDiagnostics as writeCanonicalDiagnostics } from "./diagnostics.ts";
 
 /**
  * Agent-operated "new session" bridge — phase-machine + session_shutdown
@@ -19,7 +17,9 @@ import { randomUUID } from "node:crypto";
  *   "verifying" and waits for bounded shutdown confirmation before terminal
  *   failure.
  *
- * Diagnostics: `<cwd>/agent/agent-new-session-diagnostics.json`.
+ * Diagnostics: ONE canonical Pi-home location at
+ * `<PI_HOME>/agent/agent-new-session-diagnostics.json` (`~/.pi/agent/...` by
+ * default), regardless of the active project cwd.
  */
 
 const NEW_SESSION_COMMAND = "agent-new-session";
@@ -196,63 +196,7 @@ async function writeDiagnostics(
 	patch: Partial<NewSessionDiagnostics> & { attempts?: number; cwd?: string; executeCommandAvailable?: boolean },
 	cwd: string,
 ): Promise<void> {
-	try {
-		const dir = resolve(cwd, "agent");
-		await fsp.mkdir(dir, { recursive: true });
-		const diagPath = resolve(dir, "agent-new-session-diagnostics.json");
-
-		// 1-2. Read existing file, recover from raw text if malformed.
-		let raw: string | undefined;
-		let existing: NewSessionDiagnostics;
-		let recoveredConfirmation = false;
-
-		try {
-			raw = await fsp.readFile(diagPath, "utf8");
-			existing = JSON.parse(raw as string);
-		} catch {
-			// JSON parse failed. Recover confirmation evidence from raw text.
-			if (raw !== undefined && rawTextContainsConfirmation(raw)) {
-				recoveredConfirmation = true;
-			}
-			existing = {
-				phase: "idle",
-				attempts: 0,
-				cwd,
-				executeCommandAvailable: false,
-			};
-		}
-
-		// 3. Merge patch into existing.
-		const merged: NewSessionDiagnostics = { ...existing, ...patch };
-
-		// Merge arrays (cap lengths).
-		if (patch.executeEntries && existing.executeEntries) {
-			merged.executeEntries = [...existing.executeEntries, ...patch.executeEntries].slice(-20);
-		} else if (existing.executeEntries && !patch.executeEntries) {
-			merged.executeEntries = existing.executeEntries;
-		}
-		if (patch.tickLog && existing.tickLog) {
-			merged.tickLog = [...existing.tickLog, ...patch.tickLog].slice(-80);
-		} else if (existing.tickLog && !patch.tickLog) {
-			merged.tickLog = existing.tickLog;
-		}
-
-		// 4. Determine if confirmation has been observed from any source.
-		const confirmationObserved =
-			recoveredConfirmation ||
-			merged.newSessionConfirmed === true ||
-			merged.confirmedBy === NEW_SESSION_CONFIRMATION;
-
-		// Apply canonical defaults — forces success if confirmed.
-		applyCanonicalDefaults(merged, confirmationObserved);
-
-		// 5. Atomic write: temp file + rename.
-		const tmpPath = resolve(dir, `.agent-new-session-diagnostics.tmp-${randomUUID().slice(0, 8)}`);
-		await fsp.writeFile(tmpPath, JSON.stringify(merged, null, 2), "utf8");
-		await fsp.rename(tmpPath, diagPath);
-	} catch {
-		/* diagnostics must never throw */
-	}
+	return writeCanonicalDiagnostics(patch, cwd);
 }
 
 // ---------------------------------------------------------------------------
@@ -705,7 +649,9 @@ export default function agentNewSession(pi: ExtensionAPI): void {
 			"The old session and all its in-memory state will be torn down. Only " +
 				"filesystem state (such as agent_scheduler schedules) survives.",
 			"The scheduled continuation's FIRST action must be to READ " +
-				"agent/agent-new-session-diagnostics.json and check `newSessionConfirmed` / " +
+				"the canonical Pi-home diagnostics file `<PI_HOME>/agent/agent-new-session-diagnostics.json` " +
+				"(`~/.pi/agent/agent-new-session-diagnostics.json` by default) " +
+				"and check `newSessionConfirmed` / " +
 				"`newSessionSilentlyFailed` / `executeCommandRejected` / `phase`. If " +
 				"phase is 'done' and newSessionConfirmed is true, the switch succeeded. " +
 				"If phase is 'failed' and newSessionSilentlyFailed is true, the session " +
@@ -756,7 +702,9 @@ export default function agentNewSession(pi: ExtensionAPI): void {
 						text:
 							`A new-session switch is already in progress (phase: ${phase}, ` +
 							`request: ${activeRequestId}). No new switch scheduled. Wait for the ` +
-							`current attempt to finish (read agent/agent-new-session-diagnostics.json).`,
+							`current attempt to finish (read the canonical Pi-home file ` +
+							`<PI_HOME>/agent/agent-new-session-diagnostics.json; ` +
+							`~/.pi/agent/agent-new-session-diagnostics.json by default).`,
 					}],
 					details: { command: NEW_SESSION_COMMAND, deferred: false, coalesced: true, phase, requestId: activeRequestId },
 				};
@@ -796,7 +744,8 @@ export default function agentNewSession(pi: ExtensionAPI): void {
 							"session is torn down; the new session starts with a clean context window. " +
 							"Success is confirmed via session_shutdown{reason:new}. STOP now — do " +
 							"no further work in this runtime. The scheduled continuation must read " +
-							"agent/agent-new-session-diagnostics.json first to verify the switch applied.",
+							"the canonical Pi-home file <PI_HOME>/agent/agent-new-session-diagnostics.json " +
+							"(~/.pi/agent/agent-new-session-diagnostics.json by default) first to verify the switch applied.",
 					},
 				],
 				details: { command: NEW_SESSION_COMMAND, deferred: true, requestId: activeRequestId, phase: "polling" },

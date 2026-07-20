@@ -24,6 +24,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "$u='https://raw.githubus
 | `-Force` | Overwrite an existing install (creates timestamped backup) |
 | `-ApplyCorePatch` | Apply the Pi core patch after install |
 | `-SkipEngram` | Skip Engram download and setup |
+| `-PersistEnv` | Opt in to persisting `ENGRAM_BIN` in the user environment |
 | `-DryRun` | Show what would happen without making changes |
 
 **Example with options:**

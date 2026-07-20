@@ -1,9 +1,18 @@
 ---
-description: Alias for nenflow_v3 visible NenFlow orchestration
+description: RETIRED — /pev (NenFlow v3 alias) is retired; use the deterministic /orchestrate instead
 argument-hint: "<task>"
 ---
-Load and follow the global skill at `~/.pi/agent/skills/nenflow-v3/SKILL.md`.
+The `/pev` alias pointed to NenFlow v3, which has been retired (2026-07-18) in favor of the deterministic orchestration system.
 
-Run NenFlow v3 for this task:
+Do NOT run the NenFlow v3 loop. Do not load `skills-retired/nenflow-v3` or spawn `pev-*` subagents.
+
+Instead, route this task through the deterministic orchestrator:
+
+- Use the `/orchestrate` command provided by `~/.pi/pi-orchestrator-extension` (it performs intake, planning, execution, and verification deterministically, including intake.md handling).
+- For a lightweight rich run with specialist sidecars, use `/orch` (orchestration-wrapper skill).
+
+Retirement notes and restore instructions: `~/.pi/agent/docs/nenflow-v3-retirement.md`
+
+Task to route:
 
 $@

@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "enabled": true,
+  "paused": false,
+  "settleDebounceSeconds": 45,
+  "startupCatchUpSeconds": 90,
+  "pushOnShutdown": true,
+  "includeUntracked": true,
+  "remote": {
+    "enabled": true,
+    "policy": "existing-origin-only",
+    "name": "origin",
+    "branchPrefix": "pi-backup",
+    "minIntervalMinutes": 15,
+    "timeoutMs": 45000
+  },
+  "security": {
+    "requireGitleaks": true,
+    "gitleaksCommand": "gitleaks",
+    "denyGlobs": [
+      "**/.env",
+      "**/.env.*",
+      "**/.npmrc",
+      "**/auth.json",
+      "**/gmail-config.json",
+      "**/railway-token.json",
+      "**/credentials.json",
+      "**/*-credentials.json",
+      "**/secrets.json",
+      "**/*-secrets.json",
+      "**/*.pem",
+      "**/*.key",
+      "**/*.pfx",
+      "**/*.p12",
+      "**/id_rsa*",
+      "**/id_ed25519*",
+      "**/agent/sessions/**",
+      "**/.git/**"
+    ],
+    "maxChangedFiles": 5000,
+    "maxNewBlobBytes": 52428800,
+    "maxNewDataBytes": 262144000,
+    "maxObjectScanCount": 50000
+  },
+  "repositoryOverrides": {}
+}

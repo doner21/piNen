@@ -1,4 +1,4 @@
-# piNen bootstrap — run once after cloning
+﻿# piNen bootstrap — run once after cloning
 # Safe to rerun: checks for existing state before modifying.
 param(
     [switch]$PersistEnv,       # Opt-in: persist ENGRAM_BIN to user environment

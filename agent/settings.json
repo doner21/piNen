@@ -4,6 +4,7 @@
   "defaultThinkingLevel": "high",
   "hideThinkingBlock": false,
   "packages": [
+    "../pi-orchestrator-extension",
     "npm:pi-mcp-adapter",
     "npm:gentle-engram@0.1.8"
   ],

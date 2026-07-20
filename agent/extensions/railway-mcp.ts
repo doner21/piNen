@@ -15,8 +15,10 @@
  *   2. Railway CLI authenticated: railway login
  */
 
-import { existsSync } from "node:fs";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -29,16 +31,78 @@ let mcpTransport: StdioClientTransport | null = null;
 let mcpConnectPromise: Promise<void> | null = null;
 let toolsRegistered = false;
 
-const RAILWAY_CLI_PATHS = [
-  process.env.RAILWAY_CLI_PATH,
-  ...(process.env.APPDATA ? [
-    `${process.env.APPDATA}\
-pm\node_modules\@railway\cli\bin\railway.js`
-  ] : []),
-  ...(process.env.HOME ? [
-    `${process.env.HOME}/.npm-global/lib/node_modules/@railway/cli/bin/railway.js`
-  ] : []),
-].filter(Boolean) as string[];
+const RAILWAY_CLI_PATH =
+  "C:\\Users\\doner\\AppData\\Roaming\\npm\\node_modules\\@railway\\cli\\bin\\railway.js";
+
+// Token "area": a gitignored JSON file where the user pastes a non-expiring
+// Railway API/project token. Loaded at MCP-spawn time and injected into the
+// child process environment, so the Railway MCP no longer depends on the
+// OAuth session in ~/.railway/config.json (which silently expires).
+const RAILWAY_TOKEN_FILE = join(homedir(), ".pi", "agent", "railway-token.json");
+
+// Environment keys the Railway CLI/MCP honours. RAILWAY_API_TOKEN is an
+// account/team token (works across projects); RAILWAY_TOKEN is a project token
+// (scoped to one project+environment). The *_ID hints help link operations.
+const RAILWAY_ENV_KEYS = [
+  "RAILWAY_API_TOKEN",
+  "RAILWAY_TOKEN",
+  "RAILWAY_PROJECT_ID",
+  "RAILWAY_ENVIRONMENT_ID",
+  "RAILWAY_SERVICE_ID",
+] as const;
+
+/**
+ * Load Railway auth/config from the token area file and from process.env.
+ * Precedence: an explicitly exported process.env value overrides the file, so a
+ * temporary shell export can override the persisted token. Placeholder values
+ * (empty, or wrapped in <...>) are ignored so the example template is inert.
+ */
+function loadRailwayTokenEnv(): { env: Record<string, string>; source: string } {
+  const env: Record<string, string> = {};
+  let fromFile = false;
+
+  if (existsSync(RAILWAY_TOKEN_FILE)) {
+    try {
+      const parsed = JSON.parse(readFileSync(RAILWAY_TOKEN_FILE, "utf8")) as Record<
+        string,
+        unknown
+      >;
+      for (const key of RAILWAY_ENV_KEYS) {
+        const val = parsed[key];
+        if (
+          typeof val === "string" &&
+          val.trim() &&
+          !val.trim().startsWith("<")
+        ) {
+          env[key] = val.trim();
+          fromFile = true;
+        }
+      }
+    } catch (err: any) {
+      console.warn(
+        `[railway-mcp] Could not parse token file ${RAILWAY_TOKEN_FILE}:`,
+        err?.message ?? String(err),
+      );
+    }
+  }
+
+  let fromEnv = false;
+  for (const key of RAILWAY_ENV_KEYS) {
+    const val = process.env[key];
+    if (typeof val === "string" && val.trim()) {
+      env[key] = val.trim();
+      fromEnv = true;
+    }
+  }
+
+  const hasToken = Boolean(env.RAILWAY_API_TOKEN || env.RAILWAY_TOKEN);
+  const source = !hasToken
+    ? "none (falling back to OAuth ~/.railway/config.json)"
+    : [fromFile ? "token-file" : null, fromEnv ? "process-env" : null]
+        .filter(Boolean)
+        .join("+");
+  return { env, source };
+}
 
 interface McpToolDefinition {
   name: string;
@@ -1231,17 +1295,15 @@ const RAILWAY_TOOLS: McpToolDefinition[] = [
 ];
 
 function resolveRailwayCliPath(): string {
-  for (const candidate of RAILWAY_CLI_PATHS) {
-    if (existsSync(candidate)) {
-      return candidate;
-    }
+  if (!existsSync(RAILWAY_CLI_PATH)) {
+    throw new Error(
+      `Railway CLI entrypoint not found at ${RAILWAY_CLI_PATH}. Install it with: npm install -g @railway/cli`,
+    );
   }
-  throw new Error(
-    `Railway CLI entrypoint not found in any of [${RAILWAY_CLI_PATHS.join(", ")}]. ` +
-    `Install it with: npm install -g @railway/cli. ` +
-    `Alternatively, set RAILWAY_CLI_PATH to the cli.js entrypoint.`,
-  );
+
+  return RAILWAY_CLI_PATH;
 }
+
 function railwayToolNames(): string[] {
   return RAILWAY_TOOLS.map((tool) => tool.name);
 }
@@ -1337,12 +1399,25 @@ async function startMcpBridge(_pi: ExtensionAPI): Promise<void> {
 
   const resolvedCliPath = resolveRailwayCliPath();
 
+  // Resolve the token area and merge it over the full parent environment. We pass
+  // env explicitly (rather than letting the SDK use its minimal default env) so
+  // PATH/SystemRoot etc. survive on Windows AND the Railway token is present.
+  const { env: tokenEnv, source: tokenSource } = loadRailwayTokenEnv();
+  const childEnv: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (typeof v === "string") childEnv[k] = v;
+  }
+  Object.assign(childEnv, tokenEnv);
+
+  console.log(`[railway-mcp] Auth source: ${tokenSource}.`);
+
   // Spawn Node directly with the CLI JS entrypoint instead of the npm .cmd shim.
   // This bypasses cmd.exe/conhost.exe on Windows and prevents terminal flashes.
   const transport = new StdioClientTransport({
     command: "node",
     args: [resolvedCliPath, "mcp"],
     stderr: "pipe",
+    env: childEnv,
   });
 
   const client = new Client({ name: "pi-railway-bridge", version: "1.0.0" });

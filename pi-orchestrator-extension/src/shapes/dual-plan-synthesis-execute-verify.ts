@@ -1,0 +1,674 @@
+/**
+ * Shape: dual-plan-synthesis-execute-verify
+ * =========================================
+ * Run two independently routed planning passes, synthesize one bounded plan,
+ * execute that synthesized plan, then verify with direct evidence and bounded
+ * executor retry feedback.
+ *
+ * ONE-LINE RULE: Shapes are siblings — they stand on the substrate, never
+ * build on each other.
+ */
+
+import {
+  SpawnGuard,
+  clampIterations,
+  runBoundedPool,
+  spawnSubagent,
+  SubagentDetachedError,
+  throwIfAborted,
+  truncateWithNotice,
+  type AgentProfile,
+  type SpawnSubagentOptions,
+  type SubagentResult,
+} from "../substrate";
+import { RunStateStore, collectSurvivorResult } from "../run-state";
+import { resolveRouteWithFallback } from "../routes";
+
+import type {
+  OrchestrationShape,
+  OrchestrationShapeContext,
+  OrchestrationShapeResult,
+  NormalizedParams,
+} from "../types";
+
+// ── Shape-owned constants ─────────────────────────────────────────────────
+
+const PLAN_A_ROUTE = { provider: "openrouter", model: "z-ai/glm-5.2" } as const;
+const PLAN_B_ROUTE = { provider: "openai-codex", model: "gpt-5.5" } as const;
+const SYNTHESIS_ROUTE = { provider: "anthropic", model: "claude-opus-4-8" } as const;
+const EXECUTOR_ROUTE = { provider: "deepseek", model: "deepseek-v4-pro" } as const;
+const VERIFIER_ROUTE = { provider: "openai-codex", model: "gpt-5.5" } as const;
+
+const PLANNER_CONCURRENCY = 2;
+
+/**
+ * Resolve executor/verifier routes, honoring explicit params overrides
+ * (executorModel/executorProvider, verifierModel/verifierProvider).
+ * BUG FIX (2026-07-02): these overrides were previously accepted by the tool
+ * schema and pinged by preflight but silently IGNORED by this shape, which
+ * always spawned its hardcoded route constants — a silent route replacement.
+ */
+function resolveRoutes(params: NormalizedParams): {
+  executor: { provider: string; model: string };
+  verifier: { provider: string; model: string };
+} {
+  // Delegates to the shared helper (src/routes.ts) with semantics byte-identical
+  // to this shape's original production behavior. The `resolveRoutes` name is
+  // retained as a thin wrapper (static tests + the silent-route-override fix).
+  return {
+    executor: resolveRouteWithFallback(params.executorModel, params.executorProvider, EXECUTOR_ROUTE),
+    verifier: resolveRouteWithFallback(params.verifierModel, params.verifierProvider, VERIFIER_ROUTE),
+  };
+}
+const DEFAULT_MAX_RETRIES = 2;
+const MAX_SHAPE_RETRIES = 5;
+const MAX_FINAL_MARKDOWN_CHARS = 24_000;
+const MAX_DETAIL_TEXT_CHARS = 4_000;
+
+// ── Shape export ───────────────────────────────────────────────────────────
+
+export const dualPlanSynthesisExecuteVerifyShape: OrchestrationShape = {
+  name: "dual-plan-synthesis-execute-verify",
+  description:
+    "Two independent routed planners → routed synthesis reviewer → routed executor → " +
+    "routed direct-evidence verifier with bounded executor retry feedback.",
+  run: runDualPlanSynthesisExecuteVerify,
+};
+
+// ── Shape-specific result types ────────────────────────────────────────────
+
+interface PlannerOutput {
+  label: "Plan A" | "Plan B";
+  route: typeof PLAN_A_ROUTE | typeof PLAN_B_ROUTE;
+  result: SubagentResult;
+}
+
+interface ExecutionAttempt {
+  attempt: number;
+  executor: SubagentResult;
+  verifier: SubagentResult;
+  verdict: VerifierVerdict;
+}
+
+interface VerifierVerdict {
+  status: "pass" | "fail";
+  reasons: string[];
+  feedback: string;
+  evidence: string[];
+  raw: string;
+}
+
+// ── Main orchestration ─────────────────────────────────────────────────────
+
+async function runDualPlanSynthesisExecuteVerify(
+  context: OrchestrationShapeContext,
+): Promise<OrchestrationShapeResult> {
+  const { params, signal, onUpdate, inheritedModel, agents } = context;
+  const emit = (text: string) => onUpdate?.({ content: [{ type: "text", text }] });
+  const spawnGuard = new SpawnGuard(params.maxSubagents);
+  const maxRetries = resolveMaxRetries(params);
+  const maxAttempts = clampIterations(maxRetries + 1);
+  const routes = resolveRoutes(params);
+
+  // Checkpoint/resume wiring (ABORT-RESUME-DESIGN.md). Stage indices:
+  // 0=planA, 1=planB, 2=synthesis, then 3+2(k-1)=executor-k, 4+2(k-1)=verifier-k.
+  const stageNames = ["planA", "planB", "synthesis"];
+  for (let k = 1; k <= maxAttempts; k++) stageNames.push(`executor-${k}`, `verifier-${k}`);
+  const resume = context.resumeState;
+  const store = resume
+    ? RunStateStore.open(resume.state.runId)
+    : context.runId
+      ? RunStateStore.create(context.runId, "dual-plan-synthesis-execute-verify", params.task,
+          JSON.parse(JSON.stringify(params)) as Record<string, unknown>, stageNames)
+      : undefined;
+  const restoreStage = (index: number): SubagentResult | undefined => resume?.checkpoints.get(index);
+  const checkpointStage = (index: number, result: SubagentResult): void =>
+    store?.checkpointPhase(index, stageNames[index] ?? `stage-${index}`, result);
+  /** Collect a detached survivor's result, or undefined to respawn the stage. */
+  const collectStage = async (index: number): Promise<SubagentResult | undefined> => {
+    const survivor = resume?.survivors.get(index);
+    if (!survivor || !store) return undefined;
+    const collected = await collectSurvivorResult<SubagentResult>(survivor, emit, signal, "dual-plan-synthesis-execute-verify");
+    if (collected) checkpointStage(index, collected);
+    return collected;
+  };
+  const survivalFor = (index: number) =>
+    store
+      ? {
+          abortSurvival: {
+            resultFile: store.survivorResultPath(index, stageNames[index] ?? `stage-${index}`),
+            manifestFile: store.survivorManifestPath(index, stageNames[index] ?? `stage-${index}`),
+            phaseName: stageNames[index] ?? `stage-${index}`,
+            phaseIndex: index,
+          },
+        }
+      : {};
+  const detachGuard = (index: number, error: unknown): never => {
+    if (error instanceof SubagentDetachedError && store) {
+      store.markDetached(index, stageNames[index] ?? `stage-${index}`, error.manifest);
+      throw new Error(
+        `Orchestration aborted mid-stage but the ${stageNames[index]} subagent (pid=${error.manifest.pid}) ` +
+          `continues in the background. Resume this run by re-invoking the orchestrate tool with { resume: "${store.runId}" }. ` +
+          `Completed stages are checkpointed and will not be re-executed.`,
+      );
+    }
+    throw error as Error;
+  };
+
+  emit(
+    `dual-plan-synthesis-execute-verify: starting with ${maxRetries} retry slot(s), ` +
+      `spawn ceiling ${spawnGuard.cap}${resume ? ` (RESUME of run ${resume.state.runId})` : ""}.`,
+  );
+
+  // Phase 1: run independent planners concurrently (restored on resume when checkpointed).
+  throwIfAborted(signal);
+  let plannerOutputs: PlannerOutput[];
+  const restoredPlanA = restoreStage(0);
+  const restoredPlanB = restoreStage(1);
+  if (restoredPlanA && restoredPlanB) {
+    emit("Phase 1: both planner outputs restored from checkpoints (resume).");
+    plannerOutputs = [
+      { label: "Plan A", route: PLAN_A_ROUTE, result: restoredPlanA },
+      { label: "Plan B", route: PLAN_B_ROUTE, result: restoredPlanB },
+    ];
+  } else {
+    emit("Phase 1: spawning two independent planners with distinct routes.");
+    plannerOutputs = await runPlannerPhase(params, agents, spawnGuard, signal, emit, inheritedModel);
+    checkpointStage(0, plannerOutputs[0].result);
+    checkpointStage(1, plannerOutputs[1].result);
+  }
+
+  // Phase 2: critique and synthesize a single executable plan.
+  throwIfAborted(signal);
+  let synthesis = restoreStage(2);
+  if (synthesis) {
+    emit("Phase 2: synthesis restored from checkpoint (resume).");
+  } else {
+    emit("Phase 2: synthesizing planner outputs into one implementation plan.");
+    synthesis = await spawnChecked(
+      spawnGuard,
+      params,
+      agents,
+      params.verifierAgent,
+      buildSynthesisPrompt(params.task, plannerOutputs),
+      signal,
+      emit,
+      inheritedModel,
+      SYNTHESIS_ROUTE,
+    );
+    checkpointStage(2, synthesis);
+  }
+
+  // Phase 3/4: bounded execute + verify loop.
+  const attempts: ExecutionAttempt[] = [];
+  let priorFeedback = "";
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const executorIndex = 3 + (attempt - 1) * 2;
+    const verifierIndex = executorIndex + 1;
+
+    throwIfAborted(signal);
+    let executor = restoreStage(executorIndex) ?? (await collectStage(executorIndex));
+    if (executor) {
+      emit(`Phase 3: execution attempt ${attempt}/${maxAttempts} restored (resume).`);
+    } else {
+      emit(`Phase 3: execution attempt ${attempt}/${maxAttempts}.`);
+      try {
+        executor = await spawnChecked(
+          spawnGuard,
+          params,
+          agents,
+          params.executorAgent,
+          buildExecutionPrompt(params.task, synthesis, attempts, priorFeedback, attempt, routes.executor),
+          signal,
+          emit,
+          inheritedModel,
+          routes.executor,
+          survivalFor(executorIndex),
+        );
+      } catch (error) {
+        detachGuard(executorIndex, error);
+        throw error;
+      }
+      checkpointStage(executorIndex, executor);
+    }
+
+    throwIfAborted(signal);
+    let verifier = restoreStage(verifierIndex) ?? (await collectStage(verifierIndex));
+    if (verifier) {
+      emit(`Phase 4: verification attempt ${attempt}/${maxAttempts} restored (resume).`);
+    } else {
+      emit(`Phase 4: direct-evidence verification for attempt ${attempt}/${maxAttempts}.`);
+      try {
+        verifier = await spawnChecked(
+          spawnGuard,
+          params,
+          agents,
+          params.verifierAgent,
+          buildVerifierPrompt(params.task, plannerOutputs, synthesis, attempts, executor, attempt, maxAttempts, routes.verifier),
+          signal,
+          emit,
+          inheritedModel,
+          routes.verifier,
+          survivalFor(verifierIndex),
+        );
+      } catch (error) {
+        detachGuard(verifierIndex, error);
+        throw error;
+      }
+      checkpointStage(verifierIndex, verifier);
+    }
+    const verdict = parseVerifierVerdict(verifier.text);
+    attempts.push({ attempt, executor, verifier, verdict });
+
+    emit(
+      `Verifier attempt ${attempt}/${maxAttempts}: ${verdict.status.toUpperCase()} — ` +
+        `${verdict.reasons.join("; ") || "no reasons provided"}`,
+    );
+
+    if (verdict.status === "pass") break;
+    priorFeedback = verdict.feedback || verdict.reasons.join("; ");
+    if (!priorFeedback.trim()) priorFeedback = "Verifier failed without actionable feedback; inspect verifier output directly.";
+  }
+
+  const finalAttempt = attempts[attempts.length - 1];
+  const status: "pass" | "fail" = finalAttempt?.verdict.status === "pass" ? "pass" : "fail";
+  const details = buildDetails(status, params, spawnGuard, plannerOutputs, synthesis, attempts, maxRetries);
+  const markdown = buildFinalMarkdown(status, params, spawnGuard, plannerOutputs, synthesis, attempts, maxRetries);
+  return { markdown, details };
+}
+
+// ── Phases ─────────────────────────────────────────────────────────────────
+
+async function runPlannerPhase(
+  params: NormalizedParams,
+  agents: Map<string, AgentProfile>,
+  spawnGuard: SpawnGuard,
+  signal: AbortSignal | undefined,
+  emit: (text: string) => void,
+  inheritedModel: { provider?: string; model?: string } | undefined,
+): Promise<PlannerOutput[]> {
+  const plannerJobs: Array<{ label: "Plan A" | "Plan B"; route: typeof PLAN_A_ROUTE | typeof PLAN_B_ROUTE; prompt: string }> = [
+    {
+      label: "Plan A",
+      route: PLAN_A_ROUTE,
+      prompt: buildPlannerPrompt("Plan A", PLAN_A_ROUTE, params.task),
+    },
+    {
+      label: "Plan B",
+      route: PLAN_B_ROUTE,
+      prompt: buildPlannerPrompt("Plan B", PLAN_B_ROUTE, params.task),
+    },
+  ];
+
+  return runBoundedPool(plannerJobs, PLANNER_CONCURRENCY, signal, async (job, _index, workerSignal) => {
+    emit(`${job.label}: starting ${job.route.provider}/${job.route.model}.`);
+    const result = await spawnChecked(
+      spawnGuard,
+      params,
+      agents,
+      params.plannerAgent,
+      job.prompt,
+      workerSignal,
+      emit,
+      inheritedModel,
+      job.route,
+    );
+    return { label: job.label, route: job.route, result };
+  });
+}
+
+function buildPlannerPrompt(
+  label: "Plan A" | "Plan B",
+  route: { provider: string; model: string },
+  task: string,
+): string {
+  return `You are ${label} in a dual-plan-synthesis-execute-verify orchestration.
+You should be running as provider=${route.provider}, model=${route.model}.
+
+Original task:
+${task}
+
+Produce an independent implementation plan only. Do not edit files.
+
+Return concise markdown with:
+- scope and non-goals
+- target files/functions
+- ordered implementation steps
+- risks and edge cases
+- direct verification steps
+
+Do not assume the other planner's answer.`;
+}
+
+function buildSynthesisPrompt(task: string, plannerOutputs: PlannerOutput[]): string {
+  return `You are the synthesis reviewer in a dual-plan-synthesis-execute-verify orchestration.
+You should be running as provider=${SYNTHESIS_ROUTE.provider}, model=${SYNTHESIS_ROUTE.model}.
+
+Original task:
+${task}
+
+Independent planner outputs:
+${plannerOutputs
+  .map((output) => `## ${output.label} (${output.route.provider}/${output.route.model})\n${output.result.text}`)
+  .join("\n\n")}
+
+Critique both plans for correctness, safety, minimality, and verification coverage.
+Then synthesize exactly one coherent implementation plan for the executor.
+
+Return markdown with:
+- accepted ideas
+- rejected ideas, if any, and why
+- final ordered implementation plan
+- invariants / safety constraints
+- verification criteria
+
+The executor may implement only this synthesized plan.`;
+}
+
+function buildExecutionPrompt(
+  task: string,
+  synthesis: SubagentResult,
+  attempts: ExecutionAttempt[],
+  priorFeedback: string,
+  attempt: number,
+  route: { provider: string; model: string },
+): string {
+  const retryBlock = attempts.length
+    ? `\nPrior attempt summaries and verifier feedback:\n${attempts
+        .map((item) =>
+          `Attempt ${item.attempt}: ${item.verdict.status.toUpperCase()}\nReasons: ${item.verdict.reasons.join("; ") || "none"}\nFeedback: ${item.verdict.feedback || "none"}`,
+        )
+        .join("\n\n")}\n\nCurrent retry feedback to address:\n${priorFeedback}`
+    : "";
+
+  return `You are the executor in a dual-plan-synthesis-execute-verify orchestration.
+You should be running as provider=${route.provider}, model=${route.model}.
+
+Original task:
+${task}
+
+Synthesized implementation plan (authoritative):
+${synthesis.text}
+${retryBlock}
+
+Attempt: ${attempt}
+
+Implement only the synthesized plan and, on retry, only the verifier feedback.
+Keep changes minimal and scoped. Do not commit or push.
+
+Return a report with:
+- files changed
+- exact changes made
+- commands/tests run and results
+- any unresolved issues.`;
+}
+
+function buildVerifierPrompt(
+  task: string,
+  plannerOutputs: PlannerOutput[],
+  synthesis: SubagentResult,
+  attempts: ExecutionAttempt[],
+  executor: SubagentResult,
+  attempt: number,
+  maxAttempts: number,
+  route: { provider: string; model: string },
+): string {
+  return `You are the direct-evidence verifier in a dual-plan-synthesis-execute-verify orchestration.
+You should be running as provider=${route.provider}, model=${route.model}.
+
+Original task:
+${task}
+
+Plan provenance:
+${plannerOutputs.map((output) => `- ${output.label}: ${output.route.provider}/${output.route.model}, exitCode=${output.result.exitCode}`).join("\n")}
+
+Synthesized implementation plan:
+${synthesis.text}
+
+Prior attempts:
+${attempts.length ? attempts.map((item) => `Attempt ${item.attempt}: ${item.verdict.status.toUpperCase()} — ${item.verdict.reasons.join("; ")}`).join("\n") : "none"}
+
+Current executor output (attempt ${attempt}/${maxAttempts}):
+${executor.text}
+
+Verify against the original task and synthesized plan using direct evidence. You may inspect files and run safe read-only or test commands if available in your agent tools.
+
+Return JSON exactly and only in this shape:
+{"status":"pass"|"fail","reasons":["..."],"feedback":"actionable retry feedback for executor if fail, otherwise empty string","evidence":["direct code/test/diff evidence"]}
+
+Rules:
+- PASS only when the implementation clearly satisfies the task and plan.
+- FAIL if evidence is missing, scope expanded unsafely, code is syntactically invalid, or the bug remains possible.
+- FAIL if evidence shows the visible/current orchestrator executed the main task directly instead of routing through the requested orchestration shape, or the requested shape was silently replaced.
+- On FAIL, feedback must be bounded and actionable for one executor retry.`;
+}
+
+// ── Parsing ────────────────────────────────────────────────────────────────
+
+function parseVerifierVerdict(text: string): VerifierVerdict {
+  const parsed = extractJson(text);
+  if (parsed && typeof parsed === "object") {
+    const raw = parsed as Record<string, unknown>;
+    const status = String(raw.status ?? "").toLowerCase();
+    if (status === "pass" || status === "fail") {
+      return {
+        status,
+        reasons: stringArray(raw.reasons) ?? [],
+        feedback: optionalString(raw.feedback) ?? "",
+        evidence: stringArray(raw.evidence) ?? [],
+        raw: text,
+      };
+    }
+  }
+  return {
+    status: "fail",
+    reasons: ["Verifier output was not parseable as the required JSON."],
+    feedback: "Return the verifier response as the required JSON and include direct evidence.",
+    evidence: [],
+    raw: text,
+  };
+}
+
+function extractJson(text: string): unknown | null {
+  const trimmed = text.trim();
+  for (const candidate of [trimmed, ...extractFenceContents(trimmed), extractBalancedObject(trimmed)].filter(Boolean) as string[]) {
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // Try the next candidate.
+    }
+  }
+  return null;
+}
+
+function extractFenceContents(text: string): string[] {
+  const results: string[] = [];
+  const regex = /```(?:json)?\s*([\s\S]*?)```/gi;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(text))) results.push(match[1].trim());
+  return results;
+}
+
+function extractBalancedObject(text: string): string | null {
+  const start = text.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escape) escape = false;
+      else if (ch === "\\") escape = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function stringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.map((item) => String(item)).filter(Boolean);
+}
+
+// ── Spawn / bounds helpers ─────────────────────────────────────────────────
+
+async function spawnChecked(
+  spawnGuard: SpawnGuard,
+  params: NormalizedParams,
+  agents: Map<string, AgentProfile>,
+  agentName: string,
+  task: string,
+  signal: AbortSignal | undefined,
+  onProgress: ((text: string) => void) | undefined,
+  inheritedModel: { provider?: string; model?: string } | undefined,
+  modelOverride: { model?: string; provider?: string } | undefined,
+  extraOptions?: Pick<SpawnSubagentOptions, "abortSurvival"> | Record<string, never>,
+): Promise<SubagentResult> {
+  const spawned = spawnGuard.reserve();
+  onProgress?.(`Spawning subagent ${agentName} (${spawned}/${spawnGuard.cap}) in ${params.cwd}`);
+  return spawnSubagent(agentName, task, {
+    agents,
+    cwd: params.cwd,
+    allowLocalModel: params.allowLocalModel,
+    signal,
+    inheritedModel,
+    onProgress,
+    modelOverride,
+    ...(extraOptions ?? {}),
+  });
+}
+
+function resolveMaxRetries(params: NormalizedParams): number {
+  const requested = params.maxRetriesExplicit ? params.maxRetries : DEFAULT_MAX_RETRIES;
+  return Math.max(0, Math.min(Math.trunc(requested), MAX_SHAPE_RETRIES));
+}
+
+// ── Result builders ────────────────────────────────────────────────────────
+
+function buildDetails(
+  status: "pass" | "fail",
+  params: NormalizedParams,
+  spawnGuard: SpawnGuard,
+  plannerOutputs: PlannerOutput[],
+  synthesis: SubagentResult,
+  attempts: ExecutionAttempt[],
+  maxRetries: number,
+): Record<string, unknown> {
+  return {
+    status,
+    paradigm: "dual-plan-synthesis-execute-verify",
+    maxRetries,
+    attempts: attempts.length,
+    spawnedCount: spawnGuard.spawned,
+    spawnedCap: spawnGuard.cap,
+    routes: {
+      planA: PLAN_A_ROUTE,
+      planB: PLAN_B_ROUTE,
+      synthesis: SYNTHESIS_ROUTE,
+      executor: resolveRoutes(params).executor,
+      verifier: resolveRoutes(params).verifier,
+    },
+    plannerOutputs: plannerOutputs.map((output) => ({
+      label: output.label,
+      provider: output.route.provider,
+      model: output.route.model,
+      exitCode: output.result.exitCode,
+      durationMs: output.result.durationMs,
+      text: truncateWithNotice(output.result.text, MAX_DETAIL_TEXT_CHARS, `${output.label} output`),
+    })),
+    synthesis: {
+      exitCode: synthesis.exitCode,
+      durationMs: synthesis.durationMs,
+      text: truncateWithNotice(synthesis.text, MAX_DETAIL_TEXT_CHARS, "synthesis output"),
+    },
+    executionAttempts: attempts.map((attempt) => ({
+      attempt: attempt.attempt,
+      executorExitCode: attempt.executor.exitCode,
+      verifierExitCode: attempt.verifier.exitCode,
+      verdict: attempt.verdict.status,
+      reasons: attempt.verdict.reasons,
+      feedback: attempt.verdict.feedback,
+      evidence: attempt.verdict.evidence,
+      executorText: truncateWithNotice(attempt.executor.text, MAX_DETAIL_TEXT_CHARS, `attempt ${attempt.attempt} executor output`),
+      verifierText: truncateWithNotice(attempt.verifier.text, MAX_DETAIL_TEXT_CHARS, `attempt ${attempt.attempt} verifier output`),
+    })),
+    task: params.task,
+  };
+}
+
+function buildFinalMarkdown(
+  status: "pass" | "fail",
+  params: NormalizedParams,
+  spawnGuard: SpawnGuard,
+  plannerOutputs: PlannerOutput[],
+  synthesis: SubagentResult,
+  attempts: ExecutionAttempt[],
+  maxRetries: number,
+): string {
+  const lines = [
+    `# Dual-Plan-Synthesis-Execute-Verify Orchestration: ${status.toUpperCase()}`,
+    "",
+    `**Task:** ${params.task}`,
+    "**Paradigm:** dual-plan-synthesis-execute-verify",
+    `**Routes:** Plan A=${PLAN_A_ROUTE.provider}/${PLAN_A_ROUTE.model}; Plan B=${PLAN_B_ROUTE.provider}/${PLAN_B_ROUTE.model}; Synthesis=${SYNTHESIS_ROUTE.provider}/${SYNTHESIS_ROUTE.model}; Executor=${resolveRoutes(params).executor.provider}/${resolveRoutes(params).executor.model}; Verifier=${resolveRoutes(params).verifier.provider}/${resolveRoutes(params).verifier.model}`,
+    `**Retry policy:** up to ${maxRetries} executor retry slot(s); stop on verifier PASS or retry exhaustion.`,
+    `**Subagents spawned:** ${spawnGuard.spawned}/${spawnGuard.cap}`,
+    "",
+    "## Planner outputs",
+    ...plannerOutputs.map(
+      (output) =>
+        `### ${output.label} (${output.route.provider}/${output.route.model})\n${truncateWithNotice(output.result.text, 2500, `${output.label} output`)}`,
+    ),
+    "",
+    "## Synthesized plan",
+    truncateWithNotice(synthesis.text, 3500, "synthesis output"),
+    "",
+    "## Execute / verify attempts",
+  ];
+
+  for (const attempt of attempts) {
+    lines.push(
+      `### Attempt ${attempt.attempt}: ${attempt.verdict.status.toUpperCase()}`,
+      `Reasons: ${attempt.verdict.reasons.join("; ") || "none"}`,
+      attempt.verdict.evidence.length ? `Evidence: ${attempt.verdict.evidence.join("; ")}` : "Evidence: none recorded",
+      attempt.verdict.feedback ? `Retry feedback: ${attempt.verdict.feedback}` : "Retry feedback: none",
+      "",
+      "Executor summary:",
+      truncateWithNotice(attempt.executor.text, 2500, `attempt ${attempt.attempt} executor output`),
+      "",
+      "Verifier output:",
+      truncateWithNotice(attempt.verifier.text, 2500, `attempt ${attempt.attempt} verifier output`),
+      "",
+    );
+  }
+
+  // BUG FIX (2026-07-02): build the closing narrative from the SAME resolved
+  // routes used for the Routes header — never hardcoded model adjectives — so
+  // the footer can never contradict the routes actually spawned
+  // (2026-07-02-dual-plan-report-footer-hardcodes-deepseek-executor-narrative.md).
+  const narrativeRoutes = resolveRoutes(params);
+  lines.push(
+    "## Orchestration Used",
+    `Two independent routed planners ran concurrently ` +
+      `(${PLAN_A_ROUTE.provider}/${PLAN_A_ROUTE.model} and ${PLAN_B_ROUTE.provider}/${PLAN_B_ROUTE.model}), ` +
+      `the synthesis reviewer (${SYNTHESIS_ROUTE.provider}/${SYNTHESIS_ROUTE.model}) produced the authoritative plan, ` +
+      `the executor (${narrativeRoutes.executor.provider}/${narrativeRoutes.executor.model}) implemented it, ` +
+      `and the verifier (${narrativeRoutes.verifier.provider}/${narrativeRoutes.verifier.model}) gated completion ` +
+      `with direct evidence and bounded retry feedback. Orchestrator Role Integrity: the requested shape was ` +
+      `preserved; execution was routed through the executor subagent.`,
+  );
+
+  return truncateWithNotice(lines.join("\n"), MAX_FINAL_MARKDOWN_CHARS, "final report");
+}

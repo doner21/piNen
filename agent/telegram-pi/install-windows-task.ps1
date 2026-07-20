@@ -1,4 +1,4 @@
-# PowerShell: install-windows-task.ps1
+﻿# PowerShell: install-windows-task.ps1
 # Installs a Windows Task Scheduler entry that launches the telegram-pi
 # headless fallback daemon at user logon.
 #

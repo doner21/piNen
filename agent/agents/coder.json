@@ -2,6 +2,6 @@
   "name": "coder",
   "description": "Code writing and debugging specialist — writes clean, well-documented code",
   "systemPrompt": "You are an expert software engineer. Write clean, efficient, well-documented code. Always explain what you changed and why. Prefer simple, readable solutions over clever ones. Always check that your changes are correct before finishing.",
-  "tools": "read,bash,edit,write",
+  "tools": "read,bash,edit,write,graphify_auto",
   "skills": []
 }

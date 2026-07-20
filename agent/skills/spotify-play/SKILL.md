@@ -1,6 +1,6 @@
 ---
 name: spotify-play
-description: Complete Spotify "open and play" workflow — search, device recovery, play. Triggers on: play music, play X on Spotify, play a song, play some music, open Spotify and play X, Spotify no-device recovery, resume Spotify, /spotify_play, or any request to play music or control Spotify playback. This skill MUST be loaded and consulted before calling any Spotify MCP playback tools (spotify_playMusic, spotify_getAvailableDevices, spotify_searchSpotify, etc.).
+description: 'Complete Spotify "open and play" workflow — search, device recovery, play. Triggers on: play music, play X on Spotify, play a song, play some music, open Spotify and play X, Spotify no-device recovery, resume Spotify, /spotify_play, or any request to play music or control Spotify playback. This skill MUST be loaded and consulted before calling any Spotify MCP playback tools (spotify_playMusic, spotify_getAvailableDevices, spotify_searchSpotify, etc.).'
 ---
 
 # Spotify Play — Agent Skill
@@ -96,7 +96,7 @@ Procedure:
 3. Run the bundled clean-start script with the playlist URI, URL, ID, or name and the selected device:
 
 ```bash
-node %USERPROFILE%/.pi/agent/skills/spotify-play/scripts/clean_playlist_start.mjs "<playlist>" --device "<device-name-or-id>"
+node "$HOME/.pi/agent/skills/spotify-play/scripts/clean_playlist_start.mjs" "<playlist>" --device "<device-name-or-id>"
 ```
 
 4. Inspect the script JSON result:

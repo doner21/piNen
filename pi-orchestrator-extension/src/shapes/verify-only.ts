@@ -34,6 +34,7 @@ import type {
   OrchestrationShapeResult,
   NormalizedParams,
 } from "../types";
+import { resolveRouteOverride, formatRouteLabel } from "../routes";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -274,6 +275,8 @@ function buildFinalResult(
     "",
     `**Task (evidence checklist):** ${truncateWithNotice(params.task, 2000, "task")}`,
     `**Paradigm:** verify-only (no planner/executor subagents spawned)`,
+    // Routes line derives from the SAME resolved override passed to the verifier spawns.
+    `**Routes:** Verifier=${formatRouteLabel(toModelOverride(params.verifierModel, params.verifierProvider))}`,
     `**Verifiers:** ${runs.length} (${passes} PASS, ${fails} FAIL)`,
     `**Subagents spawned:** ${spawnGuard.spawned}/${spawnGuard.cap}`,
     "",
@@ -341,12 +344,14 @@ function inferVerifierCount(task: string): number {
   return DEFAULT_VERIFIER_COUNT;
 }
 
+// Route override resolution delegated to the shared helper (src/routes.ts) so
+// the verifier spawn routing and the report Routes line derive from identical
+// values (silent-route-override bug class, 2026-07-02).
 function toModelOverride(
   model?: string,
   provider?: string,
 ): { model?: string; provider?: string } | undefined {
-  if (!model && !provider) return undefined;
-  return { model, provider };
+  return resolveRouteOverride(model, provider);
 }
 
 function extractJson(text: string): unknown | null {

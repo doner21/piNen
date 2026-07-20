@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { getPiChildFirstJsonTimeoutMs, isPiJsonProtocolEvent, killOwnedProcessTree, resolvePiChildCommand } from "./lib/pi-child-launch.ts";
 
 interface AgentDef {
 	name: string;
@@ -282,7 +283,8 @@ async function runSubagent(
 	modelOverride?: SubagentOverride,
 ): Promise<string> {
 	const cli = ensureCliPath();
-	const args: string[] = ["--mode", "json", "-p", "--no-session"];
+	const command = resolvePiChildCommand(cli);
+	const args: string[] = [...command.argsPrefix, "--mode", "json", "-p", "--no-session"];
 	const { provider, model, thinkingLevel } = resolveModelSelection(agent, ctx, allowLocalModel, modelOverride);
 	if (provider) args.push("--provider", provider);
 	if (model) args.push("--model", model);
@@ -295,10 +297,11 @@ async function runSubagent(
 	args.push("--append-system-prompt", agent.systemPrompt);
 
 	return await new Promise<string>((resolve, reject) => {
-		const child = spawn(process.execPath, [cli, ...args], {
+		const child = spawn(command.command, args, {
 			cwd: cwd || ctx.cwd,
+			env: command.env ?? process.env,
 			stdio: ["pipe", "pipe", "pipe"],
-			shell: false,
+			shell: command.shell ?? false,
 			windowsHide: true,
 		});
 
@@ -307,7 +310,26 @@ async function runSubagent(
 		let stderr = "";
 		let aborted = false;
 		let agentEnded = false;
+		let protocolTimedOut = false;
+		let firstJsonProtocolEventSeen = false;
+		const firstJsonTimeoutMs = getPiChildFirstJsonTimeoutMs(command.env ?? process.env);
+		const firstJsonTimer = setTimeout(() => {
+			protocolTimedOut = true;
+			stderr += `\nPI_CHILD_FIRST_JSON_TIMEOUT: no valid JSON protocol event within ${firstJsonTimeoutMs}ms from ${basename(command.command)}; terminating owned child tree.`;
+			try { child.kill("SIGTERM"); } catch {}
+			killOwnedProcessTree(child.pid, "first-json-timeout");
+		}, firstJsonTimeoutMs);
+		firstJsonTimer.unref?.();
+		const markFirstJsonProtocolEvent = () => {
+			if (firstJsonProtocolEventSeen) return;
+			firstJsonProtocolEventSeen = true;
+			clearTimeout(firstJsonTimer);
+		};
 		const assistantFailures: string[] = [];
+		// WS-BUG fix (see WS-BUG-DIAGNOSIS-REPORT.md §2.3/§4, 2026-07-06):
+		// failures that the child auto-retried are moved here instead of
+		// poisoning the final verdict; they are reported as a footnote only.
+		const recoveredFailures: string[] = [];
 
 		const parseLine = (line: string) => {
 			if (!line.trim()) return;
@@ -319,11 +341,30 @@ async function runSubagent(
 					errorMessage?: string;
 					error?: { message?: string };
 				};
+				if (isPiJsonProtocolEvent(event)) markFirstJsonProtocolEvent();
 
 				// F3: Track agent_end so post-termination message_end is not
 				// mistaken for a failure (mirrors substrate.ts event-tracking).
+				// WS-BUG fix (§4.1): respect the child's retry lifecycle. When
+				// agent_end carries willRetry=true the child AgentSession is
+				// about to auto-retry the errored turn (agent-session.js
+				// _handlePostAgentRun/_prepareRetry), so this run's latched
+				// failures are transient: park them and keep tracking the next run.
 				if (event.type === "agent_end") {
-					agentEnded = true;
+					if ((event as { willRetry?: boolean }).willRetry === true) {
+						recoveredFailures.push(...assistantFailures);
+						assistantFailures.length = 0;
+						agentEnded = false;
+					} else {
+						agentEnded = true;
+					}
+				}
+
+				// WS-BUG fix (§4.1, belt-and-braces): a successful auto_retry_end
+				// also means earlier latched failures were recovered.
+				if (event.type === "auto_retry_end" && (event as { success?: boolean }).success === true) {
+					recoveredFailures.push(...assistantFailures);
+					assistantFailures.length = 0;
 				}
 
 				if (event.type === "message_end" && event.message) {
@@ -362,10 +403,25 @@ async function runSubagent(
 			stderr += chunk.toString("utf-8");
 		});
 
-		child.on("error", (error) => reject(error));
+		child.on("error", (error) => {
+			clearTimeout(firstJsonTimer);
+			reject(error);
+		});
 		child.on("close", (code) => {
+			clearTimeout(firstJsonTimer);
 			if (stdoutBuffer.trim()) parseLine(stdoutBuffer);
 			if (aborted) return reject(new Error(`Subagent ${agent.name} aborted`));
+			if (protocolTimedOut) {
+				return reject(new Error(JSON.stringify({
+					type: "pi_child_first_json_timeout",
+					agent: agent.name,
+					timeoutMs: firstJsonTimeoutMs,
+					pid: child.pid,
+					cwd: cwd || ctx.cwd,
+					commandBasename: basename(command.command),
+					launchRuntime: command.launchRuntime,
+				})));
+			}
 			const finalText = getFinalAssistantText(messages);
 			const errorMessage = getLastErrorMessage(messages);
 
@@ -387,18 +443,46 @@ async function runSubagent(
 				));
 			}
 
-			// F3: Assistant-reported errors despite exit code 0
-			if (assistantFailures.length > 0) {
+			// WS-BUG fix (§4.2): judge the run by its LAST assistant message,
+			// not by a failure list latched from the child's first run. Only
+			// reject when the FINAL outcome is an error (no successful
+			// completion after the failure). Failures cleared via willRetry /
+			// auto_retry_end above no longer poison a recovered run.
+			const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+			const lastStopReason = lastAssistant?.stopReason?.toLowerCase();
+			const terminalError = lastStopReason === "error" || lastStopReason === "aborted";
+
+			if (terminalError || assistantFailures.length > 0) {
+				// Genuine unrecovered failure at end-of-run. Reject with a
+				// STRUCTURED message (bug-note suggested fix): classification,
+				// cwd, terminal + transient errors, and any last assistant text,
+				// so the orchestrator can check the filesystem for partial work.
 				const stderrSuffix = stderr.trim()
-					? ` stderr: ${stderr.trim().slice(0, 500)}`
+					? `\nstderr: ${stderr.trim().slice(0, 500)}`
 					: "";
 				return reject(new Error(
-					`Subagent ${agent.name} reported assistant failure despite exit code 0: ` +
-					`${assistantFailures.join("; ")}.${stderrSuffix}`,
+					[
+						`Subagent ${agent.name} terminal transport/assistant failure despite exit code 0 — classification: artifacts_may_exist`,
+						`cwd: ${cwd || ctx.cwd}`,
+						`terminal error: ${lastAssistant?.errorMessage ?? errorMessage ?? "unknown"}`,
+						assistantFailures.length > 0 ? `final-run failures: ${assistantFailures.join("; ")}` : "",
+						recoveredFailures.length > 0 ? `earlier transient errors (auto-retried by child): ${recoveredFailures.join("; ")}` : "",
+						finalText
+							? `--- last assistant text before failure ---\n${finalText.slice(0, 2000)}`
+							: "(no assistant text captured)",
+						`ACTION REQUIRED: inspect the filesystem for completed artifacts before re-running.${stderrSuffix}`,
+					].filter(Boolean).join("\n"),
 				));
 			}
 
-			resolve(finalText || stderr || `(subagent ${agent.name} produced no output)`);
+			// Success path. If the child auto-recovered transient stream errors
+			// (e.g. "Connection error.", "WebSocket error"), annotate as a
+			// footnote instead of failing the whole tool call.
+			let result = finalText || stderr || `(subagent ${agent.name} produced no output)`;
+			if (recoveredFailures.length > 0 && finalText) {
+				result += `\n\n[subagent transport note: transient stream error(s) auto-recovered by child retry: ${recoveredFailures.join("; ")}]`;
+			}
+			resolve(result);
 		});
 
 		child.stdin.write(task);
@@ -407,12 +491,15 @@ async function runSubagent(
 		if (signal) {
 			const stop = () => {
 				aborted = true;
-				child.kill("SIGTERM");
+				clearTimeout(firstJsonTimer);
+				try { child.kill("SIGTERM"); } catch {}
+				killOwnedProcessTree(child.pid, "abort");
 				setTimeout(() => {
 					try {
 						child.kill("SIGKILL");
 					} catch {}
-				}, 1500);
+					killOwnedProcessTree(child.pid, "abort-hard-kill");
+				}, 1500).unref?.();
 			};
 			if (signal.aborted) stop();
 			else signal.addEventListener("abort", stop, { once: true });

@@ -14,6 +14,7 @@
 
 import type { AgentProfile } from "./substrate";
 import type { HardGatesMode } from "./judgment";
+import type { LoadedRunState } from "./run-state";
 
 // ── OrchestrationShape interface ───────────────────────────────────────────
 
@@ -49,6 +50,12 @@ export interface OrchestrationShapeContext {
    *  This is computed during normalization before the shape is invoked
    *  so shapes do not need to re-parse routing from natural language. */
   inferredModelRouting: InferredModelRouting;
+  /** Stable run identifier (used for checkpoint/resume state). */
+  runId?: string;
+  /** Loaded state when this dispatch is a resume of a previous run
+   *  (ABORT-RESUME-DESIGN.md). Shapes that support resume restore completed
+   *  phases from checkpoints and re-attach or respawn detached phases. */
+  resumeState?: LoadedRunState;
 }
 
 /** Result returned by a shape after orchestration completes. */
@@ -72,6 +79,10 @@ export interface NormalizedParams {
   verifierModel?: string;
   verifierProvider?: string;
   concurrency: number;
+  /** Number of planner subagents to run in parallel when requested. */
+  plannerCount: number;
+  /** Number of verifier subagents to run in parallel when requested. */
+  verifierCount: number;
   maxRetries: number;
   /** Whether maxRetries was explicitly set by the user (--max-retries / maxRetries param).
    *  Used by the termination-policy precedence in plan-execute-verify:
@@ -126,6 +137,11 @@ export interface NaturalLanguageOrchestrationControls {
   maxSubagentsSource?: "natural_language" | "parameter" | "default";
   concurrency?: number;
   concurrencySource?: "natural_language" | "parameter" | "default";
+  executorConcurrency?: number;
+  executorCount?: number;
+  plannerCount?: number;
+  verifierCount?: number;
+  roleConcurrencySource?: "natural_language" | "parameter" | "planner" | "default";
   maxAttempts?: number;
   maxRetries?: number;
   loopingSource?: "natural_language" | "parameter" | "default";

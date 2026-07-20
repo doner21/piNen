@@ -32,9 +32,16 @@ agent/nul
 agent/nenflow-v3/runs/
 agent/nenflow-v3/runs/**/*
 
-# Orchestration runs
+# Orchestration runs and generated lifecycle state
 agent/orchestration/runs/
 agent/orchestration/runs/**/*
+agent/orchestrate-runs/
+agent/orchestration-runs/
+agent/orchestration-builder/runs/
+agent/global-graphify-maintenance/runs/
+pi-orchestrator-extension/runs-state/
+pi-orchestrator-extension/intakes/
+pi-orchestrator-extension/shape-builder-lifecycle/
 
 # Diagnostics / traces
 agent/diagnostics/
@@ -45,11 +52,15 @@ agent/tmp_search*.json
 agent/crash-wall.md
 agent/*handoff*.md
 agent/*intake*.md
+!agent/extensions/**/intake.md
 agent/*report*.md
 agent/continuation-task-*.md
 agent/task-*-report.md
 agent/new-mock-process-last-run.json
 agent/graphify-test-bundle.js
+agent/prompts/agent-new-session-*-live-*.md
+*.jsonl
+*.bak
 
 # Graphify Brain (personal project memory)
 # Only placeholder files are tracked; all project memories are ignored
@@ -57,8 +68,10 @@ graphify-brain/*
 !graphify-brain/.gitkeep
 !graphify-brain/README.md
 graphify-out/
+**/graphify-out/
 .graphify_python
 .graphify_*.json
+.graphify_uncached.txt
 
 # Core patch state
 agent/core-patch/patch-manifest.json
@@ -72,8 +85,13 @@ agent/telegram-pi/daemon-state.json
 agent/telegram-pi/logs/
 agent/telegram-pi/config.json
 
-# Graphify autonomy
+# Graphify autonomy and backup runtime state
 agent/graphify-autonomy/
+agent/git-backup/config.json
+agent/git-backup/state.json
+agent/git-backup/run-log.jsonl
+agent/git-backup/locks/
+agent/git-backup/tmp/
 
 # MCP runtime
 **.playwright-mcp/**
@@ -103,6 +121,7 @@ agent/graphify-autonomy/
 *.mp3
 *.pdf
 
-# Dependencies
+# Dependencies and nested source-control metadata
 node_modules/
 */node_modules/
+**/.git/

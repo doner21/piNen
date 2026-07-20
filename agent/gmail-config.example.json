@@ -1,15 +1,10 @@
 {
-  "_comment": "Gmail Integration — Copy to gmail-config.json and add your credentials",
-  "defaultEmail": "<you@example.com>",
-  "appPassword": "<GMAIL_APP_PASSWORD>",
-  "smtp": {
-    "host": "smtp.gmail.com",
-    "port": 587,
-    "secure": false
-  },
-  "imap": {
-    "host": "imap.gmail.com",
-    "port": 993,
-    "tls": true
+  "_comment": "Copy to gmail-config.json, replace placeholders, and keep that real file private.",
+  "defaultAccount": "personal",
+  "accounts": {
+    "personal": {
+      "email": "you@example.com",
+      "appPassword": "<GMAIL_APP_PASSWORD>"
+    }
   }
 }

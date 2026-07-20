@@ -991,7 +991,13 @@ The standalone intake produces:
 
 ---
 
-## NenFlow v3 Integration Mode
+## NenFlow v3 Integration Mode (RETIRED)
+
+> **NenFlow v3 was retired 2026-07-18** (see `agent/docs/nenflow-v3-retirement.md`). This
+> integration mode is inactive: do not spawn `pev-intake-ecological` (disabled). Use this
+> skill in **standalone mode** — it still produces full intake artifacts (ATT_0_INTAKE.md
+> etc.) in the current session — or feed its intake spec into the deterministic
+> `/orchestrate` system. The section below is kept for historical reference only.
 
 ### Triggering Ecological Mode in NenFlow
 

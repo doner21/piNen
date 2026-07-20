@@ -17,11 +17,16 @@ taken to prevent secret leakage, protect user data, and ensure safe operation.
 3. **No runtime state committed** — Session data, orchestration runs, NenFlow
    run artifacts, handoffs, diagnostics, and cache files are all gitignored.
 
-4. **No binaries committed** — The Engram binary and other executables are
-   downloaded by the installer, not stored in the repository.
+4. **No runtime executables committed** — The Engram executable and other native
+   runtime binaries are downloaded or built during installation, not stored in the repository.
+   Licensed font assets used by visual-design skills are static resources, not executable code.
 
-5. **No personal data** — The repository is sanitized of publisher-specific
-   paths, emails, project memory, and machine-specific configuration.
+5. **No personal/project data** — The repository is sanitized of publisher-specific
+   paths, emails, project agents/shapes, project memory, and machine-specific configuration.
+
+6. **Capability/data separation** — Engram and Graphify source, setup, tools, and
+   documentation are included; observations, databases, saved graphs, project wikis,
+   prompts, sessions, and health traces are excluded.
 
 ## What Is Gitignored
 
@@ -32,7 +37,7 @@ taken to prevent secret leakage, protect user data, and ensure safe operation.
 | **Runs** | `agent/nenflow-v3/runs/`, `agent/orchestration/runs/` |
 | **State** | `scheduler.json`, `trust.json`, `verbosity-state.json` |
 | **Diagnostics** | `agent/diagnostics/`, trace files, crash logs |
-| **Memory** | `graphify-brain/` project graphs and wiki pages |
+| **Memory** | Engram databases/observations; `graphify-brain/` project graphs and wiki pages |
 | **Binaries** | `*.exe`, `*.dll`, `*.so`, `*.dylib` |
 | **Dependencies** | `node_modules/` |
 | **Media** | `*.jpg`, `*.png`, `*.pdf`, `*.mp4` (except intentional skill resources) |
@@ -113,7 +118,7 @@ When publishing a repository using piNen, the `safe-github-publish` shape ensure
 - [ ] Allowlist-only staging (no broad recursive copy)
 - [ ] Source `.git/` history is never copied
 - [ ] All auth/config files are templates, not real configs
-- [ ] No personal paths, emails, or machine-specific paths
+- [ ] No personal paths, emails, machine-specific paths, or project-specific agents/shapes
 - [ ] No runtime state, sessions, runs, diagnostics, or caches
 - [ ] No binaries, media, or archives (except intentional skill resources)
 - [ ] `gitleaks detect` passes with zero findings
