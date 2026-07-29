@@ -825,10 +825,10 @@ function testVerifierPromptContainsOrchestrationEvidence() {
   assert.match(source, /COLD_START_BEGIN\/END[\s\S]*TERMINAL_OPEN_BEGIN\/END[\s\S]*RELOAD_BEGIN\/END[\s\S]*NEW_SESSION_BEGIN\/END/);
 
   // Condition 6 must list all 4 lifecycle paths individually.
-  assert.match(source, /Cold start\n/);
-  assert.match(source, /Open-from-Terminal\n/);
-  assert.match(source, /Reload\n/);
-  assert.match(source, /New-session\n/);
+  assert.match(source, /Cold start\r?\n/);
+  assert.match(source, /Open-from-Terminal\r?\n/);
+  assert.match(source, /Reload\r?\n/);
+  assert.match(source, /New-session\r?\n/);
 
   // Each condition 3-9 must specify whether it judges against EXECUTOR OUTPUT or EVIDENCE block.
   assert.match(source, /\(Judge this against the EXECUTOR OUTPUT\.\)/);
