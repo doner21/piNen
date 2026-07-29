@@ -8,7 +8,7 @@ This repository contains the **harness and its capabilities**, not the publisher
 
 ## What is included
 
-- **Deterministic orchestration:** 15 bounded orchestration shapes, parallel planner/executor/verifier roles, route overrides, resumable runs, evidence gates, shape generation, and independent verification.
+- **Deterministic orchestration:** 15 bounded orchestration shapes, parallel planner/executor/verifier roles, route overrides, resumable runs, read-only discovery planning on PEV/dual-plan, predicted-write-set enforcement on PEV/frozen-gate, evidence gates, shape generation, and independent verification.
 - **Engram persistent memory:** the full `mem_*` tool workflow, session summaries, passive capture, review/judgment tools, setup scripts, MCP wiring, and documentation. Memory databases and saved observations are deliberately excluded.
 - **Graphify Brain:** code, skills, autonomous maintenance, global-graph maintenance, and an empty memory store ready for each installation.
 - **Continuity:** delayed wake-ups, agent-operated reload/new-session bridges, context monitoring, handoff workflows, and the optional Pi core patch.
@@ -114,7 +114,7 @@ piNen/
 │   ├── telegram-pi/            # Telegram daemon/support source
 │   ├── npm/                    # gentle-engram + MCP adapter dependencies
 │   └── setup.ps1 / setup.sh
-├── pi-orchestrator-extension/  # 15 shapes + 25 test/support scripts
+├── pi-orchestrator-extension/  # 15 shapes + 28 test/support scripts
 ├── graphify-brain/             # intentionally empty user memory store
 ├── docs/
 ├── examples/

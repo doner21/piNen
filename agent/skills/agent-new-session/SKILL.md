@@ -187,7 +187,7 @@ Example:
 ```
 RESUME AFTER NEW SESSION:
 cwd: <project-directory>
-Prior task: building the agent-new-session extension and skill (NenFlow run RUN_20260622-120000).
+Prior task: building the agent-new-session extension and skill (NenFlow run historical orchestration run).
 Next steps: verify the extension loads correctly, test the deferred idle-poll pattern, and complete the SKILL.md documentation.
 Relevant files: agent/extensions/agent-new-session/index.ts, agent/skills/agent-new-session/SKILL.md
 ```

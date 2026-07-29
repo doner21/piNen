@@ -22,7 +22,7 @@ Primary invariant: **the deterministic `/orchestrate` system (`pi-orchestrator-e
 2. Never let sidecars replace canonical deterministic-run artifacts unless the user explicitly requests a different flow.
 3. Use implementation agents only for bounded file mutations.
 4. Use witness/observer agents for evidence and drift, not correctness verdicts.
-5. In orchestration run directories, sidecar artifacts should be named `ATT_SIDE_<PHASE>_<AGENT>.md`.
+5. Do not create sidecar artifact files by default. When the user or task explicitly requests one, `ATT_SIDE_<PHASE>_<AGENT>.md` is the optional naming convention.
 
 ## Simple routing presets
 

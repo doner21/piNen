@@ -18,7 +18,7 @@ This document describes the orchestration paradigms (shapes) available in the Pi
 | `frozen-gate-fix-loop` | Bounded-fix loop for an EXISTING near-passing implementation against a FROZEN (sha256-content-locked) gate/spec document with enumerated residual findings. Phases 1 and 3 are DETERMINISTIC (non-LLM) sha256 verifications of the frozen document before and after each executor fix (tamper-proof); a mismatch is an automatic FAIL with zero LLM spawns. The executor fixes ONLY the enumerated findings (restructuring beyond scope is a verifier FAIL); an independent verifier re-checks raw artifacts with fail-closed JSON parsing; the loop retries bounded on verifier FAIL (default `maxRetries` 2). Route overrides honored; resume-supported (deterministic phases re-execute, completed LLM phases restore from checkpoint). |
 | `evidence-audit` | Hardened re-verifier over a COMPLETED run's evidence (falsifier-grade `verify-only`). Phase 1 DETERMINISTIC `verify-hash` of the frozen gate document (mismatch ⇒ zero-spawn FAIL); Phase 2 DETERMINISTIC `manifest` (sha256 + bytes) of the declared gate-evidence files — a missing file is a zero-spawn FAIL, and the checkpointed manifest IS the audit fingerprint; Phase 3 spawns exactly ONE read-only verifier (NO executor) that audits run-id binding, internal consistency, and freshness from raw artifacts with fail-closed JSON; Phase 4 DETERMINISTIC `verify-hash` confirms the frozen doc was untouched. Never writes into the audited tree. Verifier route override honored; resume-supported. |
 | `independent-replication` | Two INDEPENDENT implementations of ONE frozen gate in isolated lane subdirectories, routed to (ideally) different models, compared honestly. DETERMINISTIC `verify-hash` before, between (mid), and after the two lanes (tamper-proof; mismatch ⇒ FAIL at the next deterministic check with lane B not run). Each lane runs its own lane-confined executor (lane B forbidden from reading lane A) then an independent fail-closed verifier. Overall verdict is aggregated IN CODE (PASS iff both lanes PASS and all freeze checks hold); the diversity caveat is COMPUTED from the resolved lane routes (fully-disjoint vs shared-model narrowed). Per-lane route overrides honored; resume-supported. |
-| `safe-github-publish` | Sanitization contract → delegated clean staging/publish → independent remote verification. Private-first repository creation with gitleaks scanning, path denylists, and role-integrity checks. |
+| `safe-github-publish` | Sanitization contract → delegated clean staging/publish → independent remote verification. Private-first repository creation with gitleaks scanning, path denylists, and explicit mode separation. |
 
 ### `safe-github-publish` usage
 
@@ -242,13 +242,11 @@ hardening (effect-based verdicts):
 - Per-task tool-call counts and worktree deltas are exposed in the report and
   in the verifier's ARTIFACT EVIDENCE block.
 
-## Orchestrator Role Integrity
+## Orchestration mode
 
-When an orchestration paradigm runs, the visible/current agent is the ORCHESTRATOR and must not execute the main task directly. Every run must produce an *Orchestrator Role Integrity Ledger* recording: requested shape/tool; current role = ORCHESTRATOR; subagents spawned + roles; subagent artifacts; direct orchestrator actions; classification (orchestration support / diagnostics / repair / verification / handoff); explicit statement whether orchestrator executed any main-task work; context checkpoints; repair attempts + outcomes; final role-integrity verdict.
+When the user explicitly requests orchestration, the current agent coordinates the selected shape and its isolated subagents. It must not quietly execute the main task directly while claiming delegation occurred. The shape's own reports, checkpoints, and gates are sufficient; do not add role ledgers or closeout paperwork.
 
-**Repair-only fallback:** On orchestration failure, repair the requested shape/tool; do not switch shapes or execute the main task directly. Provider/model fallback is allowed; shape substitution is forbidden.
-
-**Dual-plan verifier falsifier for role collapse:** The verifier must FAIL if evidence shows the visible/current orchestrator executed the main task directly instead of routing through the requested orchestration shape, or if the requested shape was silently replaced. See `agent/AGENTS.md` for the canonical policy.
+On failure, diagnose and repair the specific product or orchestration defect, then re-run while there is material progress. Provider/model fallback and reversible scope reduction are allowed. Involve the user only for material subjective choices, irreversible actions, unavailable credentials/hardware, or sustained no-progress. See `agent/AGENTS.md` for the canonical policy.
 
 ## Selecting a Paradigm
 

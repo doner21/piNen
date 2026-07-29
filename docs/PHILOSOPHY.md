@@ -1,26 +1,23 @@
-# The piNen Philosophy — Orchestration-First Intelligence
+# The piNen Philosophy — Build-First, Orchestration-Ready Intelligence
 
 > **"warm terminal intelligence"**
 
-## The orchestration pattern: delegation with role integrity
+## Build first; orchestrate when asked
 
-piNen begins from a simple observation about complex agent work: a single
-agent context is bounded — by tokens, by attention, by the fragility of long
-chains of reasoning. Planning, implementation, verification, persistence,
-scheduling, and lifecycle management become more reliable when they are treated
-as coordinated roles instead of one undifferentiated stream of action.
+piNen starts from a practical rule: real work and real tests matter more than
+process artifacts. In normal **direct mode**, the current agent reads, builds,
+fixes, and validates the task itself. A correctly failing check gets repaired;
+an obsolete check gets fixed or removed with the change. Completion means an
+observed machine result or a substantial artifact the user can run, hear, or
+measure.
 
-The piNen response is an agent harness that can be explicitly switched into a
-serious orchestration mode. In that mode, the visible agent becomes the
-**ORCHESTRATOR**: it intakes, routes, delegates, verifies, persists, schedules,
-reloads, and carries work across sessions. The orchestrator is a conductor:
-it coordinates specialist subagents and judges evidence rather than silently
-collapsing into the executor role.
-
-We call this **Orchestrator Role Integrity**. It is the contract that makes
-piNen useful for complex and bespoke orchestration: when a run claims to be an
-orchestration run, its artifacts, ledgers, and verifier checks must show that
-work moved through the requested shape.
+Complex work sometimes benefits from separate planning, implementation, and
+verification contexts. When the user explicitly requests **orchestration
+mode**, piNen becomes a coordinator: it selects a bounded shape, delegates to
+isolated specialist subagents, passes artifacts between phases, and reports the
+verified result. The mode must be described honestly, but it does not require
+extra role ledgers, receipts, or policy paperwork beyond what the selected
+shape produces.
 
 ## Memory that remembers what matters
 
@@ -131,10 +128,9 @@ about work.**
 
 PiNen's safety model is not bolted on — it is structural:
 
-- **Role integrity** keeps orchestration runs honest by checking that the
-  visible orchestrator stayed in the coordination role and routed main-task
-  work through the requested shape. The verifier is a falsifier: it must FAIL
-  if evidence shows the orchestrator did the delegated work directly.
+- **Mode honesty** keeps runs understandable: direct work is reported as direct
+  work, while an explicitly requested orchestration is actually delegated
+  through the selected shape. No extra ledger is needed to state what happened.
 
 - **Effect-based judgment** distinguishes between what an agent says
   and what it actually did. Text-shape heuristics (truncation signals,
@@ -172,12 +168,11 @@ that connects because isolation is not intelligence.
 
 ## Ten principles
 
-1. **When invoked for orchestration, the visible agent is the orchestrator.**
-   It coordinates roles, artifacts, evidence, and continuity while role
-   integrity is enforced by the verifier, not just policy.
+1. **Build directly by default.** The current agent owns implementation and
+   machine validation unless the user asks for orchestration.
 
-2. **Use the orchestration loop for serious delegated work.** Intake → plan →
-   delegate → verify → persist gives complex tasks a traceable structure.
+2. **Orchestrate explicitly and honestly.** Intake → plan → delegate → verify
+   gives complex tasks a bounded multi-context structure when requested.
 
 3. **Remember across time.** Session memory is ephemeral; Engram and
    the Graphify Brain are not.
@@ -198,8 +193,8 @@ that connects because isolation is not intelligence.
 8. **Trust effects, not claims.** Real file mutations are evidence.
    Text-shape heuristics are warnings.
 
-9. **Fail closed.** When in doubt, refuse to advance. A shape that
-   cannot be verified is a shape that is not usable.
+9. **Fix red checks.** Repair product defects, and fix or remove obsolete
+   checks in the same change. Safety-critical ambiguity still fails closed.
 
 10. **The terminal is warm.** This is not cold automation. It is
     intelligence that delegates, remembers, evolves, and connects.

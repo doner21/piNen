@@ -1,29 +1,27 @@
-# Global Pi Agent Policy
+# piNen Agent Policy
 
-## Orchestrator Role Integrity Policy
+## How work gets done (build-first policy, 2026-07-22)
 
-When the user asks for orchestration (any orchestration shape, deterministic `/orchestrate` run, or orchestration wrapper), the visible/current agent remains the **ORCHESTRATOR** and must not execute the main task directly.
+piNen prioritizes real build work over process. The old Orchestrator Role Integrity Policy (role ledgers, pin maps, mandatory predicted-write-set paperwork, GATE_DEFECT verdicts, contract hygiene rules, mandatory subagent routing) is retired — it produced paperwork loops instead of product. The rules are now:
 
-> **NenFlow v3 is retired (2026-07-18).** The deterministic orchestration system (`/orchestrate`, `pi-orchestrator-extension`) is the standard orchestration shape, including intake/intake.md handling. Do not run NenFlow v3 or spawn `pev-*` subagents; if a NenFlow run is requested, route it to `/orchestrate`. See `agent/docs/nenflow-v3-retirement.md`.
+1. **Two modes, picked by the user's words.**
+   - **Direct mode (default):** the current agent builds, fixes, and tests the user's task itself.
+   - **Orchestration mode:** when the user asks to orchestrate, run an orchestration, or says "orchestration work" — go into orchestration mode (see the section below). Treat any explicit orchestration request as a normal supported mode, not an exception.
+2. **Definition of done = the real test.** Intermediate engineering tasks close autonomously with agent-run machine checks and coherent tested changes (plus commits when authorized). Batch user sensory review only at substantial integrated build-room or slice boundaries, when there is a physical artifact the user can run, hear, or measure; give them a short test card (what to do, what should happen, what failure looks like). No closeout documents, ledgers, receipts, or evidence folders.
+3. **Machine validation is agent-owned.** Run and interpret tests, logs, JSON, hashes, captures, and other machine-readable output; never delegate their inspection to the human. Report honestly and plainly: say what changed, what ran, what was observed, and what's unverified, without contract/legal phrasing or "no-credit" or "authorization boundary" language.
+4. **A failing check gets fixed, not processed.** If a test correctly fails, fix the product. If the check itself is wrong or obsolete, fix or delete the check in the same run and say so in the commit message. Never leave a red check "documented around," and never build new gates around a broken one.
+5. **If context runs low**, finish the current step and persist a short handoff (what's done, what's next, key paths). When continuation tooling is available, schedule and trigger a fresh session and resume autonomously; report an infrastructure failure only if autonomous continuation is unavailable.
 
-**Allowed orchestrator actions:** intake and routing; subagent spawning; artifact reads/writes for orchestration state; context checks; `git status`; reading logs; verifying completed jobs; diagnosing failed subagent spawning; repairing the requested orchestration tool/shape/runtime; retrying the requested orchestration route after repair; creating handoff/continuation artifacts.
+## Orchestration mode (when the user asks for it)
 
-**Forbidden orchestrator actions:** implementing the user's main task directly; running the planner's plan itself; becoming executor because subagents failed; silently switching to a different orchestration shape to complete the main task; claiming orchestration succeeded when the visible/current session performed the execution.
+When the user requests orchestration, use the deterministic `/orchestrate` command (`~/.pi/pi-orchestrator-extension`) as the standard shape. In this mode:
 
-**Failure handling — repair-only fallback:**
-1. Diagnose the orchestration failure.
-2. Repair the **requested shape/tool**.
-3. If repair succeeds, resume through the requested orchestration route.
-4. If repair fails, stop and produce an escalation/handoff.
-5. Never execute the main task directly as fallback, and never switch to a different orchestration shape to complete the main task.
+1. **The current agent coordinates; subagents do the work.** Run intake, spawn the planner/executor/verifier subagents, pass artifacts between them, and report the result. Don't quietly do the main task yourself while claiming it was orchestrated — if you end up doing it directly, say so plainly.
+2. **Keep the machinery, drop the paperwork.** Use `/orchestrate`'s own built-in gates as they are. Do not add role-integrity ledgers, pin maps, satisfiability statements, closeout documents, or any run paperwork beyond what the tool itself produces.
+3. **When a run fails:** repair the specific defect (in the product or orchestration tool) and re-run autonomously. While there is material progress, continue through multiple build/fix/test cycles using materially different approaches, independent diagnosis or subagents, model/provider fallback where useful, and reversible scope reduction. Attempts and elapsed time are not human checkpoints. Involve the human only for a sensory-ready integrated build, a material subjective scope/design choice, an irreversible or destructive action, unavailable credentials or hardware, or sustained no-progress that requires a concrete scope-backout decision.
+4. **The finish line is the same as direct mode:** a real test passing or a physical artifact the user can run, hear, or measure — plus a plain-language summary of what the run did.
 
-Provider/model fallback is allowed; switching orchestration shape to finish the main task is forbidden.
-
-**Context threshold — orchestrator self-handoff at 70%:** During any orchestration run, if the orchestrator's context exceeds 70%, the orchestrator must create a self-handoff, save state, schedule continuation, and resume as orchestrator in the fresh session. This 70% is an orchestrator-role rule, distinct from per-role subagent context thresholds (default 65%, configurable per run).
-
-**Orchestrator Role Integrity Ledger:** Every orchestration run must produce an *Orchestrator Role Integrity Ledger* (`ATT_ORCHESTRATOR_ROLE_LEDGER.md` in the run directory). The ledger records: requested shape/tool; current role = ORCHESTRATOR; subagents spawned + roles; subagent artifacts; direct orchestrator actions; classification (orchestration support / diagnostics / repair / verification / handoff); explicit statement whether orchestrator executed any main-task work; context checkpoints; repair attempts + outcomes; final role-integrity verdict.
-
-**Verifier falsifier:** The verifier must FAIL if evidence shows the visible/current orchestrator executed the main task directly instead of routing through the requested orchestration shape, or if the requested shape was silently replaced.
+> **NenFlow v3 and PEV loops are retired (2026-07-18).** Do not run NenFlow, spawn `pev-*` subagents, or read nenflow prompts/health files. If a NenFlow run is requested, route it to `/orchestrate`. See `agent/docs/nenflow-v3-retirement.md`.
 
 ## Engram Persistent Memory
 
@@ -148,6 +146,9 @@ When working in a Git repository:
 1. Check `git status --short` before making edits when repository state matters.
 2. Inspect relevant diffs before summarizing or committing changes.
 3. Do not commit, push, reset, rebase, or force-push unless the user explicitly asks.
+
+   **Project-local override:** A project's own `AGENTS.md` takes precedence over rules 3–4 of this section for work within that project's repository. When a project AGENTS.md grants standing authorization for commits or other Git operations within its repo scope, that authorization governs; the global default restriction does not apply.
+
 4. Never commit secrets, auth files, tokens, session logs, local runtime state, caches, or generated diagnostics unless the user explicitly confirms.
 5. Prefer small, focused commits with clear messages when the user requests commits.
 6. If modifying Pi extension code (`agent/extensions/**/*.ts`), remember that `/reload` does not reliably re-evaluate extension source in already-running Pi processes; a full Pi process restart may be required.
@@ -155,7 +156,9 @@ When working in a Git repository:
 
 ## Automated Git Backup Policy
 
-The user has granted standing authorization for the deterministic `git-backup` extension to create and push **isolated backup refs only**. This authorization does not permit agents to commit to, merge, rebase, reset, force-push, or push the working branch without a separate explicit request.
+When explicitly enabled and configured by the user, the deterministic `git-backup` extension may create and push **isolated backup refs only**. This policy does not itself grant authorization, and isolated-backup authorization never permits agents to commit to, merge, rebase, reset, force-push, or push the working branch without a separate explicit request.
+
+The project-local override described in § Git Safety / Smart Git Usage applies here as well: a project AGENTS.md may grant standing authorization for working-branch operations within that project's scope.
 
 ### Required backup model
 

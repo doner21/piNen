@@ -6,7 +6,7 @@ import { writeDiagnostics as writeCanonicalDiagnostics } from "./diagnostics.ts"
  * Agent-operated "new session" bridge — phase-machine + session_shutdown
  * confirmation edition (v3, lifecycle-race-fix).
  *
- * Fixes false `agent_new_session` failure diagnostics (RUN_20260627-164912):
+ * Fixes false `agent_new_session` failure diagnostics (historical orchestration run):
  * - session_shutdown:new is authoritative. Once confirmed, later
  *   hard-timeout/rejection must NOT overwrite final diagnostics to failure.
  * - Dual-timeout pattern eliminated: single cancellable timeout handle.

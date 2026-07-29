@@ -31,7 +31,7 @@
  * script lives OUTSIDE the npm tree (under agent/) so it survives updates and
  * can reapply the patch on demand.
  *
- * Design rules (from intake RUN_20260623-173339)
+ * Design rules (from intake historical orchestration run)
  * ----------------------------------------------
  *   - User-invoked ONLY. Importing this module never patches anything.
  *   - Idempotent: check/apply/verify are safe to run repeatedly.
@@ -42,14 +42,15 @@
  *   - NEVER uses `pi.sendUserMessage('/command')` as a command bridge
  *     (that path does not dispatch commands — see UPSTREAM_REQUEST.md §2).
  *
- * Prior patch evidence
- * --------------------
- *   - agent/nenflow-v3/runs/RUN_20260620-194054/CORE_PATCH.diff
- *   - agent/nenflow-v3/runs/RUN_20260623-160406/RELOAD_FIX_NOTES.md
+ * Public design evidence
+ * ----------------------
  *   - agent/extensions/agent-reload/UPSTREAM_REQUEST.md
  *   - agent/skills/agent-new-session/SKILL.md
  *   - agent/extensions/agent-new-session/index.ts
- *   - agent/nenflow-v3/runs/RUN_20260623-192852/ATT_0_INTAKE.md
+ *   - this file's idempotent PATCHES definitions and verification commands
+ *
+ * Historical private run artifacts used during the original investigation are
+ * intentionally not published.
  *
  * Usage
  * -----

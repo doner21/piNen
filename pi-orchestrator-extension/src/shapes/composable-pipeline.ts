@@ -21,6 +21,7 @@ import {
   formatRoutedModel,
   truncateWithNotice,
   throwIfAborted,
+  SubagentTerminalAmbiguousError,
   type AgentProfile,
   type SubagentResult,
 } from "../substrate";
@@ -121,12 +122,42 @@ interface PhaseMeta {
 // negateRe patterns share a common prefix: /\b(?:no\s+(?:need\s+(?:for|to)\s+)?|without\s+|skip\s+(?:the\s+)?)/
 // then each appends the phase-specific word list with plural forms and optional trailing 's'.
 const PHASE_META: PhaseMeta[] = [
-  { kind: "hypothesize", detect: /\bhypothesiz(?:er|e)|hypothesis\b/i, countRe: /(\d+)\s*(?:hypothesiz(?:ers?)|hypothesis)/i, negateRe: /\b(?:no\s+(?:need\s+(?:for|to)\s+)?|without\s+|skip\s+(?:the\s+)?)(?:hypothesiz(?:ers?|e[ds]?|ing)|hypothes(?:is|es))\b/i },
-  { kind: "critique",     detect: /\bcritic(?:al)?|critique|review(?:er)?\b/i,      countRe: /(\d+)\s*(?:critics?|critique)/i,                  negateRe: /\b(?:no\s+(?:need\s+(?:for|to)\s+)?|without\s+|skip\s+(?:the\s+)?)(?:critics?|critiques?|reviews?|reviewers?)\b/i },
-  { kind: "synthesize",   detect: /\bsynthesiz(?:er|e)|synthesis\b/i,            countRe: /(\d+)\s*(?:synthesiz(?:ers?)|synthesis)/i,          negateRe: /\b(?:no\s+(?:need\s+(?:for|to)\s+)?|without\s+|skip\s+(?:the\s+)?)(?:synthesiz(?:ers?|e[ds]?|ing)|synthes(?:is|es))\b/i },
-  { kind: "plan",         detect: /\bplanner|plan(?:ning)?|strategiz(?:e|ing)\b/i,  countRe: /(\d+)\s*(?:planners?|planning)/i,                  negateRe: /\b(?:no\s+(?:need\s+(?:for|to)\s+)?|without\s+|skip\s+(?:the\s+)?)(?:planners?|plan(?:ning|s)?|strategiz(?:e[ds]?|ing))\b/i },
-  { kind: "execute",      detect: /\bexecutor?|execut(?:e|ion|ing)|implement(?:er|ing)?|build(?:er|ing)?\b/i, countRe: /(\d+)\s*(?:executors?|execut(?:ions?)|implement(?:ers?|ations?))/i, negateRe: /\b(?:no\s+(?:need\s+(?:for|to)\s+)?|without\s+|skip\s+(?:the\s+)?)(?:execut(?:ors?|e[ds]?|ions?|ing)|implement(?:s|ers?|ings?|ations?)?|build(?:s|ers?|ings?)?)\b/i },
-  { kind: "verify",       detect: /\bverif(?:ier|y|ication)|check(?:er|ing)?|validat(?:or|e|ion)\b/i, countRe: /(\d+)\s*(?:verif(?:iers?|ications?)|check(?:ers?)|validat(?:ors?))/i, negateRe: /\b(?:no\s+(?:need\s+(?:for|to)\s+)?|without\s+|skip\s+(?:the\s+)?)(?:verif(?:iers?|y|ications?|ying)|check(?:ers?|ing)?|validat(?:ors?|e[ds]?|ions?|ing))\b/i },
+  {
+    kind: "hypothesize",
+    detect: /\b(?:hypothesiz(?:ers?|e[ds]?|ing)|hypothes(?:is|es))\b/i,
+    countRe: /(?:\b(\d+)\s*(?:hypothesiz(?:ers?|e)|hypothes(?:is|es))\b|\b(?:hypothesiz(?:ers?|e)|hypothes(?:is|es))\b\s*(?:x|×)\s*(\d+)\b)/i,
+    negateRe: /\b(?:no\s+(?:need\s+(?:for|to)\s+)?|without\s+|skip\s+(?:the\s+)?)(?:hypothesiz(?:ers?|e[ds]?|ing)|hypothes(?:is|es))\b/i,
+  },
+  {
+    kind: "critique",
+    detect: /\b(?:critics?|critiques?|reviews?|reviewers?)\b/i,
+    countRe: /(?:\b(\d+)\s*(?:critics?|critiques?|reviews?|reviewers?)\b|\b(?:critics?|critiques?|reviews?|reviewers?)\b\s*(?:x|×)\s*(\d+)\b)/i,
+    negateRe: /\b(?:no\s+(?:need\s+(?:for|to)\s+)?|without\s+|skip\s+(?:the\s+)?)(?:critics?|critiques?|reviews?|reviewers?)\b/i,
+  },
+  {
+    kind: "synthesize",
+    detect: /\b(?:synthesiz(?:ers?|e[ds]?|ing)|synthes(?:is|es))\b/i,
+    countRe: /(?:\b(\d+)\s*(?:synthesiz(?:ers?|e)|synthes(?:is|es))\b|\b(?:synthesiz(?:ers?|e)|synthes(?:is|es))\b\s*(?:x|×)\s*(\d+)\b)/i,
+    negateRe: /\b(?:no\s+(?:need\s+(?:for|to)\s+)?|without\s+|skip\s+(?:the\s+)?)(?:synthesiz(?:ers?|e[ds]?|ing)|synthes(?:is|es))\b/i,
+  },
+  {
+    kind: "plan",
+    detect: /\b(?:planners?|plans?|planning|strategiz(?:e[ds]?|ing))\b/i,
+    countRe: /(?:\b(\d+)\s*(?:planners?|plans?|planning)\b|\b(?:planners?|plans?|planning)\b\s*(?:x|×)\s*(\d+)\b)/i,
+    negateRe: /\b(?:no\s+(?:need\s+(?:for|to)\s+)?|without\s+|skip\s+(?:the\s+)?)(?:planners?|plans?|planning|strategiz(?:e[ds]?|ing))\b/i,
+  },
+  {
+    kind: "execute",
+    detect: /\b(?:executors?|execut(?:e[ds]?|ions?|ing)|implement(?:s|ers?|ings?|ations?)?|build(?:s|ers?|ings?)?)\b/i,
+    countRe: /(?:\b(\d+)\s*(?:executors?|execut(?:e|ions?)|implement(?:ers?|ations?)|builders?)\b|\b(?:executors?|execut(?:e|ions?)|implement(?:ers?|ations?)|builders?)\b\s*(?:x|×)\s*(\d+)\b)/i,
+    negateRe: /\b(?:no\s+(?:need\s+(?:for|to)\s+)?|without\s+|skip\s+(?:the\s+)?)(?:executors?|execut(?:e[ds]?|ions?|ing)|implement(?:s|ers?|ings?|ations?)?|build(?:s|ers?|ings?)?)\b/i,
+  },
+  {
+    kind: "verify",
+    detect: /\b(?:verif(?:iers?|y|ies|ied|ying|ications?)|checks?|checkers?|checking|validat(?:ors?|e[ds]?|ing|ions?))\b/i,
+    countRe: /(?:\b(\d+)\s*(?:verif(?:iers?|y|ications?)|checks?|checkers?|validat(?:ors?|e|ions?))\b|\b(?:verif(?:iers?|y|ications?)|checks?|checkers?|validat(?:ors?|e|ions?))\b\s*(?:x|×)\s*(\d+)\b)/i,
+    negateRe: /\b(?:no\s+(?:need\s+(?:for|to)\s+)?|without\s+|skip\s+(?:the\s+)?)(?:verif(?:iers?|y|ies|ied|ying|ications?)|checks?|checkers?|checking|validat(?:ors?|e[ds]?|ing|ions?))\b/i,
+  },
 ];
 
 function getMeta(kind: PhaseKind): PhaseMeta {
@@ -274,11 +305,18 @@ async function runPhase<T extends { index: number; agentName: string; text: stri
       result = await spawnChecked(spawnGuard, params, agents, phase.agentName, prompt,
         ws, emit, inheritedModel, effectiveModel);
     } catch (firstErr) {
+      // Never relaunch after a terminal ambiguous mutating state: the first
+      // child may already have written to disk, so a model fallback could
+      // duplicate writes. Preserve the original structured error verbatim.
+      if (isTerminalAmbiguousMutation(firstErr)) throw firstErr;
       emit(`WARNING: Phase ${phase.kind} agent ${index + 1} spawn failed with primary model, retrying with fallback (${PHASE_FALLBACK_MODEL.provider}/${PHASE_FALLBACK_MODEL.model})...`);
       try {
         result = await spawnChecked(spawnGuard, params, agents, phase.agentName, prompt,
           ws, emit, inheritedModel, PHASE_FALLBACK_MODEL);
-      } catch {
+      } catch (fallbackErr) {
+        // If the fallback itself mutated before losing its result, that newer
+        // structured terminal state is the one callers must inspect.
+        if (isTerminalAmbiguousMutation(fallbackErr)) throw fallbackErr;
         throw firstErr;
       }
     }
@@ -364,7 +402,7 @@ async function runExecutePhase(
       { model: task.model, provider: task.provider },
     );
     const result = await spawnChecked(spawnGuard, params, agents, resolvedAgent, prompt,
-      ws, emit, inheritedModel, override);
+      ws, emit, inheritedModel, override, true);
 
     // Budget estimation
     const budget = estimateExecutorContextBudget(prompt.length, params.executorModel, { criticalThreshold: 60 });
@@ -595,7 +633,11 @@ function parsePipelineConfig(task: string): PipelineConfig {
   const counts = new Map<PhaseKind, number>();
   for (const meta of PHASE_META) {
     const m = lower.match(meta.countRe);
-    if (m) { const c = parseInt(m[1], 10); if (c > 0) counts.set(meta.kind, c); }
+    const explicit = m?.[1] ?? m?.[2];
+    if (explicit) {
+      const count = parseInt(explicit, 10);
+      if (count > 0) counts.set(meta.kind, count);
+    }
   }
 
   // Determine active phases
@@ -665,7 +707,7 @@ function getDefaultAgent(kind: PhaseKind, planner: string, executor: string, ver
   }
 }
 
-export { resolvePipelineConfig };
+export { parsePipelineConfig, resolvePipelineConfig };
 
 // ── Parsing helpers ────────────────────────────────────────────────────────
 
@@ -749,18 +791,28 @@ function extractBalancedObject(text: string): string | null {
 
 // ── Spawn helpers ───────────────────────────────────────────────────────────
 
+function isTerminalAmbiguousMutation(error: unknown): boolean {
+  if (error instanceof SubagentTerminalAmbiguousError) return true;
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as { name?: unknown; info?: { code?: unknown; retryAllowed?: unknown } };
+  return candidate.name === "SubagentTerminalAmbiguousError" ||
+    (candidate.info?.retryAllowed === false &&
+      (candidate.info.code === "RESULT_LOST_AFTER_MUTATION" || candidate.info.code === "AMBIGUOUS_COMPLETION"));
+}
+
 async function spawnChecked(
   spawnGuard: SpawnGuard, params: NormalizedParams, agents: Map<string, AgentProfile>,
   agentName: string, task: string, signal: AbortSignal | undefined,
   onProgress: ((text: string) => void) | undefined,
   inheritedModel: { provider?: string; model?: string } | undefined,
   modelOverride: { model?: string; provider?: string } | undefined,
+  phaseMutates = false,
 ): Promise<SubagentResult> {
   const spawned = spawnGuard.reserve();
   onProgress?.(`Spawning ${agentName} (${spawned}/${spawnGuard.cap}) in ${params.cwd}`);
   return spawnSubagent(agentName, task, {
     agents, cwd: params.cwd, allowLocalModel: params.allowLocalModel,
-    signal, inheritedModel, onProgress, modelOverride,
+    signal, inheritedModel, onProgress, modelOverride, phaseMutates,
   });
 }
 
@@ -775,12 +827,26 @@ function inferredRuntimeModelForTask(
   return undefined;
 }
 
+function normalizePlannerRouteHint(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  const placeholder = trimmed.toLowerCase().replace(/[\s_()-]+/g, "");
+  if (["default", "sessiondefault", "inherit", "inherited", "auto"].includes(placeholder)) {
+    return undefined;
+  }
+  return trimmed;
+}
+
 function mergeOverrides(
   a: { model?: string; provider?: string } | undefined,
   b: { model?: string; provider?: string } | undefined,
 ): { model?: string; provider?: string } | undefined {
-  const m = b?.model ?? a?.model;
-  const p = b?.provider ?? a?.provider;
+  // Planner-authored task routes are untrusted hints. Models commonly emit
+  // placeholders such as provider/model "default" to mean "use the configured
+  // route"; passing those literally creates `pi --provider default` and bypasses
+  // the healthy explicit route that preflight checked.
+  const m = normalizePlannerRouteHint(b?.model) ?? a?.model;
+  const p = normalizePlannerRouteHint(b?.provider) ?? a?.provider;
   return (m || p) ? { model: m, provider: p } : undefined;
 }
 

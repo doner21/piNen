@@ -176,6 +176,8 @@ export interface SubagentResult {
    * JSONL stream. `mutating` counts write/edit/bash-class tools.
    */
   toolCalls?: ToolCallSummary;
+  /** Transient assistant/transport failures cleared by the child's successful auto-retry lifecycle. */
+  recoveredAssistantFailures?: string[];
 }
 
 // ── spawnSubagent ──────────────────────────────────────────────────────────
@@ -209,6 +211,13 @@ export interface SpawnSubagentOptions {
     phaseName?: string;
     phaseIndex?: number;
   };
+  /**
+   * True for phases that may mutate files. A terminal assistant/transport error
+   * after such a child was launched is ambiguous: the child may already have
+   * changed disk. It must surface as a no-retry result-lost/candidate state,
+   * never as permission to auto-respawn the phase.
+   */
+  phaseMutates?: boolean;
 }
 
 /**
@@ -235,6 +244,36 @@ export class SubagentDetachedError extends Error {
     );
     this.name = "SubagentDetachedError";
     this.manifest = manifest;
+  }
+}
+
+export interface SubagentTerminalAmbiguousInfo {
+  code: "AMBIGUOUS_COMPLETION" | "RESULT_LOST_AFTER_MUTATION";
+  retryAllowed: false;
+  resultLost: boolean;
+  agentName: string;
+  errorMessage: string;
+  exitCode: number | null;
+  stderr: string;
+  assistantFailures: string[];
+  candidate?: SubagentResult;
+}
+
+export class SubagentTerminalAmbiguousError extends Error {
+  readonly info: SubagentTerminalAmbiguousInfo;
+
+  constructor(agentName: string, info: Omit<SubagentTerminalAmbiguousInfo, "agentName" | "retryAllowed">) {
+    const payload: SubagentTerminalAmbiguousInfo = {
+      ...info,
+      agentName,
+      retryAllowed: false,
+    };
+    super(
+      `Subagent ${agentName} ended in a terminal ambiguous mutating state ` +
+        `(code=${payload.code}, retryAllowed=false): ${payload.errorMessage}`,
+    );
+    this.name = "SubagentTerminalAmbiguousError";
+    this.info = payload;
   }
 }
 
@@ -340,6 +379,10 @@ export async function spawnSubagent(
         if (firstJsonTimer) clearTimeout(firstJsonTimer);
       };
       const assistantFailures: string[] = [];
+      // Retryable failures are parked here when Pi reports that the child will
+      // retry (or that its auto-retry succeeded). They remain useful telemetry,
+      // but must not poison a subsequently successful child result.
+      const recoveredAssistantFailures: string[] = [];
       const toolCalls = emptyToolCallSummary();
 
       let child;
@@ -416,6 +459,9 @@ export async function spawnSubagent(
             };
             if (profile.provider) backgroundResult.provider = profile.provider;
             if (profile.model) backgroundResult.model = profile.model;
+            if (recoveredAssistantFailures.length > 0) {
+              backgroundResult.recoveredAssistantFailures = [...recoveredAssistantFailures];
+            }
             try {
               writeFileSync(survival.resultFile, JSON.stringify(backgroundResult, null, 2), "utf8");
             } catch {}
@@ -454,11 +500,24 @@ export async function spawnSubagent(
             if (toolName) recordToolCall(toolCalls, toolName);
           }
 
-          // Once agent_end is emitted, the subagent has finished its work.
-          // Any further message_end events (e.g. from internal shutdown/retries)
-          // are post-termination noise and must not be treated as failures.
+          // Respect Pi's child auto-retry lifecycle. An agent_end carrying
+          // willRetry=true closes only the failed attempt, not the child turn.
+          // Park its failures as recovered telemetry and keep accepting the
+          // retry's assistant messages. A successful auto_retry_end is a
+          // belt-and-braces recovery signal for protocol variants that omit or
+          // reorder willRetry.
           if (event?.type === "agent_end") {
-            agentEnded = true;
+            if ((event as { willRetry?: boolean }).willRetry === true) {
+              recoveredAssistantFailures.push(...assistantFailures);
+              assistantFailures.length = 0;
+              agentEnded = false;
+            } else {
+              agentEnded = true;
+            }
+          }
+          if (event?.type === "auto_retry_end" && (event as { success?: boolean }).success === true) {
+            recoveredAssistantFailures.push(...assistantFailures);
+            assistantFailures.length = 0;
           }
 
           if (
@@ -531,9 +590,42 @@ export async function spawnSubagent(
       if (options.signal) options.signal.removeEventListener("abort", abortHandler);
       stdoutReader.close();
 
+      const buildCandidate = (): SubagentResult => {
+        const candidate: SubagentResult = {
+          agentName: profile.name,
+          task,
+          text: lastAssistantText.trim(),
+          stderr: stderr.trim(),
+          exitCode,
+          durationMs: Date.now() - startedAt,
+          events: eventCount,
+          toolCalls,
+        };
+        if (profile.provider) candidate.provider = profile.provider;
+        if (profile.model) candidate.model = profile.model;
+        if (recoveredAssistantFailures.length > 0) {
+          candidate.recoveredAssistantFailures = [...recoveredAssistantFailures];
+        }
+        return candidate;
+      };
+      const throwAmbiguousIfMutating = (errorMessage: string): void => {
+        const mutatingEvidence = options.phaseMutates === true || toolCalls.mutating > 0;
+        if (!mutatingEvidence) return;
+        const candidate = lastAssistantText.trim() ? buildCandidate() : undefined;
+        throw new SubagentTerminalAmbiguousError(profile.name, {
+          code: candidate ? "AMBIGUOUS_COMPLETION" : "RESULT_LOST_AFTER_MUTATION",
+          resultLost: !candidate,
+          errorMessage,
+          exitCode,
+          stderr: stderr.trim(),
+          assistantFailures: [...assistantFailures],
+          ...(candidate ? { candidate } : {}),
+        });
+      };
+
       if (killedByAbort) throw new Error(`Subagent ${agentName} aborted.`);
       if (protocolTimedOut) {
-        throw new Error(JSON.stringify({
+        const message = JSON.stringify({
           type: "pi_child_first_json_timeout",
           agent: agentName,
           timeoutMs: firstJsonTimeoutMs,
@@ -541,35 +633,33 @@ export async function spawnSubagent(
           cwd: options.cwd,
           commandBasename: path.basename(launch.command),
           launchRuntime: command.launchRuntime,
-        }));
+        });
+        throwAmbiguousIfMutating(message);
+        throw new Error(message);
       }
       if (exitCode !== 0) {
-        throw new Error(
-          `Subagent ${agentName} exited with code ${exitCode}. stderr: ${truncateWithNotice(stderr.trim(), 2000, "stderr")}`,
-        );
+        const message = `Subagent ${agentName} exited with code ${exitCode}. stderr: ${truncateWithNotice(stderr.trim(), 2000, "stderr")}`;
+        throwAmbiguousIfMutating(message);
+        throw new Error(message);
       }
       if (assistantFailures.length > 0) {
         const stderrSuffix = stderr.trim()
           ? ` stderr: ${truncateWithNotice(stderr.trim(), 1000, "stderr")}`
           : "";
-        throw new Error(
+        const message =
           `Subagent ${agentName} reported assistant failure despite exit code 0: ` +
-            `${truncateWithNotice(assistantFailures.join("; "), 2000, "assistant failure details")}.${stderrSuffix}`,
-        );
+          `${truncateWithNotice(assistantFailures.join("; "), 2000, "assistant failure details")}.${stderrSuffix}`;
+        throwAmbiguousIfMutating(message);
+        throw new Error(message);
       }
 
-      const result: SubagentResult = {
-        agentName: profile.name,
-        task,
-        text: lastAssistantText.trim(),
-        stderr: stderr.trim(),
-        exitCode,
-        durationMs: Date.now() - startedAt,
-        events: eventCount,
-        toolCalls,
-      };
-      if (profile.provider) result.provider = profile.provider;
-      if (profile.model) result.model = profile.model;
+      const result = buildCandidate();
+      if (recoveredAssistantFailures.length > 0) {
+        options.onProgress?.(
+          `Subagent ${profile.name}: transient assistant/transport failure(s) auto-recovered by child retry: ` +
+            truncateWithNotice(recoveredAssistantFailures.join("; "), 1000, "recovered failure details"),
+        );
+      }
       return result;
     }
   } finally {

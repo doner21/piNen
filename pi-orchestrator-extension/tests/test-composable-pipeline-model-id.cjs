@@ -152,12 +152,32 @@ async function testGpt55PassesThroughUnmodified() {
   assert.equal(synth.model, "gpt-5.5", "gpt-5.5 must NOT be over-normalized (dot preserved)");
 }
 
+async function testPlannerDefaultRoutePlaceholderInheritsExplicitExecutorRoute() {
+  process.env.FAKE_PI_COMPOSABLE_PLAN_DEFAULT_ROUTE = "1";
+  try {
+    const { calls } = await driveComposable({}, {
+      task: "Plan and execute a tiny validation task.",
+      executorProvider: "deepseek",
+      executorModel: "deepseek-v4-pro",
+    });
+    const executor = calls.find((c) => c.agentName === "coder");
+    assert.ok(executor, "execute phase must spawn the executor agent (coder)");
+    assert.equal(executor.provider, "deepseek", "planner provider=default must inherit the explicit executor provider");
+    assert.equal(executor.model, "deepseek-v4-pro", "planner model=default must inherit the explicit executor model");
+    assert.ok(calls.every((c) => c.provider !== "default"), "no child may receive literal provider=default");
+    assert.ok(calls.every((c) => c.model !== "default"), "no child may receive literal model=default");
+  } finally {
+    delete process.env.FAKE_PI_COMPOSABLE_PLAN_DEFAULT_ROUTE;
+  }
+}
+
 async function run() {
   testNormalizerUnit();
   await testDottedAnthropicRuntimeRoleBecomesDashed();
   await testExplicitExecutorOverrideReachesComposedPhase();
   await testGpt55PassesThroughUnmodified();
-  console.log("PASS composable-pipeline-model-id: normalizer unit (anthropic dot→dash, gpt-5.5 untouched, executor-first inheritance), dotted anthropic runtime-role spawns dashed, explicit executor override reaches composed phase, gpt-5.5 passes through");
+  await testPlannerDefaultRoutePlaceholderInheritsExplicitExecutorRoute();
+  console.log("PASS composable-pipeline-model-id: normalizer unit, composed-phase inheritance, gpt-5.5 preservation, and planner default-route placeholders inherit explicit executor routing");
 }
 
 run().catch((error) => { console.error("test-composable-pipeline-model-id: FAIL"); console.error(error); process.exit(1); });

@@ -188,7 +188,14 @@ function respond(prompt) {
   // dual-plan-synthesis-execute-verify fixture
   if (prompt.includes("dual-plan-synthesis-execute-verify orchestration")) {
     if (prompt.includes("independent implementation plan only")) {
-      return { toolEvents: [], text: "Fixture independent plan: inspect target, apply minimal patch, run targeted verification." };
+      const mutating = process.env.FAKE_PI_DUAL_PLAN_MUTATING === "1";
+      return {
+        toolEvents: mutating ? [
+          { type: "tool_execution_start", toolName: "bash" },
+          { type: "tool_execution_end", toolName: "bash" },
+        ] : [],
+        text: "Fixture independent plan: inspect target, apply minimal patch, run targeted verification.",
+      };
     }
     if (prompt.includes("synthesis reviewer")) {
       return { toolEvents: [], text: "Fixture synthesized plan: implement the minimal safe patch and verify the targeted invariant." };
@@ -232,6 +239,27 @@ function respond(prompt) {
     };
   }
 
+  if (
+    process.env.FAKE_PI_COMPOSABLE_PLAN_DEFAULT_ROUTE === "1" &&
+    prompt.includes("You are the planner in a composable orchestration pipeline")
+  ) {
+    return {
+      toolEvents: [],
+      text: JSON.stringify({
+        tasks: [{
+          id: "task-1",
+          description: "Execute the requested validation task.",
+          dependsOn: [],
+          agent: "coder",
+          role: "validation",
+          provider: "default",
+          model: "default",
+        }],
+        notes: "Planner placeholders must inherit the configured executor route.",
+      }),
+    };
+  }
+
   if (prompt.includes("Plan the following task")) {
     const style = process.env.FAKE_PI_PLAN_STYLE;
     if (style === "impl-1") {
@@ -240,6 +268,26 @@ function respond(prompt) {
         text: JSON.stringify({
           tasks: [{ id: "task-1", description: "CREATE file out-1.txt with the fixture content.", dependsOn: [] }],
           notes: "fixture impl plan (1 task)",
+        }),
+      };
+    }
+    if (style === "impl-1-ws") {
+      // Same single CREATE task, but the planner also declares its predicted
+      // write set (predict-then-write fixtures). The optional mutating event
+      // proves discovery-only telemetry fails closed even if a child violates
+      // its read-only tool profile.
+      const toolEvents = process.env.FAKE_PI_DISCOVERY_PLANNER_MUTATING === "1"
+        ? [
+            { type: "tool_execution_start", toolName: "bash" },
+            { type: "tool_execution_end", toolName: "bash" },
+          ]
+        : [];
+      return {
+        toolEvents,
+        text: JSON.stringify({
+          tasks: [{ id: "task-1", description: "CREATE file out-1.txt with the fixture content.", dependsOn: [] }],
+          notes: "fixture impl plan (1 task, predicted write set)",
+          predicted_write_set: ["out-1.txt"],
         }),
       };
     }
@@ -1035,10 +1083,22 @@ function main() {
 
   const prompt = promptText();
   const intake = extractIntake(prompt);
+
+  // Deterministic extractor: log exactly the BEGIN..END predicted write-set
+  // block (or null if absent) without logging full prompts.
+  let predictedWriteSetBlock = null;
+  const pwsbMatch = prompt.match(/BEGIN_PREDICTED_WRITE_SET\n([\s\S]*?)\nEND_PREDICTED_WRITE_SET/);
+  if (pwsbMatch) {
+    predictedWriteSetBlock = pwsbMatch[0];
+  }
+
   const record = {
     agentName: agentNameFromSystemPrompt(),
     provider: argValue("--provider") || null,
     model: argValue("--model") || null,
+    tools: argValue("--tools") || null,
+    noTools: args.includes("--no-tools"),
+    predictedWriteSetBlock,
     promptHasIntake: Boolean(intake),
     orchestrationControls: intake && intake.orchestration_controls ? intake.orchestration_controls : null,
     routingRequirements: intake && intake.routing_requirements ? intake.routing_requirements : null,

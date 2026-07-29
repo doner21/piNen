@@ -52,11 +52,11 @@ updates and can reapply the patch on demand. Running the new-session `apply`
 also repairs the reload bridge, and running the reload `apply` also repairs
 the new-session bridge — there is only one underlying patch.
 
-Prior patch evidence used to derive the edits:
-
-- `agent/nenflow-v3/runs/RUN_20260620-194054/CORE_PATCH.diff`
-- `agent/nenflow-v3/runs/RUN_20260623-160406/RELOAD_FIX_NOTES.md`
-- `agent/extensions/agent-reload/UPSTREAM_REQUEST.md`
+Public design evidence for the edits lives in
+`agent/extensions/agent-reload/UPSTREAM_REQUEST.md`, the reload/new-session
+extension source, and the patcher's own idempotent `PATCHES` definitions.
+Historical private run artifacts from the original investigation are not
+published.
 
 ## The patcher script
 
@@ -240,10 +240,9 @@ If `check`, `apply`, or `verify` returns exit code `2`, an expected patch anchor
 was not found — the Pi source has drifted from the known patch shape.
 
 - **Do NOT force-apply.** The patcher has already refused to write anything.
-- Re-derive the patch against the new Pi source. Start from the prior evidence:
-  - `agent/nenflow-v3/runs/RUN_20260620-194054/CORE_PATCH.diff`
-  - `agent/nenflow-v3/runs/RUN_20260623-160406/RELOAD_FIX_NOTES.md`
-  - `agent/extensions/agent-reload/UPSTREAM_REQUEST.md`
+- Re-derive the patch against the new Pi source. Start from
+  `agent/extensions/agent-reload/UPSTREAM_REQUEST.md`, the current extension
+  source, and the existing patcher's `PATCHES`/sentinel definitions.
 - Update the `PATCHES` definitions in `agent/core-patch/reapply-pi-core-patch.mjs`
   (new `find`/`replace`/`sentinel`) and re-run `check`.
 - If a backup exists from a previously-good apply and you only need to get back

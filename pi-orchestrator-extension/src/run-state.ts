@@ -18,7 +18,32 @@ import type { SubagentResult } from "./substrate";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
-export type PhaseStatus = "done" | "detached" | "pending";
+export type PhaseStatus = "done" | "detached" | "pending" | "ambiguous-completion";
+
+export type TerminalNoRetryCode =
+  | "AMBIGUOUS_COMPLETION"
+  | "RESULT_LOST_AFTER_MUTATION"
+  | "WRITE_SET_VIOLATION"
+  | "WRITE_SET_UNOBSERVABLE";
+
+export interface TerminalNoRetryState {
+  code: TerminalNoRetryCode;
+  retryAllowed: false;
+  resultLost: boolean;
+  phaseName: string;
+  phaseIndex: number;
+  recordedAt: string;
+  errorMessage: string;
+  agentName?: string;
+  exitCode?: number | null;
+  spawnedCount?: number;
+  verifierSpawned?: boolean;
+  observed?: string[];
+  violations?: string[];
+  unobservableScopes?: string[];
+  candidateResultFile?: string;
+  runId?: string;
+}
 
 export interface PhaseStateEntry {
   index: number;
@@ -52,6 +77,8 @@ export interface LoadedRunState {
   checkpoints: Map<number, SubagentResult>;
   /** Survivor manifests keyed by phase index. */
   survivors: Map<number, SurvivorManifest>;
+  /** Terminal no-retry states keyed by phase index (ambiguous mutating completion / result lost). */
+  terminalStates: Map<number, TerminalNoRetryState>;
   /** Absolute run directory. */
   runDir: string;
 }
@@ -59,13 +86,29 @@ export interface LoadedRunState {
 // ── Store ──────────────────────────────────────────────────────────────────
 
 export function runsRootDir(): string {
-  return path.join(os.homedir(), ".pi", "pi-orchestrator-extension", "runs-state");
+  const override = process.env.PI_ORCHESTRATOR_RUNS_ROOT?.trim();
+  return override ? path.resolve(override) : path.join(os.homedir(), ".pi", "pi-orchestrator-extension", "runs-state");
 }
 
 export function runDirFor(runId: string): string {
-  // Defensive: forbid path traversal in externally-supplied resume ids.
-  const safe = String(runId).replace(/[^a-zA-Z0-9._-]/g, "_");
-  return path.join(runsRootDir(), safe);
+  // Resume ids are externally supplied. Validate rather than lossy-sanitize so
+  // different inputs cannot alias the same persisted run and dot segments can
+  // never resolve to the runs root or its parent.
+  const candidateId = String(runId);
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(candidateId)) {
+    throw new Error(
+      `RUN_ID_INVALID: run id must be 1-128 characters, start with an alphanumeric character, ` +
+        `and contain only letters, digits, dot, underscore, or hyphen.`,
+    );
+  }
+
+  const root = path.resolve(runsRootDir());
+  const candidate = path.resolve(root, candidateId);
+  const relative = path.relative(root, candidate);
+  if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error("RUN_ID_INVALID: resolved run directory must be a child of the runs root.");
+  }
+  return candidate;
 }
 
 function phaseFileName(index: number, name: string): string {
@@ -76,6 +119,16 @@ function phaseFileName(index: number, name: string): string {
 function survivorFileName(index: number, name: string): string {
   const safe = name.replace(/[^a-zA-Z0-9._-]/g, "_");
   return `survivor-${index}-${safe}.json`;
+}
+
+function terminalStateFileName(index: number, name: string): string {
+  const safe = name.replace(/[^a-zA-Z0-9._-]/g, "_");
+  return `terminal-no-retry-${index}-${safe}.json`;
+}
+
+function terminalCandidateFileName(index: number, name: string): string {
+  const safe = name.replace(/[^a-zA-Z0-9._-]/g, "_");
+  return `terminal-no-retry-${index}-${safe}.candidate.json`;
 }
 
 export function survivorResultFileName(index: number, name: string): string {
@@ -128,6 +181,7 @@ export class RunStateStore {
     const state = JSON.parse(readFileSync(stateFile, "utf8")) as RunStateFile;
     const checkpoints = new Map<number, SubagentResult>();
     const survivors = new Map<number, SurvivorManifest>();
+    const terminalStates = new Map<number, TerminalNoRetryState>();
     for (const phase of state.phases) {
       const checkpointPath = path.join(runDir, phaseFileName(phase.index, phase.name));
       if (existsSync(checkpointPath)) {
@@ -141,8 +195,14 @@ export class RunStateStore {
           survivors.set(phase.index, JSON.parse(readFileSync(survivorPath, "utf8")) as SurvivorManifest);
         } catch {}
       }
+      const terminalPath = path.join(runDir, terminalStateFileName(phase.index, phase.name));
+      if (existsSync(terminalPath)) {
+        try {
+          terminalStates.set(phase.index, JSON.parse(readFileSync(terminalPath, "utf8")) as TerminalNoRetryState);
+        } catch {}
+      }
     }
-    return { state, checkpoints, survivors, runDir };
+    return { state, checkpoints, survivors, terminalStates, runDir };
   }
 
   /** Re-open an existing store to continue appending checkpoints during resume. */
@@ -165,12 +225,39 @@ export class RunStateStore {
     this.setStatus(index, name, "detached");
   }
 
+  markTerminalNoRetry(index: number, name: string, state: TerminalNoRetryState, candidate?: SubagentResult): TerminalNoRetryState {
+    let candidateResultFile = state.candidateResultFile;
+    if (candidate) {
+      candidateResultFile = candidateResultFile ?? this.terminalCandidatePath(index, name);
+      writeFileSync(candidateResultFile, JSON.stringify(candidate, null, 2), "utf8");
+    }
+    const payload: TerminalNoRetryState = {
+      ...state,
+      phaseName: name,
+      phaseIndex: index,
+      retryAllowed: false,
+      runId: this.state.runId,
+      ...(candidateResultFile ? { candidateResultFile } : {}),
+    };
+    writeFileSync(path.join(this.runDir, terminalStateFileName(index, name)), JSON.stringify(payload, null, 2), "utf8");
+    this.setStatus(index, name, "ambiguous-completion");
+    return payload;
+  }
+
   survivorResultPath(index: number, name: string): string {
     return path.join(this.runDir, survivorResultFileName(index, name));
   }
 
   survivorManifestPath(index: number, name: string): string {
     return path.join(this.runDir, survivorFileName(index, name));
+  }
+
+  terminalStatePath(index: number, name: string): string {
+    return path.join(this.runDir, terminalStateFileName(index, name));
+  }
+
+  terminalCandidatePath(index: number, name: string): string {
+    return path.join(this.runDir, terminalCandidateFileName(index, name));
   }
 
   private setStatus(index: number, name: string, status: PhaseStatus): void {

@@ -2,13 +2,12 @@
 /**
  * Item B regression tests — shared route helper + per-shape override honoring.
  * ===========================================================================
- * Proves that for every audited generic shape (multi-verify-vote, verify-only,
- * composable-pipeline) passing executor/verifier
- * (and planner) route overrides changes BOTH the actual spawn routing (via the
- * fake-pi call log) AND the report `Routes:` line — closing the silent-route-
- * override bug class through the shared helper (src/routes.ts). Also proves the
- * shared helper's semantics are identical to dual-plan's prior production
- * behavior (parity truth table).
+ * Proves that the audited public shapes (multi-verify-vote, verify-only,
+ * safe-github-publish, composable-pipeline) honor planner/executor/verifier
+ * route overrides in actual subprocess spawns. Shapes with a `Routes:` report
+ * line must also report those overrides. This closes the silent-route-override
+ * bug class through the shared helper (src/routes.ts) and proves parity with
+ * dual-plan's prior production behavior.
  */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -94,6 +93,26 @@ async function testVerifyOnly() {
   assert.match(markdown, /\*\*Routes:\*\* Verifier=vprov\/vmodel/, "Routes line must reflect verifier override");
 }
 
+async function testSafeGithubPublish() {
+  const { calls } = await runShape("safe-github-publish", {
+    task: "Publish a sanitized fixture repository and independently verify it.",
+    plannerProvider: "pprov", plannerModel: "pmodel",
+    executorProvider: "exprov", executorModel: "exmodel",
+    verifierProvider: "vprov", verifierModel: "vmodel",
+  });
+  const planner = calls.find((c) => c.agentName === "planner");
+  const executor = calls.find((c) => c.agentName === "coder");
+  const verifier = calls.find((c) => c.agentName === "reviewer");
+  assert.ok(planner, "safe-github-publish must spawn the planner role");
+  assert.ok(executor, "safe-github-publish must spawn the executor role");
+  assert.ok(verifier, "safe-github-publish must spawn the verifier role");
+  assert.deepEqual([planner.provider, planner.model], ["pprov", "pmodel"]);
+  assert.deepEqual([executor.provider, executor.model], ["exprov", "exmodel"]);
+  assert.deepEqual([verifier.provider, verifier.model], ["vprov", "vmodel"]);
+  const verifierLeak = calls.some((c) => c.agentName !== "reviewer" && (c.provider === "vprov" || c.model === "vmodel"));
+  assert.ok(!verifierLeak, "verifier override must not leak to planner/executor phases");
+}
+
 async function testComposablePipeline() {
   const { calls, markdown } = await runShape("composable-pipeline", {
     task: "Plan, execute, and verify a tiny scoped fix.",
@@ -143,10 +162,11 @@ function testDualPlanUsesSharedHelper() {
 async function run() {
   await testMultiVerifyVote();
   await testVerifyOnly();
+  await testSafeGithubPublish();
   await testComposablePipeline();
   testSharedHelperParity();
   testDualPlanUsesSharedHelper();
-  console.log("PASS shape-route-overrides: multi-verify-vote, verify-only, composable-pipeline honor overrides in spawns + Routes line; shared helper parity");
+  console.log("PASS shape-route-overrides: multi-verify-vote, verify-only, safe-github-publish, composable-pipeline honor route overrides; shared helper parity");
 }
 
 run().catch((error) => { console.error("test-shape-route-overrides: FAIL"); console.error(error); process.exit(1); });

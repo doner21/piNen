@@ -65,8 +65,11 @@ async function testFooterMatchesResolvedRoutes() {
     assert.match(footer, /executor \(anthropic\/claude-opus-4-8\)/,
       "footer must name the resolved executor route");
     // ... and must NOT contradict it with the old hardcoded model adjectives.
-    assert.doesNotMatch(footer, /deepseek/i,
-      "footer must not mention deepseek when the executor was routed elsewhere");
+    // Note: "deepseek" now legitimately appears for Plan A and the synthesis
+    // reviewer (both use deepseek/deepseek-v4-pro). Only the executor-specific
+    // narrative must not be deepseek.
+    assert.doesNotMatch(footer, /executor \(deepseek\/deepseek-v4-pro\)/i,
+      "executor route in footer must match resolved route, not deepseek");
     assert.doesNotMatch(footer, /a DeepSeek executor/i, "old hardcoded narrative must be gone");
   } finally {
     delete process.env.PI_CLI_PATH;

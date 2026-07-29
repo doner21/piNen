@@ -27,7 +27,15 @@ import {
 } from "./executor-recovery/splitter";
 
 import { buildRecoveryMetadata } from "./executor-recovery/metadata";
-import { RunStateStore, collectSurvivorResult, type LoadedRunState } from "./run-state";
+import { RunStateStore, collectSurvivorResult, type LoadedRunState, type TerminalNoRetryState } from "./run-state";
+import {
+  parseWriteSetInput,
+  planEntriesOutsideContract,
+  captureWriteSetSnapshot,
+  evaluateWriteSetObservation,
+  type WriteSetObservationEvaluation,
+  type WriteSetSnapshot,
+} from "./write-set";
 // Alias registry moved to a leaf module to break the composable-pipeline ->
 // index.ts circular import (WAVE3-SPEC ITEM C). Re-exported below for external
 // callsite stability.
@@ -36,7 +44,10 @@ export { modelAliasFromText } from "./model-aliases";
 
 // ── Shape imports (orchestration paradigms) ───────────────────────────
 import { composablePipelineShape } from "./shapes/composable-pipeline";
-import { dualPlanSynthesisExecuteVerifyShape } from "./shapes/dual-plan-synthesis-execute-verify";
+import {
+  dualPlanSynthesisExecuteVerifyShape,
+  DUAL_PLAN_DISCOVERY_PREFLIGHT_ROUTES,
+} from "./shapes/dual-plan-synthesis-execute-verify";
 import { evidenceAuditShape } from "./shapes/evidence-audit";
 import { frozenGateFixLoopShape } from "./shapes/frozen-gate-fix-loop";
 import { independentReplicationShape } from "./shapes/independent-replication";
@@ -87,6 +98,7 @@ import {
   preflightProviderHealth,
   writeWindowsEpermEvidence,
   SubagentDetachedError,
+  SubagentTerminalAmbiguousError,
 } from "./substrate";
 import { getPiChildFirstJsonTimeoutMs, isPiJsonProtocolEvent, killOwnedProcessTree, resolvePiChildCommand } from "./child-launch.ts";
 
@@ -153,6 +165,8 @@ interface Plan {
   tasks: PlanTask[];
   notes: string;
   raw?: unknown;
+  /** Planner-declared exact files/prefixes the tasks will create or modify (predict-then-write). */
+  predictedWriteSet?: string[];
 }
 
 interface SubagentResult {
@@ -310,6 +324,10 @@ interface NormalizedParams {
   paradigm?: string;
   /** Hard-gate mode (F1). Default "advisory". */
   hardGates: HardGatesMode;
+  /** Contract-granted write scope (predict-then-write). Deterministically enforced when set. */
+  predictedWriteSet?: string[];
+  /** Run intake + planning only; spawn no executors/verifiers; return the discovery manifest. */
+  discoveryOnly: boolean;
   /** Run provider health pings before spawning subagents (F5). Default true. */
   preflight: boolean;
   plannerFallbackModel?: string;
@@ -409,7 +427,7 @@ const MAX_SUBAGENTS_LIMIT = 100;
 
 const orchestrateParamsSchema = Type.Object({
   task: Type.Optional(Type.String({ description: "Task for deterministic multi-agent orchestration. Optional when `resume` is provided (the stored task is reused)." })),
-  resume: Type.Optional(Type.String({ description: "Resume a previously aborted run by its run id (e.g. orc-mr3hsj4y-6j3b). Restores checkpointed phases, re-attaches detached survivor subagents, and continues from the first incomplete phase (ABORT-RESUME-DESIGN.md). Supported paradigms: plan-execute-verify, preregistered-concurrency-spike, dual-plan-synthesis-execute-verify, frozen-gate-fix-loop, evidence-audit, independent-replication." })),
+  resume: Type.Optional(Type.String({ description: "Resume a previously aborted run by its run id (e.g. example-run-id). Restores checkpointed phases, re-attaches detached survivor subagents, and continues from the first incomplete phase (ABORT-RESUME-DESIGN.md). Supported paradigms: plan-execute-verify, preregistered-concurrency-spike, dual-plan-synthesis-execute-verify, frozen-gate-fix-loop, evidence-audit, independent-replication." })),
   plannerAgent: Type.Optional(Type.String({ default: "planner" })),
   executorAgent: Type.Optional(Type.String({ default: "coder" })),
   verifierAgent: Type.Optional(Type.String({ default: "reviewer" })),
@@ -431,6 +449,8 @@ const orchestrateParamsSchema = Type.Object({
   paradigm: Type.Optional(Type.String({ description: `Explicitly select the orchestration paradigm/shape. Valid values: ${ORCHESTRATION_PARADIGM_NAMES.join(", ")}. When omitted, the paradigm is inferred from task keywords. V1 paradigm-creator, shape-builder, win-console-spawn-root-cause, and win-lifecycle-process-trace must be selected explicitly.` })),
   hardGates: Type.Optional(Type.String({ description: 'Hard-gate mode: "strict" | "advisory" | "off". Default "advisory": text-shape heuristics are demoted to warnings, the verifier verdict gates, and only effect-based contradictions (zero observed mutations for implementation work) can force FAIL.' })),
   preflight: Type.Optional(Type.Boolean({ description: "Run a 1-token provider health ping for each routed provider/model before spawning any subagent (default true). Failures produce a structured machine-readable error and a partial report." })),
+  predictedWriteSet: Type.Optional(Type.String({ description: 'Optional write scope: comma- or newline-separated repo-relative paths ("docs/a.md"), directory prefixes ("docs/"), simple globs ("tools/*.mjs"), or absolute external paths. Deterministic post-execution enforcement is supported by plan-execute-verify and frozen-gate-fix-loop. dual-plan-synthesis-execute-verify accepts this only with discoveryOnly as proposed scope; other shapes fail closed with PREDICTED_WRITE_SET_UNSUPPORTED_PARADIGM.' })),
+  discoveryOnly: Type.Optional(Type.Boolean({ description: "Discovery-only mode (predict-then-write): supported by plan-execute-verify and dual-plan-synthesis-execute-verify. It runs read-only planning, returns the plan plus predicted write set, and spawns no executors or verifiers. Other shapes fail closed with DISCOVERY_ONLY_UNSUPPORTED_PARADIGM." })),
   plannerFallbackModel: Type.Optional(Type.String({ description: "Fallback model(s) for the planner when its primary route fails pre-flight. Comma-separated for a chain (e.g. 'claude-opus-4-20250514,deepseek-v4-pro,deepseek-v4-flash')." })),
   plannerFallbackProvider: Type.Optional(Type.String({ description: "Fallback provider(s) for the planner when its primary route fails pre-flight. Comma-separated, paired positionally with plannerFallbackModel." })),
   executorFallbackModel: Type.Optional(Type.String({ description: "Fallback model(s) for executors when their primary route fails pre-flight. Comma-separated for a chain." })),
@@ -488,7 +508,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("orchestrate", {
-    description: "Run deterministic planner/executor/verifier orchestration. Flags: --max-subagents N, --max-retries N, --concurrency/--executor-concurrency N, --planner-count N, --verifier-count N, --planner-model, --executor-model, --verifier-model, --planner-fallback-model (comma-sep chain), etc.",
+    description: "Run deterministic planner/executor/verifier orchestration. Flags: --max-subagents N, --max-retries N, --concurrency/--executor-concurrency N, --planner-count N, --verifier-count N, --planner-model, --executor-model, --verifier-model, --planner-fallback-model (comma-sep chain), --write-set paths (PEV/frozen enforcement), --discovery-only (PEV/dual-plan read-only planning), etc.",
     handler: async (args, ctx) => {
       let commandParams: Record<string, unknown>;
       try {
@@ -640,6 +660,10 @@ function parseOrchestrateCommandArgs(args: string): Record<string, unknown> {
       params.preflight = false;
       continue;
     }
+    if (normalized === "discoveryOnly" || normalized === "discovery") {
+      params.discoveryOnly = true;
+      continue;
+    }
 
     const { value, nextIndex } = takeValue(i, `--${flag}`, inlineValue);
     i = nextIndex;
@@ -703,6 +727,10 @@ function parseOrchestrateCommandArgs(args: string): Record<string, unknown> {
       case "hardGates":
         params.hardGates = value;
         break;
+      case "writeSet":
+      case "predictedWriteSet":
+        params.predictedWriteSet = value;
+        break;
       case "plannerFallbackModel":
         params.plannerFallbackModel = value;
         break;
@@ -722,7 +750,7 @@ function parseOrchestrateCommandArgs(args: string): Record<string, unknown> {
         params.verifierFallbackProvider = value;
         break;
       default:
-        throw new Error(`Unknown flag --${flag}. Supported flags: --max-subagents, --max-retries, --concurrency, --executor-concurrency, --executor-count, --planner-count, --planner-concurrency, --verifier-count, --verifier-concurrency, --planner-agent, --executor-agent, --verifier-agent, --cwd, --allow-local-model, --paradigm, --hard-gates, --preflight/--no-preflight, --planner-model, --planner-provider, --executor-model, --executor-provider, --verifier-model, --verifier-provider, --planner-fallback-model, --planner-fallback-provider, --executor-fallback-model, --executor-fallback-provider, --verifier-fallback-model, --verifier-fallback-provider. Fallback params accept comma-separated chains (e.g. --planner-fallback-model opus,deepseek-v4-pro,deepseek-v4-flash).`);
+        throw new Error(`Unknown flag --${flag}. Supported flags: --max-subagents, --max-retries, --concurrency, --executor-concurrency, --executor-count, --planner-count, --planner-concurrency, --verifier-count, --verifier-concurrency, --planner-agent, --executor-agent, --verifier-agent, --cwd, --allow-local-model, --paradigm, --hard-gates, --write-set, --discovery-only, --preflight/--no-preflight, --planner-model, --planner-provider, --executor-model, --executor-provider, --verifier-model, --verifier-provider, --planner-fallback-model, --planner-fallback-provider, --executor-fallback-model, --executor-fallback-provider, --verifier-fallback-model, --verifier-fallback-provider. Fallback params accept comma-separated chains (e.g. --planner-fallback-model opus,deepseek-v4-pro,deepseek-v4-flash). --write-set is enforced by plan-execute-verify and frozen-gate-fix-loop (or proposed by dual-plan discovery); --discovery-only is supported by plan-execute-verify and dual-plan-synthesis-execute-verify.`);
     }
   }
 
@@ -825,6 +853,8 @@ function normalizeParams(params: Record<string, unknown>, defaultCwd: string): N
     inferredRouting,
     paradigm: typeof params.paradigm === "string" ? params.paradigm : undefined,
     hardGates: normalizeHardGatesMode(params.hardGates),
+    predictedWriteSet: parseWriteSetInput(params.predictedWriteSet),
+    discoveryOnly: typeof params.discoveryOnly === "boolean" ? params.discoveryOnly : false,
     preflight: typeof params.preflight === "boolean" ? params.preflight : true,
     plannerFallbackModel: optionalString(params.plannerFallbackModel),
     plannerFallbackProvider: optionalString(params.plannerFallbackProvider),
@@ -833,6 +863,27 @@ function normalizeParams(params: Record<string, unknown>, defaultCwd: string): N
     verifierFallbackModel: optionalString(params.verifierFallbackModel),
     verifierFallbackProvider: optionalString(params.verifierFallbackProvider),
   };
+}
+
+function assertOptionalControlSupport(paradigm: string, params: NormalizedParams): void {
+  const discoverySupported = paradigm === "plan-execute-verify" || paradigm === "dual-plan-synthesis-execute-verify";
+  if (params.discoveryOnly && !discoverySupported) {
+    throw new Error(
+      `DISCOVERY_ONLY_UNSUPPORTED_PARADIGM: discoveryOnly is not supported by "${paradigm}". ` +
+        `Use plan-execute-verify or dual-plan-synthesis-execute-verify.`,
+    );
+  }
+
+  const writeSetSupported =
+    paradigm === "plan-execute-verify" ||
+    paradigm === "frozen-gate-fix-loop" ||
+    (paradigm === "dual-plan-synthesis-execute-verify" && params.discoveryOnly);
+  if (params.predictedWriteSet?.length && !writeSetSupported) {
+    throw new Error(
+      `PREDICTED_WRITE_SET_UNSUPPORTED_PARADIGM: predictedWriteSet is not enforced by "${paradigm}". ` +
+        `Use plan-execute-verify or frozen-gate-fix-loop, or use it only as proposed scope with dual-plan discoveryOnly.`,
+    );
+  }
 }
 
 async function runOrchestration(
@@ -889,10 +940,27 @@ async function runOrchestration(
       `verifier=${formatRoutedModel(verifierSelected.provider, verifierSelected.model)}.`,
   );
 
+  if (paradigm === "plan-execute-verify") {
+    const terminalResume = firstPevTerminalNoRetry(resumeState);
+    if (terminalResume) {
+      state.intake = buildIntake(params, agents, inheritedModel);
+      state.attempt = attemptFromTerminalPhase(terminalResume) ?? 0;
+      emit(
+        `RESUME of run ${state.runId}: terminal no-retry state ${terminalResume.code} already persisted; ` +
+          `returning without planner/executor/verifier respawn.`,
+      );
+      return finalizePevTerminalResult(params, state, terminalResume);
+    }
+  }
+
   try {
+  // Optional controls are shape-specific. Fail before provider preflight so an
+  // unsupported control can never be silently ignored or spawn any subprocess.
+  assertOptionalControlSupport(paradigm, params);
+
   // ── Pre-flight provider health checks (F5) ──────────────────────────
   if (params.preflight) {
-    await runProviderPreflight(params, agents, inheritedModel, signal, emit);
+    await runProviderPreflight(params, agents, inheritedModel, paradigm, signal, emit);
   }
 
   // ── Shape-based orchestration dispatch ────────────────────────────────
@@ -945,6 +1013,18 @@ async function runOrchestration(
   }
   const maxAttempts = params.maxRetries + 1;
 
+  // Discovery planners receive a cloned read-only profile. This preserves the
+  // selected route and prompt while removing shell and mutation-capable tools.
+  if (params.discoveryOnly) {
+    const plannerProfile = agents.get(params.plannerAgent);
+    if (plannerProfile) {
+      agents.set(params.plannerAgent, {
+        ...plannerProfile,
+        tools: ["read", "grep", "find", "ls"],
+      });
+    }
+  }
+
   // ── Checkpoint/resume wiring (ABORT-RESUME-DESIGN.md) ───────────────────
   // Phases are NAME-keyed so the executor phase can be split PER TASK
   // (attempt-N-executor-<taskId>), each spawned in abort-survivor mode and each
@@ -952,8 +1032,8 @@ async function runOrchestration(
   // single per-attempt phases (attempt-N-planner / attempt-N-verifier). Phase
   // indices are allocated deterministically in first-touch order; on resume they
   // are recovered by NAME from the persisted state.json so they line up with the
-  // checkpoints/survivors already on disk (even the pre-any-phase abort edge,
-  // production run orc-mr3x90b5-00iz). On resume, completed phases are RESTORED
+  // checkpoints/survivors already on disk (even the pre-any-phase abort edge
+  // observed in production). On resume, completed phases are RESTORED
   // (not re-spawned) and a detached survivor is re-attached via bounded polling.
   const pevStore = resumeState
     ? RunStateStore.open(resumeState.state.runId)
@@ -1048,7 +1128,7 @@ async function runOrchestration(
     const executorTaskName = (taskId: string) => `attempt-${attempt}-executor-${taskId}`;
 
     const completedTasks = [...state.taskLedger.values()].filter((entry) => entry.verdict === "passed");
-    const plannerPrompt = buildPlanningPrompt(state.intake, attempt, state.failureReasons, completedTasks);
+    const plannerPrompt = buildPlanningPrompt(state.intake, attempt, state.failureReasons, completedTasks, params.predictedWriteSet);
     const plannerRoute = toModelOverride(params.plannerModel, params.plannerProvider);
     let plannerOutputs: SubagentResult[];
     let planner: SubagentResult;
@@ -1104,6 +1184,16 @@ async function runOrchestration(
       planner = plannerOutputs[selectedPlannerIndex];
       pevCheckpoint(plannerName, planner, plannerRoute ?? {});
     }
+    if (params.discoveryOnly) {
+      const mutatingPlannerResults = plannerOutputs.filter((result) => (result.toolCalls?.mutating ?? 0) > 0);
+      if (mutatingPlannerResults.length > 0) {
+        throw new Error(
+          `DISCOVERY_ONLY_MUTATION_DETECTED: ${mutatingPlannerResults.length} planner result(s) reported mutating tool calls; ` +
+            `refusing to return a discovery manifest.`,
+        );
+      }
+    }
+
     state.planText = planner.text;
     let plan = parsePlan(planner.text, params.task);
     plan = enforceTaskSizeCap(plan, computeAdaptiveTaskSizeCap(params.executorModel));
@@ -1121,6 +1211,75 @@ async function runOrchestration(
     }
     const taskAssignments = plan.tasks.map((t) => `${t.id}=${t.description}`).join("; ");
     emit(`Plan tasks: ${taskAssignments}`);
+
+    // ── Predict-then-write (AGENTS.md: Discovery before mutation) ────────
+    // The contract-granted set wins; a planner-declared set is enforced when
+    // no contract set was supplied. Enforcement is deterministic — no model
+    // judgment is involved in detecting an out-of-set mutation.
+    const contractWriteSet = params.predictedWriteSet;
+    const effectiveWriteSet = contractWriteSet ?? plan.predictedWriteSet;
+    if (plan.predictedWriteSet?.length) {
+      emit(`Planner predicted write set (${plan.predictedWriteSet.length} entrie(s)): ${plan.predictedWriteSet.join(", ")}`);
+    }
+    if (contractWriteSet && plan.predictedWriteSet?.length) {
+      const outsideContract = planEntriesOutsideContract(plan.predictedWriteSet, contractWriteSet);
+      if (outsideContract.length > 0) {
+        // Pre-execution satisfiability failure: the plan already declares
+        // out-of-scope mutations. This is terminal for the current discovery:
+        // fail BEFORE any executor spawns and do not retry inside the same run.
+        emit(`Attempt ${attempt}: plan predicts ${outsideContract.length} mutation(s) outside the contracted write set — failing before execution: ${outsideContract.join(", ")}`);
+        const terminalState = persistPevWriteSetTerminal(
+          pevStore,
+          pevIndexOf,
+          `attempt-${attempt}-write-set-pre-execution`,
+          "WRITE_SET_VIOLATION",
+          state,
+          undefined,
+          outsideContract,
+        );
+        const verifierResult = makePevTerminalVerifierResult(terminalState);
+        state.verifierResult = verifierResult;
+        state.verifierResults = [];
+        state.executorOutputs = [];
+        state.attempts.push({ attempt, plan, plannerText: planner.text, plannerOutputs, executorOutputs: [], verifierResult, verifierResults: [] });
+        state.failureReasons.push(...verifierResult.reasons.map((reason) => `Attempt ${attempt}: ${reason}`));
+        return finalizePevTerminalResult(params, state, terminalState);
+      }
+    }
+
+    if (params.discoveryOnly) {
+      const writeSetLabel = contractWriteSet ? "contract-granted" : plan.predictedWriteSet?.length ? "planner-predicted" : "none declared";
+      const manifestLines = [
+        `# Discovery manifest (run ${state.runId})`,
+        "",
+        "Discovery-only mode: no executor or verifier subagents were spawned; this run made no project mutations.",
+        "",
+        `## Plan (${plan.tasks.length} task(s))`,
+        ...plan.tasks.map((t) => `- ${t.id}: ${t.description}${t.dependsOn.length ? ` (depends on ${t.dependsOn.join(", ")})` : ""}`),
+      ];
+      if (plan.notes) manifestLines.push("", `Notes: ${plan.notes}`);
+      manifestLines.push(
+        "",
+        `## Predicted write set (${writeSetLabel})`,
+        ...(effectiveWriteSet?.length ? effectiveWriteSet.map((entry) => `- ${entry}`) : ["(none declared)"]),
+        "",
+        "To execute under deterministic write-set enforcement, re-run without discoveryOnly and pass the approved list as predictedWriteSet.",
+      );
+      const manifest = manifestLines.join("\n");
+      emit(`Discovery-only run complete: ${plan.tasks.length} task(s) planned, ${effectiveWriteSet?.length ?? 0} write-set entrie(s); no executors spawned.`);
+      state.finalResult = manifest;
+      return {
+        markdown: manifest,
+        details: {
+          runId: state.runId,
+          mode: "discovery-only",
+          plan: { tasks: plan.tasks, notes: plan.notes },
+          predictedWriteSet: effectiveWriteSet ?? [],
+          writeSetSource: writeSetLabel,
+          progressLog: state.progressLog,
+        },
+      };
+    }
 
     const requiredBudget = computeRequiredSubagentBudget(state.spawnedCount, plan.tasks.length, attempt, maxAttempts, params.plannerCount, verifierCount);
     if (!params.maxSubagentsExplicit && requiredBudget > params.maxSubagents) {
@@ -1144,44 +1303,147 @@ async function runOrchestration(
       );
     }
 
+    let writeSetObservationSummary = "";
+    let writeSetBefore: WriteSetSnapshot | undefined;
+    if (effectiveWriteSet?.length) {
+      writeSetBefore = captureWriteSetSnapshot(params.cwd, effectiveWriteSet);
+      if (writeSetBefore.unobservableScopes.length) {
+        emit(
+          `Attempt ${attempt}: write-set observation is unobservable before executor spawn — ` +
+            `${writeSetBefore.unobservableScopes.join(", ")}; failing closed with no executor/verifier spawn.`,
+        );
+        const terminalState = persistPevWriteSetTerminal(
+          pevStore,
+          pevIndexOf,
+          `attempt-${attempt}-write-set-pre-executor`,
+          "WRITE_SET_UNOBSERVABLE",
+          state,
+          undefined,
+          writeSetBefore.unobservableScopes,
+        );
+        const verifierResult = makePevTerminalVerifierResult(terminalState);
+        state.verifierResult = verifierResult;
+        state.verifierResults = [];
+        state.executorOutputs = [];
+        state.attempts.push({ attempt, plan, plannerText: planner.text, plannerOutputs, executorOutputs: [], verifierResult, verifierResults: [] });
+        state.failureReasons.push(...verifierResult.reasons.map((reason) => `Attempt ${attempt}: ${reason}`));
+        return finalizePevTerminalResult(params, state, terminalState);
+      }
+    }
+
     // Executor phase is checkpointed PER TASK (attempt-N-executor-<taskId>). Each
     // task spawn runs in abort-survivor mode and its output is checkpointed with the
     // resolved executor provider/model, so a mid-execution abort can resume without
     // re-running already-completed tasks and without losing detached survivors.
     const executorRoute = toModelOverride(params.executorModel, params.executorProvider);
     emit(`Attempt ${attempt}: executing ${plan.tasks.length} task(s) across ${executionWaves.length} dependency wave(s) with executor concurrency ${executorConcurrency}...`);
-    const executorOutputs: ExecutorOutput[] = await runExecutorTasksInWaves(
-      executionWaves,
-      executorConcurrency,
-      signal,
-      async (task, _index, workerSignal) => {
-        const taskName = executorTaskName(task.id);
-        // Resume path 1: completed per-task checkpoint — restore without re-execution.
-        const restoredTask = pevRestore<ExecutorOutput>(taskName);
-        if (restoredTask && !Array.isArray(restoredTask)) {
-          emit(`Attempt ${attempt}: executor task ${task.id} restored from checkpoint (resume) — skipping re-execution.`);
-          return restoredTask;
+    let executorOutputs: ExecutorOutput[] = [];
+    try {
+      executorOutputs = await runExecutorTasksInWaves(
+        executionWaves,
+        executorConcurrency,
+        signal,
+        async (task, _index, workerSignal) => {
+          const taskName = executorTaskName(task.id);
+          // Resume path 1: completed per-task checkpoint — restore without re-execution.
+          const restoredTask = pevRestore<ExecutorOutput>(taskName);
+          if (restoredTask && !Array.isArray(restoredTask)) {
+            emit(`Attempt ${attempt}: executor task ${task.id} restored from checkpoint (resume) — skipping re-execution.`);
+            return restoredTask;
+          }
+          // Resume path 2: detached survivor for this task — collect or respawn.
+          const survivorOut = await pevCollectExecutorSurvivor(taskName, task);
+          if (survivorOut) {
+            emit(`Attempt ${attempt}: executor task ${task.id} survivor collected (resume) — skipping re-execution.`);
+            return survivorOut;
+          }
+          let out: ExecutorOutput;
+          try {
+            out = await executeExecutorTaskWithRecovery(
+              state, params, agents, task, plan, workerSignal, emit, inheritedModel, pevSurvival(taskName),
+            );
+          } catch (error) {
+            pevDetachGuard(taskName, error);
+            throw error;
+          }
+          pevCheckpoint(taskName, out, executorRoute);
+          return out;
+        },
+      );
+    } catch (error) {
+      if (error instanceof SubagentTerminalAmbiguousError) {
+        if (writeSetBefore && effectiveWriteSet?.length) {
+          const writeSetAfter = captureWriteSetSnapshot(params.cwd, effectiveWriteSet);
+          const terminalEval = evaluateWriteSetObservation(writeSetBefore, writeSetAfter, effectiveWriteSet);
+          emit(`Attempt ${attempt}: terminal executor transport state observed; post-executor write-set snapshot: ${formatPevWriteSetObservation(terminalEval)}`);
+          if (terminalEval.unobservableScopes.length || terminalEval.violations.length) {
+            const code = terminalEval.unobservableScopes.length ? "WRITE_SET_UNOBSERVABLE" : "WRITE_SET_VIOLATION";
+            const terminalState = persistPevWriteSetTerminal(
+              pevStore,
+              pevIndexOf,
+              `attempt-${attempt}-executor-terminal-write-set`,
+              code,
+              state,
+              terminalEval,
+            );
+            const verifierResult = makePevTerminalVerifierResult(terminalState);
+            state.verifierResult = verifierResult;
+            state.verifierResults = [];
+            state.executorOutputs = [];
+            state.attempts.push({ attempt, plan, plannerText: planner.text, plannerOutputs, executorOutputs: [], verifierResult, verifierResults: [] });
+            state.failureReasons.push(...verifierResult.reasons.map((reason) => `Attempt ${attempt}: ${reason}`));
+            return finalizePevTerminalResult(params, state, terminalState);
+          }
         }
-        // Resume path 2: detached survivor for this task — collect or respawn.
-        const survivorOut = await pevCollectExecutorSurvivor(taskName, task);
-        if (survivorOut) {
-          emit(`Attempt ${attempt}: executor task ${task.id} survivor collected (resume) — skipping re-execution.`);
-          return survivorOut;
-        }
-        let out: ExecutorOutput;
-        try {
-          out = await executeExecutorTaskWithRecovery(
-            state, params, agents, task, plan, workerSignal, emit, inheritedModel, pevSurvival(taskName),
-          );
-        } catch (error) {
-          pevDetachGuard(taskName, error);
-          throw error;
-        }
-        pevCheckpoint(taskName, out, executorRoute);
-        return out;
-      },
-    );
+        const terminalState = persistPevAmbiguousTerminal(
+          pevStore,
+          pevIndexOf,
+          `attempt-${attempt}-executor-terminal`,
+          error,
+          state,
+        );
+        const verifierResult = makePevTerminalVerifierResult(terminalState);
+        state.verifierResult = verifierResult;
+        state.verifierResults = [];
+        state.executorOutputs = [];
+        state.attempts.push({ attempt, plan, plannerText: planner.text, plannerOutputs, executorOutputs: [], verifierResult, verifierResults: [] });
+        state.failureReasons.push(...verifierResult.reasons.map((reason) => `Attempt ${attempt}: ${reason}`));
+        return finalizePevTerminalResult(params, state, terminalState);
+      }
+      throw error;
+    }
     state.executorOutputs = executorOutputs;
+
+    if (writeSetBefore && effectiveWriteSet?.length) {
+      const writeSetAfter = captureWriteSetSnapshot(params.cwd, effectiveWriteSet);
+      const writeSetEval = evaluateWriteSetObservation(writeSetBefore, writeSetAfter, effectiveWriteSet);
+      writeSetObservationSummary =
+        `Write-set observation (${contractWriteSet ? "contract-granted" : "planner-predicted"} scope, ${effectiveWriteSet.length} entrie(s)): ` +
+        `${writeSetEval.observed.length} observed mutation(s), ${writeSetEval.violations.length} violation(s), ` +
+        `${writeSetEval.unobservableScopes.length} unobservable scope(s).`;
+      if (writeSetEval.unobservableScopes.length || writeSetEval.violations.length) {
+        const code = writeSetEval.unobservableScopes.length ? "WRITE_SET_UNOBSERVABLE" : "WRITE_SET_VIOLATION";
+        emit(
+          `Attempt ${attempt}: write-set enforcement failed before verification; ` +
+            `${formatPevWriteSetObservation(writeSetEval)} This is terminal for the current discovery.`,
+        );
+        const terminalState = persistPevWriteSetTerminal(
+          pevStore,
+          pevIndexOf,
+          `attempt-${attempt}-write-set-post-executor`,
+          code,
+          state,
+          writeSetEval,
+        );
+        const verifierResult = makePevTerminalVerifierResult(terminalState);
+        state.verifierResult = verifierResult;
+        state.verifierResults = [];
+        state.attempts.push({ attempt, plan, plannerText: planner.text, plannerOutputs, executorOutputs, verifierResult, verifierResults: [] });
+        state.failureReasons.push(...verifierResult.reasons.map((reason) => `Attempt ${attempt}: ${reason}`));
+        updateTaskLedgerFromFailure(state, plan, executorOutputs, verifierResult.reasons, attempt, emit);
+        return finalizePevTerminalResult(params, state, terminalState);
+      }
+    }
 
     // ── Commit evidence (F7): pre/post-execution HEAD hashes per attempt ──
     const postExecHead = gitHeadHash(params.cwd);
@@ -1205,6 +1467,10 @@ async function runOrchestration(
     if (gateDecision.warnings.length > 0) {
       state.gateWarnings.push(...gateDecision.warnings.map((warning) => `Attempt ${attempt}: ${warning}`));
       emit(`Attempt ${attempt}: ${gateDecision.warnings.length} gate warning(s) recorded (advisory — never verdict-determining on their own).`);
+    }
+
+    if (writeSetObservationSummary) {
+      artifactEvidence.summary += `\n${writeSetObservationSummary}`;
     }
 
     if (gateDecision.preVerifierFailures.length > 0) {
@@ -1351,11 +1617,21 @@ async function runOrchestration(
   } catch (error) {
     // ── ALWAYS emit a partial report on abort (F5) ──────────────────────
     const message = error instanceof Error ? error.message : String(error);
+    const terminalNoRetry = error instanceof SubagentTerminalAmbiguousError ? error.info : undefined;
+    const composableResumeUnsupported = paradigm === "composable-pipeline";
+    const resumeUnsupportedReason = composableResumeUnsupported
+      ? "This composable-pipeline run is non-resumable: the paradigm does not persist RunStateStore checkpoints. " +
+        "The run ID is diagnostic only; inspect possible mutations before starting a new orchestration."
+      : undefined;
     const providerError =
       (error as { providerError?: ProviderHealthError }).providerError ??
       parseProviderError(message);
     state.abortReason = message;
     state.failureReasons.push(`Run aborted: ${message}`);
+    if (terminalNoRetry) {
+      state.failureReasons.push(`Terminal no-retry state: ${terminalNoRetry.code}; retryAllowed=false; resultLost=${terminalNoRetry.resultLost}.`);
+    }
+    if (resumeUnsupportedReason) state.failureReasons.push(resumeUnsupportedReason);
     emit(
       `Orchestration aborted — emitting partial report. Structured error: ${formatProviderError(providerError)}`,
     );
@@ -1368,6 +1644,17 @@ async function runOrchestration(
         abortReason: message,
         providerError,
         paradigm,
+        ...(terminalNoRetry ? { terminalNoRetry, retryAllowed: false, code: terminalNoRetry.code } : {}),
+        ...(resumeUnsupportedReason ? {
+          resumeSupported: false,
+          resumable: false,
+          resumeHint: {
+            supported: false,
+            paradigm,
+            reason: resumeUnsupportedReason,
+            runIdPurpose: "diagnostic-only",
+          },
+        } : {}),
       },
     };
   }
@@ -1392,6 +1679,7 @@ async function runProviderPreflight(
   params: NormalizedParams,
   agents: Map<string, AgentProfile>,
   inheritedModel: { provider?: string; model?: string } | undefined,
+  paradigm: string,
   signal: AbortSignal | undefined,
   emit: (text: string) => void,
 ): Promise<void> {
@@ -1428,9 +1716,17 @@ async function runProviderPreflight(
     return chain;
   };
 
-  const roles = [
+  interface PreflightRoleConfig {
+    role: string;
+    provider?: string;
+    model?: string;
+    fallbackChain: Array<{ model?: string; provider?: string }>;
+    applyFallback: (model?: string, provider?: string) => void;
+  }
+
+  const allConfiguredRoles: PreflightRoleConfig[] = [
     {
-      role: "planner" as const,
+      role: "planner",
       ...resolveRoute(params.plannerAgent, params.plannerModel, params.plannerProvider),
       fallbackChain: parseFallbackChain(params.plannerFallbackModel, params.plannerFallbackProvider),
       applyFallback: (model?: string, provider?: string) => {
@@ -1439,7 +1735,7 @@ async function runProviderPreflight(
       },
     },
     {
-      role: "executor" as const,
+      role: "executor",
       ...resolveRoute(params.executorAgent, params.executorModel, params.executorProvider),
       fallbackChain: parseFallbackChain(params.executorFallbackModel, params.executorFallbackProvider),
       applyFallback: (model?: string, provider?: string) => {
@@ -1448,7 +1744,7 @@ async function runProviderPreflight(
       },
     },
     {
-      role: "verifier" as const,
+      role: "verifier",
       ...resolveRoute(params.verifierAgent, params.verifierModel, params.verifierProvider),
       fallbackChain: parseFallbackChain(params.verifierFallbackModel, params.verifierFallbackProvider),
       applyFallback: (model?: string, provider?: string) => {
@@ -1456,15 +1752,28 @@ async function runProviderPreflight(
         if (provider) params.verifierProvider = provider;
       },
     },
-  ].filter((role) => role.provider || role.model);
+  ];
 
-  if (roles.length === 0) {
+  const roles: PreflightRoleConfig[] = params.discoveryOnly
+    ? paradigm === "dual-plan-synthesis-execute-verify"
+      ? DUAL_PLAN_DISCOVERY_PREFLIGHT_ROUTES.map((route) => ({
+          role: route.role,
+          provider: route.provider,
+          model: route.model,
+          fallbackChain: [],
+          applyFallback: () => {},
+        }))
+      : allConfiguredRoles.filter((role) => role.role === "planner")
+    : allConfiguredRoles;
+  const routedRoles = roles.filter((role) => role.provider || role.model);
+
+  if (routedRoles.length === 0) {
     emit("Preflight: no explicitly routed provider/model pairs — skipping health pings.");
     return;
   }
 
   const results = await preflightProviderHealth(
-    roles.map((role) => ({ roles: [role.role], provider: role.provider, model: role.model })),
+    routedRoles.map((role) => ({ roles: [role.role], provider: role.provider, model: role.model })),
     {
       cwd: params.cwd,
       allowLocalModel: params.allowLocalModel,
@@ -1477,7 +1786,7 @@ async function runProviderPreflight(
   const unrecovered: ProviderHealthError[] = [];
   for (const result of results.filter((r) => !r.ok)) {
     for (const roleName of result.roles) {
-      const role = roles.find((r) => r.role === roleName);
+      const role = routedRoles.find((r) => r.role === roleName);
       if (!role) continue;
 
       // F4 companion: multi-step fallback chain — try each fallback in order
@@ -1539,7 +1848,7 @@ async function runProviderPreflight(
     throw error;
   }
 
-  emit(`Preflight: all ${roles.length} routed role route(s) healthy.`);
+  emit(`Preflight: all ${routedRoles.length} routed role route(s) healthy.`);
 }
 
 function computeRequiredSubagentBudget(
@@ -1793,6 +2102,7 @@ async function executeExecutorTaskWithRecovery(
       state, params, agents, params.executorAgent, prompt, signal, emit,
       inheritedModel, toModelOverride(params.executorModel, params.executorProvider),
       survival,
+      true,
     );
   } catch (err) {
     // A mid-phase abort in abort-survivor mode detaches the child and rejects
@@ -1800,6 +2110,7 @@ async function executeExecutorTaskWithRecovery(
     // the survivor manifest and surface the resume hint — never swallow it into
     // an ordinary task failure.
     if (err instanceof SubagentDetachedError) throw err;
+    if (err instanceof SubagentTerminalAmbiguousError) throw err;
     emit("Task " + task.id + ": spawn failed — " + String(err));
     return {
       taskId: task.id,
@@ -1868,8 +2179,12 @@ async function executeExecutorTaskWithRecovery(
         state, params, agents, params.executorAgent,
         continuationPrompt, signal, emit, inheritedModel,
         toModelOverride(params.executorModel, params.executorProvider),
+        undefined,
+        true,
       );
-    } catch {
+    } catch (err) {
+      if (err instanceof SubagentDetachedError) throw err;
+      if (err instanceof SubagentTerminalAmbiguousError) throw err;
       emit("Task " + task.id + ": handoff continuation spawn failed — escalating to split.");
       state.recoveryLog.push(
         "[RECOVERY] " + task.id + ": CONTINUE spawn failed — escalating to SPLIT.",
@@ -1991,8 +2306,12 @@ async function splitAndExecuteTask(
         state, params, agents, params.executorAgent,
         subtaskPrompt, signal, emit, inheritedModel,
         toModelOverride(params.executorModel, params.executorProvider),
+        undefined,
+        true,
       );
     } catch (err) {
+      if (err instanceof SubagentDetachedError) throw err;
+      if (err instanceof SubagentTerminalAmbiguousError) throw err;
       emit("Task " + task.id + ": subtask " + subtask.id + " spawn failed — " + String(err));
       subtaskOutputs.push({
         taskId: subtask.id,
@@ -2234,6 +2553,7 @@ async function spawnChecked(
     phaseName?: string;
     phaseIndex?: number;
   },
+  phaseMutates = false,
 ): Promise<SubagentResult> {
   if (state.spawnedCount >= params.maxSubagents) {
     throw new Error(`Subagent ceiling exceeded: already spawned ${state.spawnedCount}/${params.maxSubagents}.`);
@@ -2249,6 +2569,7 @@ async function spawnChecked(
     onProgress,
     modelOverride,
     ...(abortSurvival ? { abortSurvival } : {}),
+    phaseMutates,
   });
 }
 
@@ -2412,6 +2733,8 @@ async function runSubagent(
       phaseName?: string;
       phaseIndex?: number;
     };
+    /** See SpawnSubagentOptions.phaseMutates in substrate.ts. */
+    phaseMutates?: boolean;
   },
 ): Promise<SubagentResult> {
   const startedAt = Date.now();
@@ -2671,9 +2994,39 @@ async function runSubagent(
       if (options.signal) options.signal.removeEventListener("abort", abortHandler);
       stdoutReader.close();
 
+      const buildCandidate = (): SubagentResult => {
+        const result: SubagentResult = {
+          agentName: profile.name,
+          task,
+          text: lastAssistantText.trim(),
+          stderr: stderr.trim(),
+          exitCode,
+          durationMs: Date.now() - startedAt,
+          events: eventCount,
+          toolCalls,
+        };
+        if (profile.provider) result.provider = profile.provider;
+        if (profile.model) result.model = profile.model;
+        return result;
+      };
+      const throwAmbiguousIfMutating = (errorMessage: string): void => {
+        const mutatingEvidence = options.phaseMutates === true || toolCalls.mutating > 0;
+        if (!mutatingEvidence) return;
+        const candidate = lastAssistantText.trim() ? buildCandidate() : undefined;
+        throw new SubagentTerminalAmbiguousError(profile.name, {
+          code: candidate ? "AMBIGUOUS_COMPLETION" : "RESULT_LOST_AFTER_MUTATION",
+          resultLost: !candidate,
+          errorMessage,
+          exitCode,
+          stderr: stderr.trim(),
+          assistantFailures: [...assistantFailures],
+          ...(candidate ? { candidate } : {}),
+        });
+      };
+
       if (killedByAbort) throw new Error(`Subagent ${agentName} aborted.`);
       if (protocolTimedOut) {
-        throw new Error(JSON.stringify({
+        const message = JSON.stringify({
           type: "pi_child_first_json_timeout",
           agent: agentName,
           timeoutMs: firstJsonTimeoutMs,
@@ -2681,31 +3034,25 @@ async function runSubagent(
           cwd: options.cwd,
           commandBasename: path.basename(launch.command),
           launchRuntime: command.launchRuntime,
-        }));
+        });
+        throwAmbiguousIfMutating(message);
+        throw new Error(message);
       }
       if (exitCode !== 0) {
-        throw new Error(`Subagent ${agentName} exited with code ${exitCode}. stderr: ${truncateWithNotice(stderr.trim(), 2000, "stderr")}`);
+        const message = `Subagent ${agentName} exited with code ${exitCode}. stderr: ${truncateWithNotice(stderr.trim(), 2000, "stderr")}`;
+        throwAmbiguousIfMutating(message);
+        throw new Error(message);
       }
       if (assistantFailures.length > 0) {
         const stderrSuffix = stderr.trim() ? ` stderr: ${truncateWithNotice(stderr.trim(), 1000, "stderr")}` : "";
-        throw new Error(
-          `Subagent ${agentName} reported assistant failure despite exit code 0: ${truncateWithNotice(assistantFailures.join("; "), 2000, "assistant failure details")}.${stderrSuffix}`,
-        );
+        const message =
+          `Subagent ${agentName} reported assistant failure despite exit code 0: ` +
+          `${truncateWithNotice(assistantFailures.join("; "), 2000, "assistant failure details")}.${stderrSuffix}`;
+        throwAmbiguousIfMutating(message);
+        throw new Error(message);
       }
 
-      const result: SubagentResult = {
-        agentName: profile.name,
-        task,
-        text: lastAssistantText.trim(),
-        stderr: stderr.trim(),
-        exitCode,
-        durationMs: Date.now() - startedAt,
-        events: eventCount,
-        toolCalls,
-      };
-      if (profile.provider) result.provider = profile.provider;
-      if (profile.model) result.model = profile.model;
-      return result;
+      return buildCandidate();
     }
   } finally {
     await rm(tempDir, { recursive: true, force: true });
@@ -3562,8 +3909,8 @@ function parseModelCandidate(candidate: string): RoleModelOverride | undefined {
   // NOT a model. Only route it if it validates against the known-models
   // registry (modelAliasFromText / structured provider forms above). Unknown
   // tokens are ignored with a logged notice — never routed — so ordinary prose
-  // can no longer hijack a role route (production evidence: run orc-mr43a2em-dvzs,
-  // planner routed to anthropic/today → preflight 404).
+  // can no longer hijack a role route (production evidence showed a planner
+  // routed to anthropic/today → preflight 404).
   noteRejectedNlRouteToken(cleaned);
   return undefined;
 }
@@ -3691,16 +4038,19 @@ function extractExecutorOutputContract(task: string): { contract: string; source
     : { contract: "Each executor must follow the explicit output format in the original task.", source: "inferred" };
 }
 
-function buildPlanningPrompt(intake: Intake, attempt: number, failureReasons: string[], completedTasks: TaskLedgerEntry[] = []): string {
+function buildPlanningPrompt(intake: Intake, attempt: number, failureReasons: string[], completedTasks: TaskLedgerEntry[] = [], contractWriteSet?: string[]): string {
   const retryBlock = failureReasons.length
     ? `\nPrevious verifier failure reasons to address deterministically:\n${failureReasons.map((reason) => `- ${reason}`).join("\n")}\n`
+    : "";
+  const contractWriteSetBlock = contractWriteSet?.length
+    ? `\nCONTRACTED WRITE SET (hard scope granted by the caller — deterministic enforcement):\n${contractWriteSet.map((entry) => `- ${entry}`).join("\n")}\nEvery file your tasks create or modify MUST fall within this set; any out-of-set mutation is an automatic deterministic FAIL naming the file. If required work falls outside it, do NOT plan that mutation — name the file and the reason in "notes" so the caller can widen the authorization first.\n`
     : "";
   // F2: completed tasks from prior attempts must NOT be re-created. The
   // orchestrator reuses their outputs and routes them to re-verification.
   const completedBlock = completedTasks.length
     ? `\nTasks ALREADY COMPLETED successfully in a previous attempt (their artifacts exist on disk). Keep their IDs stable, do NOT instruct executors to re-create or re-do their work, and plan only the remaining/failed work. The orchestrator will reuse their results automatically:\n${completedTasks.map((entry) => `- ${entry.taskId}: ${entry.description}`).join("\n")}\n`
     : "";
-  return `Plan the following task for executor subagents. Return JSON if possible, exactly shaped as:\n{"tasks":[{"id":"...","description":"...","dependsOn":[]}],"notes":"..."}\n\nINTAKE CONTRACT:\n${formatIntakeForPrompt(intake)}\n\nRules:\n- Keep task IDs stable and simple (task-1, task-2, ...).\n- Make each description self-contained.\n- Do not execute the task.\n- Carry forward all intake constraints, invariants, success criteria, failure criteria, and executor output contract into the task descriptions/notes.\n- If model routing requirements exist in intake, treat them as essential orchestrator constraints, not executor work.\n- If the task cannot be safely split, return one task.\n- **Task-size cap**: each executor task description MUST be under ~200 words. Tasks exceeding this should be split into multiple smaller tasks. Small tasks ensure executor subagents have enough context budget to use write/edit/bash tools and produce actual file artifacts rather than text reports.\n- An executor task that only describes/analyzes and never touches files is NOT sufficient for CREATE or IMPLEMENT work — the verifier will check for actual file artifacts.\n\nAttempt: ${attempt}${completedBlock}${retryBlock}`;
+  return `Plan the following task for executor subagents. Return JSON if possible, exactly shaped as:\n{"tasks":[{"id":"...","description":"...","dependsOn":[]}],"notes":"..."}\n\nINTAKE CONTRACT:\n${formatIntakeForPrompt(intake)}\n\nRules:\n- Keep task IDs stable and simple (task-1, task-2, ...).\n- Make each description self-contained.\n- Do not execute the task.\n- Carry forward all intake constraints, invariants, success criteria, failure criteria, and executor output contract into the task descriptions/notes.\n- If model routing requirements exist in intake, treat them as essential orchestrator constraints, not executor work.\n- If the task cannot be safely split, return one task.\n- **Task-size cap**: each executor task description MUST be under ~200 words. Tasks exceeding this should be split into multiple smaller tasks. Small tasks ensure executor subagents have enough context budget to use write/edit/bash tools and produce actual file artifacts rather than text reports.\n- An executor task that only describes/analyzes and never touches files is NOT sufficient for CREATE or IMPLEMENT work — the verifier will check for actual file artifacts.\n- **Predicted write set (predict-then-write)**: if the tasks will create or modify ANY files, include "predicted_write_set": ["repo/relative/path", ...] in the plan JSON — the exact files (or narrow "dir/" prefixes) the tasks will touch. This list becomes the executors' write scope and is enforced mechanically after execution: any mutation outside it fails the attempt naming the file. Predict precisely; do not pad with directories you merely might touch.\n${contractWriteSetBlock}\nAttempt: ${attempt}${completedBlock}${retryBlock}`;
 }
 
 function buildExecutorPrompt(intake: Intake, plan: Plan, task: PlanTask): string {
@@ -3793,7 +4143,8 @@ function parsePlan(text: string, originalTask: string): Plan {
         .map((item, index) => normalizePlanTask(item, index))
         .filter((task): task is PlanTask => Boolean(task));
       if (tasks.length > 0) {
-        return { tasks, notes: optionalString(raw.notes) ?? "", raw: parsed };
+        const predictedWriteSet = parseWriteSetInput(raw.predicted_write_set ?? raw.predictedWriteSet);
+        return { tasks, notes: optionalString(raw.notes) ?? "", raw: parsed, predictedWriteSet };
       }
     }
   }
@@ -3974,6 +4325,151 @@ async function runBoundedPool<T, R>(
   if (firstError !== undefined) throw firstError;
   throwIfAborted(outerSignal);
   return results;
+}
+
+function firstPevTerminalNoRetry(resumeState?: LoadedRunState): TerminalNoRetryState | undefined {
+  return [...(resumeState?.terminalStates.values() ?? [])]
+    .sort((a, b) => a.phaseIndex - b.phaseIndex)
+    .find((state) =>
+      state.code === "WRITE_SET_VIOLATION" ||
+      state.code === "WRITE_SET_UNOBSERVABLE" ||
+      state.code === "AMBIGUOUS_COMPLETION" ||
+      state.code === "RESULT_LOST_AFTER_MUTATION");
+}
+
+function attemptFromTerminalPhase(terminalState: TerminalNoRetryState): number | undefined {
+  const match = terminalState.phaseName.match(/attempt-(\d+)/);
+  if (!match) return undefined;
+  const parsed = Number(match[1]);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function formatPevWriteSetObservation(evaluation: WriteSetObservationEvaluation): string {
+  const parts = [
+    `${evaluation.observed.length} observed mutation(s)`,
+    `${evaluation.violations.length} violation(s)`,
+    `${evaluation.unobservableScopes.length} unobservable scope(s)`,
+  ];
+  if (evaluation.observed.length) parts.push(`observed=${evaluation.observed.join(", ")}`);
+  if (evaluation.violations.length) parts.push(`violations=${evaluation.violations.join(", ")}`);
+  if (evaluation.unobservableScopes.length) parts.push(`unobservable=${evaluation.unobservableScopes.join(", ")}`);
+  return parts.join("; ");
+}
+
+function writeSetTerminalPaths(
+  code: "WRITE_SET_VIOLATION" | "WRITE_SET_UNOBSERVABLE",
+  evaluation?: WriteSetObservationEvaluation,
+  fallbackPaths: string[] = [],
+): string[] {
+  if (!evaluation) return [...new Set(fallbackPaths)];
+  return code === "WRITE_SET_UNOBSERVABLE"
+    ? [...new Set(evaluation.unobservableScopes)]
+    : [...new Set(evaluation.violations)];
+}
+
+function makePevTerminalVerifierResult(terminalState: TerminalNoRetryState): { status: "fail"; reasons: string[]; raw: string } {
+  let reason: string;
+  if (terminalState.code === "WRITE_SET_UNOBSERVABLE") {
+    const scopes = terminalState.unobservableScopes?.length ? terminalState.unobservableScopes.join(", ") : "(unknown scope)";
+    reason = `WRITE_SET_UNOBSERVABLE: write-set observation could not observe ${scopes}; failing closed before verifier spawn; retryAllowed=false.`;
+  } else if (terminalState.code === "WRITE_SET_VIOLATION") {
+    const violations = terminalState.violations?.length ? terminalState.violations.map((p) => `"${p}"`).join(", ") : "(unknown violation)";
+    const label = terminalState.errorMessage.includes("WRITE_SET_VIOLATION (pre-execution)")
+      ? "WRITE_SET_VIOLATION (pre-execution)"
+      : "WRITE_SET_VIOLATION";
+    reason = `${label}: ${violations} mutated outside the predicted write set; failing before verifier spawn; retryAllowed=false.`;
+  } else {
+    reason =
+      `Terminal no-retry state ${terminalState.code}: retryAllowed=false; ` +
+      `resultLost=${terminalState.resultLost}; verifierSpawned=false; ${terminalState.errorMessage}`;
+  }
+  return { status: "fail", reasons: [reason], raw: JSON.stringify({ status: "fail", reasons: [reason] }) };
+}
+
+function persistPevWriteSetTerminal(
+  store: RunStateStore,
+  indexOf: (name: string) => number,
+  phaseName: string,
+  code: "WRITE_SET_VIOLATION" | "WRITE_SET_UNOBSERVABLE",
+  state: OrchestrationState,
+  evaluation?: WriteSetObservationEvaluation,
+  fallbackPaths: string[] = [],
+): TerminalNoRetryState {
+  const paths = writeSetTerminalPaths(code, evaluation, fallbackPaths);
+  const phaseIndex = indexOf(phaseName);
+  const violationLabel = phaseName.includes("pre-execution") ? "WRITE_SET_VIOLATION (pre-execution)" : "WRITE_SET_VIOLATION";
+  const errorMessage = code === "WRITE_SET_UNOBSERVABLE"
+    ? `WRITE_SET_UNOBSERVABLE before verifier spawn: ${paths.join(", ") || "(unknown scope)"}. The run is terminal for this discovery and will not retry.`
+    : `${violationLabel} before verifier spawn: ${paths.map((p) => `"${p}"`).join(", ") || "(unknown violation)"}. The run is terminal for this discovery and will not retry.`;
+  return store.markTerminalNoRetry(phaseIndex, phaseName, {
+    code,
+    retryAllowed: false,
+    resultLost: false,
+    phaseName,
+    phaseIndex,
+    recordedAt: new Date().toISOString(),
+    errorMessage,
+    spawnedCount: state.spawnedCount,
+    verifierSpawned: false,
+    observed: evaluation?.observed ?? [],
+    violations: evaluation?.violations ?? (code === "WRITE_SET_VIOLATION" ? paths : []),
+    unobservableScopes: evaluation?.unobservableScopes ?? (code === "WRITE_SET_UNOBSERVABLE" ? paths : []),
+  });
+}
+
+function persistPevAmbiguousTerminal(
+  store: RunStateStore,
+  indexOf: (name: string) => number,
+  phaseName: string,
+  error: SubagentTerminalAmbiguousError,
+  state: OrchestrationState,
+): TerminalNoRetryState {
+  const phaseIndex = indexOf(phaseName);
+  const info = error.info;
+  return store.markTerminalNoRetry(phaseIndex, phaseName, {
+    code: info.code,
+    retryAllowed: false,
+    resultLost: info.resultLost,
+    phaseName,
+    phaseIndex,
+    recordedAt: new Date().toISOString(),
+    errorMessage: info.errorMessage,
+    agentName: info.agentName,
+    exitCode: info.exitCode,
+    spawnedCount: state.spawnedCount,
+    verifierSpawned: false,
+  }, info.candidate);
+}
+
+function finalizePevTerminalResult(
+  params: NormalizedParams,
+  state: OrchestrationState,
+  terminalState: TerminalNoRetryState,
+): { markdown: string; details: Record<string, unknown> } {
+  state.spawnedCount = Math.max(state.spawnedCount, terminalState.spawnedCount ?? 0);
+  if (!state.verifierResult) state.verifierResult = makePevTerminalVerifierResult(terminalState);
+  state.verifierResults = state.verifierResults ?? [];
+  for (const reason of state.verifierResult.reasons) {
+    if (!state.failureReasons.some((existing) => existing.includes(reason))) {
+      state.failureReasons.push(`Terminal no-retry: ${reason}`);
+    }
+  }
+  state.finalResult = buildFinalResult("fail", params, state);
+  return {
+    markdown: state.finalResult,
+    details: {
+      ...buildDetails("fail", params, state),
+      code: terminalState.code,
+      retryAllowed: false,
+      resultLost: terminalState.resultLost,
+      verifierSpawned: false,
+      spawnedCount: state.spawnedCount,
+      observed: terminalState.observed ?? [],
+      violations: terminalState.violations ?? [],
+      unobservableScopes: terminalState.unobservableScopes ?? [],
+      terminalNoRetry: terminalState,
+    },
+  };
 }
 
 function buildFinalResult(status: "pass" | "fail", params: NormalizedParams, state: OrchestrationState): string {
@@ -4279,8 +4775,14 @@ function optionalString(value: unknown): string | undefined {
 }
 
 function stringArray(value: unknown): string[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  return value.map((item) => String(item).trim()).filter(Boolean);
+  const items = Array.isArray(value)
+    ? value
+    : typeof value === "string"
+      ? value.split(",")
+      : undefined;
+  if (!items) return undefined;
+  const normalized = items.map((item) => String(item).trim()).filter(Boolean);
+  return normalized.length ? normalized : undefined;
 }
 
 function clampInt(value: unknown, fallback: number, min: number, max: number): number {

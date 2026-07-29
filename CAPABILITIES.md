@@ -30,8 +30,10 @@ Shared orchestration capabilities include:
 - topological executor waves and bounded spawn guards;
 - effect-based verification, tool-call evidence, worktree deltas, and hard-gate modes;
 - resumable checkpointed runs and deterministic non-LLM phases;
+- read-only discovery planning on PEV/dual-plan plus deterministic predicted-write-set enforcement on PEV/frozen-gate;
+- terminal no-retry handling when a mutating child loses its result stream;
 - Windows child-process recovery/evidence;
-- mandatory orchestrator role-integrity ledgers.
+- plain-language completion reports without extra policy paperwork.
 
 ## Persistent memory
 
@@ -145,7 +147,7 @@ theme-factory                    video-downloader
 webapp-testing                   xlsx
 ```
 
-NenFlow v3 and its `pev-*` roles are retired. Stable `/nenflow_v3` and `/pev` prompt stubs redirect users to `/orchestrate`; historical runs and retired implementation files are not published.
+NenFlow v3 and its `pev-*` roles are retired. Historical runs, compatibility prompts, and retired implementation files are not published; orchestration routes through `/orchestrate`.
 
 ## Safety and publishing
 

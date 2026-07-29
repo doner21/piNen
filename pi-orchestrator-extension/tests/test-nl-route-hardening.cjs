@@ -6,7 +6,7 @@
  * "…the same semantics dual-plan uses today" set the planner route to
  * anthropic/today (a nonexistent model), 404-aborting the run
  * (bug 2026-07-02-natural-language-route-parser-hijacks-roles-from-task-prose.md,
- * run orc-mr43a2em-dvzs). This test proves:
+ * run historical-orchestration-run). This test proves:
  *  (1) prose decoys ("uses today", "runs tomorrow") cause NO route change;
  *  (2) explicit params always win over prose decoys;
  *  (3) legitimate NL routing ("use GPT 5.5 for the planner") still works.
@@ -137,7 +137,7 @@ async function testModelOnlyExplicitSuppressesNlProvider() {
   }
 }
 
-// ── Residual 1 (run orc-mr43c3tz-uqzv): the STRUCTURED NL forms.────────────────
+// ── Residual 1 (run historical-orchestration-run): the STRUCTURED NL forms.────────────────
 // Two structured branches in parseModelCandidate used to route WITHOUT known-model
 // validation:
 //   Decoy A — worded  "provider <P> model <T>"  (providerModel regex, greedy tail);

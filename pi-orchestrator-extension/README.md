@@ -58,6 +58,8 @@ Supported command flags:
 - `--allow-local-model` / `--no-allow-local-model` — local model guard override.
 - `--paradigm NAME` — orchestration shape: `plan-execute-verify` (default), `multi-verify-vote`, `composable-pipeline`, `dual-plan-synthesis-execute-verify`, `verify-only`, `paradigm-creator`, `shape-builder`, `win-console-spawn-root-cause`, `win-lifecycle-process-trace`, `frozen-gate-fix-loop`, `evidence-audit`, `independent-replication`, `safe-github-publish`.
 - `--hard-gates MODE` — judgment-layer gate mode: `strict` | `advisory` (default) | `off`. See "Judgment layer" below.
+- `--write-set PATHS` — comma-separated repo-relative paths, prefixes, simple globs, or absolute external paths. Deterministic enforcement is supported by `plan-execute-verify` and `frozen-gate-fix-loop`; dual-plan accepts it only as proposed scope with `--discovery-only`. Unsupported shapes fail closed.
+- `--discovery-only` — read-only planning supported by `plan-execute-verify` and `dual-plan-synthesis-execute-verify`; returns a plan plus predicted write set without spawning executors or verifiers. Unsupported shapes fail closed.
 - `--preflight` / `--no-preflight` — toggle the 1-token provider health pings run before any subagent spawn (default on).
 - `--planner-fallback-model M`, `--planner-fallback-provider P` (and the `executor`/`verifier` variants) — per-role fallback route applied when the primary route fails pre-flight (graceful degradation).
 
@@ -89,6 +91,17 @@ reply-text shape heuristics.
   reused (their prior outputs are routed to re-verification, never
   regenerated) as long as their artifacts still exist on disk. The planner is
   told which tasks are already complete and must not re-create them.
+- **Predict-then-write scope**: for `plan-execute-verify` and
+  `frozen-gate-fix-loop`, `predictedWriteSet`/`--write-set` constrains execution
+  to approved relative or absolute paths. Out-of-contract plans fail before
+  execution and observed out-of-scope mutations fail before verifier spawn.
+  `discoveryOnly`/`--discovery-only` is supported by PEV and dual-plan; it uses
+  read-only planning and returns the proposed scope without project mutations.
+  Other control/shape combinations fail closed instead of being ignored.
+- **Terminal ambiguous mutation handling**: if a mutating child loses its final
+  result stream or exits with an unrecovered assistant/transport error, the run
+  persists a no-retry terminal state rather than blindly spawning a duplicate
+  executor against potentially changed files.
 - **Pre-flight + structured failures (F5)**: before spawning any subagent, a
   1-token health ping runs for each routed provider/model pair. Every ping has
   a 20-second wall-clock timeout and the complete primary/fallback preflight
@@ -142,7 +155,7 @@ It requires a sanitization contract, builds a clean staging tree without source 
 
 The `orchestrate` tool accepts optional `plannerModel`/`plannerProvider`, `executorModel`/`executorProvider`, and `verifierModel`/`verifierProvider` parameters so the caller can select each role route. On the command line, use `--planner-model`, `--planner-provider`, etc. Explicit overrides take precedence. Omitted fields resolve from the named agent profile in `~/.pi/agent/agents/`, then from `~/.pi/agent/settings.json` (`defaultProvider`/`defaultModel`); they no longer inherit the conversational model. The selected planner/executor/verifier routes are emitted before preflight begins.
 
-Because this package is loaded as a Pi extension, applying these source changes to an already-running Pi or embedded SSI harness may require a **full Pi/SSI process restart**. This repair does not reload or restart any active process.
+Because this package is loaded as a Pi extension, applying source changes to an already-running Pi or embedded host may require a **full process restart**. A source update does not itself reload or restart active processes.
 
 The intake also preserves pure natural-language orchestration controls inside the task text, including max agents/subagents, executor concurrency/parallelism, retry/attempt loop limits, researcher counts, distinct perspectives, and runtime-role model routing. Explicit natural-language model routing is treated as essential orchestrator configuration, not executor work.
 
@@ -283,9 +296,9 @@ Explicit paradigm-creator call:
 }
 ```
 
-## Orchestrator Role Integrity
+## Orchestration mode
 
-When an orchestration paradigm runs, the visible/current agent remains the ORCHESTRATOR and must not execute the main task directly. Every run must produce an *Orchestrator Role Integrity Ledger*. On orchestration failure, repair the requested shape/tool — do not switch shapes or execute the main task directly. Provider/model fallback is allowed; shape substitution is forbidden. See `PARADIGMS.md` and `agent/AGENTS.md` for the canonical policy.
+Use this extension when the user explicitly requests orchestration. The current agent coordinates the selected planner/executor/verifier subprocesses and reports the observed result; it must not quietly perform the main task directly while claiming the run was delegated. Use the shape's built-in reports and gates without adding role ledgers, receipts, or other policy paperwork. On failure, repair the specific product or orchestration defect and re-run while there is material progress. See `agent/AGENTS.md` for the canonical public policy.
 
 ## Agent profiles
 

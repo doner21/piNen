@@ -59,8 +59,10 @@ function testCommittedShapeStaticRules() {
   assert.match(source, /runBoundedPool/);
   assert.match(source, /SpawnGuard/);
   assert.match(source, /spawnSubagent/);
-  assert.match(source, /z-ai\/glm-5\.2/);
-  assert.match(source, /claude-opus-4-8/);
+  assert.match(source, /PLAN_A_ROUTE = \{ provider: "deepseek", model: "deepseek-v4-pro" \} as const/);
+  assert.match(source, /SYNTHESIS_ROUTE = \{ provider: "deepseek", model: "deepseek-v4-pro" \} as const/);
+  assert.doesNotMatch(source, /z-ai\/glm-5\.2/);
+  assert.doesNotMatch(source, /claude-opus-4-8/);
   assert.match(source, /deepseek-v4-pro/);
   assert.match(source, /gpt-5\.5/);
   assert.doesNotMatch(source, /from\s+["']\.\//, "shape must not import sibling shapes");
@@ -100,13 +102,13 @@ async function testRunUsesFixedRoutesAndPasses() {
     assert.deepEqual(
       routedCalls.slice(0, 2).sort((a, b) => `${a[1]}/${a[2]}`.localeCompare(`${b[1]}/${b[2]}`)),
       [
+        ["planner", "deepseek", "deepseek-v4-pro"],
         ["planner", "openai-codex", "gpt-5.5"],
-        ["planner", "openrouter", "z-ai/glm-5.2"],
       ],
       "first two spawns should be the independent planners, order may vary due concurrency",
     );
     assert.deepEqual(routedCalls.slice(2), [
-      ["reviewer", "anthropic", "claude-opus-4-8"],
+      ["reviewer", "deepseek", "deepseek-v4-pro"],
       ["coder", "deepseek", "deepseek-v4-pro"],
       ["reviewer", "openai-codex", "gpt-5.5"],
     ]);
@@ -117,11 +119,248 @@ async function testRunUsesFixedRoutesAndPasses() {
   }
 }
 
+async function testDiscoveryOnly() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-dual-plan-discovery-"));
+  const logPath = path.join(tempDir, "fake-pi-log.jsonl");
+  process.env.PI_CLI_PATH = path.join(__dirname, "fake-pi.cjs");
+  process.env.FAKE_PI_LOG = logPath;
+
+  try {
+    const tool = loadOrchestrateTool();
+    const result = await tool.execute(
+      "test-dual-plan-discovery-only",
+      {
+        task: "Fixture task: apply a minimal scheduler race fix and verify it.",
+        paradigm: "dual-plan-synthesis-execute-verify",
+        preflight: false,
+        cwd: tempDir,
+        maxSubagents: 8,
+        maxRetries: 1,
+        discoveryOnly: true,
+        predictedWriteSet: [
+          "C:/absolute/path/allowed-only.txt",
+          "relative/prefix/",
+          "C:/absolute-prefix/",
+          "fixture-out.txt",
+        ],
+      },
+      undefined,
+      () => {},
+      { cwd: tempDir },
+    );
+
+    // ── Details normalized array ────────────────────────────────────
+    const expectedNormalized = [
+      "C:/absolute/path/allowed-only.txt",
+      "relative/prefix/",
+      "C:/absolute-prefix/",
+      "fixture-out.txt",
+    ];
+    assert.equal(result.details?.status, "discovery-only");
+    assert.equal(result.details?.mode, "discovery-only");
+    assert.deepEqual(result.details?.predictedWriteSet, expectedNormalized,
+      "details must expose the exact normalized predicted write set");
+
+    // ── Markdown assertions ─────────────────────────────────────────
+    const markdown = result.content?.[0]?.text || "";
+    assert.match(markdown, /# Discovery-only manifest/,
+      "discovery-only mode must return a discovery manifest");
+    assert.match(markdown, /\*\*Mode:\*\* discovery-only/,
+      "manifest must declare discovery-only mode");
+    for (const entry of expectedNormalized) {
+      assert.match(markdown, new RegExp(entry.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+        `manifest must list predicted write-set entry: ${entry}`);
+    }
+
+    // ── Expected predicted-write-set block (exact, untruncated) ────
+    const expectedBlock =
+      "BEGIN_PREDICTED_WRITE_SET\n" +
+      expectedNormalized.map((entry) => `- ${entry}`).join("\n") +
+      "\nEND_PREDICTED_WRITE_SET";
+
+    // ── Spawn assertions ────────────────────────────────────────────
+    const calls = fs.readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    assert.equal(calls.length, 3,
+      "discovery-only: exactly 3 spawns (Plan A, Plan B, synthesis) — no executor or verifier");
+
+    const routedCalls = calls.map((call) => [call.agentName, call.provider, call.model]);
+    assert.deepEqual(
+      routedCalls.slice(0, 2).sort((a, b) => `${a[1]}/${a[2]}`.localeCompare(`${b[1]}/${b[2]}`)),
+      [
+        ["planner", "deepseek", "deepseek-v4-pro"],
+        ["planner", "openai-codex", "gpt-5.5"],
+      ],
+      "first two spawns must be the independent planners",
+    );
+    assert.deepEqual(
+      routedCalls[2],
+      ["reviewer", "deepseek", "deepseek-v4-pro"],
+      "third spawn must be the synthesis reviewer only",
+    );
+
+    const coderCalls = calls.filter((call) => call.agentName === "coder");
+    assert.equal(coderCalls.length, 0, "discovery-only must spawn NO executor (coder)");
+    const reviewerCalls = calls.filter((call) => call.agentName === "reviewer");
+    assert.equal(reviewerCalls.length, 1, "discovery-only: exactly one reviewer call (synthesis only, no verifier)");
+
+    // ── Read-only tool assertions ───────────────────────────────────
+    for (const call of calls) {
+      assert.equal(call.tools, "read,grep,find,ls",
+        `discovery-only spawn for ${call.agentName} (${call.model}) must have read-only tools`);
+      assert.equal(call.noTools, false,
+        `discovery-only spawn for ${call.agentName} must NOT have --no-tools (must use restricted --tools)`);
+    }
+
+    // ── Block injection assertions ──────────────────────────────────
+    // Both planner calls receive the exact block.
+    const plannerCalls = calls.filter((call) => call.agentName === "planner");
+    assert.equal(plannerCalls.length, 2, "both planners must be spawned");
+    for (const pc of plannerCalls) {
+      assert.ok(pc.predictedWriteSetBlock, `planner must include predictedWriteSetBlock in log: ${pc.model}`);
+      assert.equal(pc.predictedWriteSetBlock, expectedBlock,
+        `planner ${pc.model} predictedWriteSetBlock must match exactly`);
+    }
+
+    // Synthesis reviewer receives the exact block.
+    assert.equal(reviewerCalls[0].predictedWriteSetBlock, expectedBlock,
+      "synthesis reviewer predictedWriteSetBlock must match exactly");
+  } finally {
+    delete process.env.PI_CLI_PATH;
+    delete process.env.FAKE_PI_LOG;
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+async function testDiscoveryOnlyEmpty() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-dual-plan-discovery-empty-"));
+  const logPath = path.join(tempDir, "fake-pi-log.jsonl");
+  process.env.PI_CLI_PATH = path.join(__dirname, "fake-pi.cjs");
+  process.env.FAKE_PI_LOG = logPath;
+
+  try {
+    const tool = loadOrchestrateTool();
+    const result = await tool.execute(
+      "test-dual-plan-discovery-only-empty",
+      {
+        task: "Fixture task: empty write set coverage.",
+        paradigm: "dual-plan-synthesis-execute-verify",
+        preflight: false,
+        cwd: tempDir,
+        maxSubagents: 8,
+        maxRetries: 1,
+        discoveryOnly: true,
+        predictedWriteSet: [],
+      },
+      undefined,
+      () => {},
+      { cwd: tempDir },
+    );
+
+    assert.equal(result.details?.status, "discovery-only");
+    assert.equal(result.details?.mode, "discovery-only");
+    assert.deepEqual(result.details?.predictedWriteSet, [],
+      "empty predictedWriteSet must be an empty array in details");
+
+    const markdown = result.content?.[0]?.text || "";
+    assert.match(markdown, /# Discovery-only manifest/);
+    assert.match(markdown, /empty.*no files predicted/i,
+      "manifest must indicate empty write set");
+
+    const expectedEmptyBlock =
+      "BEGIN_PREDICTED_WRITE_SET\n(empty — no contract-granted writes)\nEND_PREDICTED_WRITE_SET";
+
+    const calls = fs.readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    assert.equal(calls.length, 3, "discovery-only empty: exactly 3 spawns");
+
+    // All three spawns receive the empty block.
+    for (const call of calls) {
+      assert.ok(call.predictedWriteSetBlock, `${call.agentName} must have predictedWriteSetBlock`);
+      assert.equal(call.predictedWriteSetBlock, expectedEmptyBlock,
+        `${call.agentName} predictedWriteSetBlock must be the canonical empty block`);
+    }
+
+    const coderCalls = calls.filter((call) => call.agentName === "coder");
+    assert.equal(coderCalls.length, 0, "discovery-only empty: no coder");
+
+    // ── Read-only tool assertions ───────────────────────────────────
+    for (const call of calls) {
+      assert.equal(call.tools, "read,grep,find,ls",
+        `discovery-only empty spawn for ${call.agentName} must have read-only tools`);
+      assert.equal(call.noTools, false,
+        `discovery-only empty spawn for ${call.agentName} must NOT have --no-tools`);
+    }
+  } finally {
+    delete process.env.PI_CLI_PATH;
+    delete process.env.FAKE_PI_LOG;
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+async function testDiscoveryOnlyMutationDetected() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-dual-plan-mutation-"));
+  const logPath = path.join(tempDir, "fake-pi-log.jsonl");
+  process.env.PI_CLI_PATH = path.join(__dirname, "fake-pi.cjs");
+  process.env.FAKE_PI_LOG = logPath;
+  process.env.FAKE_PI_DUAL_PLAN_MUTATING = "1";
+
+  try {
+    const tool = loadOrchestrateTool();
+    const result = await tool.execute(
+      "test-dual-plan-mutation",
+      {
+        task: "Fixture task: apply a minimal scheduler race fix and verify it.",
+        paradigm: "dual-plan-synthesis-execute-verify",
+        preflight: false,
+        cwd: tempDir,
+        maxSubagents: 8,
+        maxRetries: 1,
+        discoveryOnly: true,
+        predictedWriteSet: ["fixture-out.txt"],
+      },
+      undefined,
+      () => {},
+      { cwd: tempDir },
+    );
+
+    // The orchestrator catches shape errors and returns a failure result
+    // with abortReason containing the error token.
+    assert.equal(result.details.status, "fail",
+      "discovery with mutating planner must return fail status");
+    assert.ok(result.details.abortReason,
+      "failure must include abortReason");
+    assert.match(result.details.abortReason, /DISCOVERY_MUTATION_DETECTED/,
+      "abortReason must contain DISCOVERY_MUTATION_DETECTED error token");
+    assert.match(result.details.abortReason, /Plan A/,
+      "abortReason must name the phase (Plan A) that had mutating tool calls");
+
+    const calls = fs.readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    // Synthesis must not spawn after mutation detection — only two planner spawns.
+    assert.equal(calls.length, 2,
+      "only two planner spawns — synthesis must NOT spawn after mutation detection");
+
+    for (const call of calls) {
+      assert.equal(call.agentName, "planner", "only planners should be in the log");
+      assert.equal(call.tools, "read,grep,find,ls",
+        "discovery-only spawn must have read-only tools (even when mutation is detected later)");
+      assert.equal(call.noTools, false,
+        "discovery-only spawn must NOT have --no-tools");
+    }
+  } finally {
+    delete process.env.PI_CLI_PATH;
+    delete process.env.FAKE_PI_LOG;
+    delete process.env.FAKE_PI_DUAL_PLAN_MUTATING;
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
 async function run() {
   await testRegistryDiscovery();
   testCommittedShapeStaticRules();
   await testRunUsesFixedRoutesAndPasses();
-  console.log("PASS dual-plan-synthesis-execute-verify: registry, static rules, fixed routes");
+  await testDiscoveryOnly();
+  await testDiscoveryOnlyEmpty();
+  await testDiscoveryOnlyMutationDetected();
+  console.log("PASS dual-plan-synthesis-execute-verify: registry, static rules, fixed routes, discovery-only, discovery-only-empty, mutation-detected");
 }
 
 run().catch((error) => {

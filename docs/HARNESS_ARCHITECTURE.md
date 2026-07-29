@@ -59,7 +59,7 @@ checkpoint/effect evidence
       │
 independent verification
       │
-report + role-integrity ledger
+plain-language result
 ```
 
 Core properties:
@@ -70,12 +70,14 @@ Core properties:
 - dependency waves and bounded concurrency;
 - deterministic non-LLM hash/manifest phases;
 - resumable run state;
+- read-only discovery planning on PEV/dual-plan and deterministic predicted-write-set enforcement on PEV/frozen-gate;
+- no-retry terminal state after ambiguous mutating child completion;
 - direct effect evidence rather than trusting prose claims;
 - explicit fail-closed parser/verifier contracts.
 
 Shapes are siblings built on shared substrate primitives. See `../pi-orchestrator-extension/PARADIGMS.md`.
 
-NenFlow v3 is retired; compatibility prompts redirect to `/orchestrate`.
+NenFlow v3 is retired and its implementation/compatibility prompts are not shipped; orchestration routes through `/orchestrate`.
 
 ## Memory layer
 

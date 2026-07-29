@@ -33,11 +33,18 @@ import type {
 
 // ── Shape-owned constants ─────────────────────────────────────────────────
 
-const PLAN_A_ROUTE = { provider: "openrouter", model: "z-ai/glm-5.2" } as const;
+const PLAN_A_ROUTE = { provider: "deepseek", model: "deepseek-v4-pro" } as const;
 const PLAN_B_ROUTE = { provider: "openai-codex", model: "gpt-5.5" } as const;
-const SYNTHESIS_ROUTE = { provider: "anthropic", model: "claude-opus-4-8" } as const;
+const SYNTHESIS_ROUTE = { provider: "deepseek", model: "deepseek-v4-pro" } as const;
 const EXECUTOR_ROUTE = { provider: "deepseek", model: "deepseek-v4-pro" } as const;
 const VERIFIER_ROUTE = { provider: "openai-codex", model: "gpt-5.5" } as const;
+
+/** Exact routes used by dual-plan discovery before any executor/verifier loop. */
+export const DUAL_PLAN_DISCOVERY_PREFLIGHT_ROUTES = [
+  { role: "dual-plan-a", ...PLAN_A_ROUTE },
+  { role: "dual-plan-b", ...PLAN_B_ROUTE },
+  { role: "dual-plan-synthesis", ...SYNTHESIS_ROUTE },
+] as const;
 
 const PLANNER_CONCURRENCY = 2;
 
@@ -64,6 +71,9 @@ const DEFAULT_MAX_RETRIES = 2;
 const MAX_SHAPE_RETRIES = 5;
 const MAX_FINAL_MARKDOWN_CHARS = 24_000;
 const MAX_DETAIL_TEXT_CHARS = 4_000;
+
+/** Tool allowlist for discovery-only subagents. Excludes all mutating tools. */
+const DISCOVERY_READ_ONLY_TOOLS = ["read", "grep", "find", "ls"];
 
 // ── Shape export ───────────────────────────────────────────────────────────
 
@@ -98,6 +108,65 @@ interface VerifierVerdict {
   raw: string;
 }
 
+// ── Discovery-only helpers ─────────────────────────────────────────────────
+
+/**
+ * Clone the agents map and override tools to a read-only allowlist for the
+ * planner and verifier (synthesis) agents.  The shared agent profile map is
+ * never mutated — this is a shape-local clone.
+ */
+function buildDiscoveryAgents(
+  agents: Map<string, AgentProfile>,
+  params: NormalizedParams,
+): Map<string, AgentProfile> {
+  const cloned = new Map(agents);
+  const restrictTools = (name: string) => {
+    const original = cloned.get(name);
+    if (original && original.tools !== DISCOVERY_READ_ONLY_TOOLS) {
+      cloned.set(name, { ...original, tools: [...DISCOVERY_READ_ONLY_TOOLS] });
+    }
+  };
+  restrictTools(params.plannerAgent);
+  restrictTools(params.verifierAgent);
+  return cloned;
+}
+
+/**
+ * Fail closed when a discovery-phase subagent lacks tool-call telemetry or
+ * has recorded mutating tool calls.  Uses stable named error tokens so
+ * callers can detect the failure class without parsing free-form messages.
+ */
+function checkDiscoveryReadOnly(label: string, result: SubagentResult): void {
+  if (!result.toolCalls) {
+    throw new Error(
+      `DISCOVERY_READ_ONLY_UNPROVEN: ${label} result lacks tool-call telemetry ` +
+        `(mutating count unknown). Discovery-only requires attested read-only execution.`,
+    );
+  }
+  if (result.toolCalls.mutating > 0) {
+    throw new Error(
+      `DISCOVERY_MUTATION_DETECTED: ${label} recorded ${result.toolCalls.mutating} ` +
+        `mutating tool call(s) during discovery-only phase. Discovery must be strictly read-only.`,
+    );
+  }
+}
+
+// ── Predicted write-set block helper ───────────────────────────────────────
+
+/**
+ * Build the untruncated, clearly delimited BEGIN/END block that is injected
+ * into planner and synthesis prompts.  Agents must not plan outside this set;
+ * if it is insufficient they must report conflict rather than widen.
+ */
+function buildPredictedWriteSetBlock(writeSet: string[]): string {
+  if (!writeSet || writeSet.length === 0) {
+    return "BEGIN_PREDICTED_WRITE_SET\n(empty — no contract-granted writes)\nEND_PREDICTED_WRITE_SET";
+  }
+  return "BEGIN_PREDICTED_WRITE_SET\n" +
+    writeSet.map((entry) => `- ${entry}`).join("\n") +
+    "\nEND_PREDICTED_WRITE_SET";
+}
+
 // ── Main orchestration ─────────────────────────────────────────────────────
 
 async function runDualPlanSynthesisExecuteVerify(
@@ -109,6 +178,18 @@ async function runDualPlanSynthesisExecuteVerify(
   const maxRetries = resolveMaxRetries(params);
   const maxAttempts = clampIterations(maxRetries + 1);
   const routes = resolveRoutes(params);
+
+  // Normalize the predicted write set ONCE here so every consumer — both
+  // planner prompts, the synthesis prompt, and discovery-only details —
+  // sees the identical mechanically frozen array.
+  const predictedWriteSet = normalizeWriteSet(params.predictedWriteSet);
+
+  // In discovery-only mode, restrict planner/synthesis tools to a read-only
+  // allowlist via a shape-local agent-map clone.  The shared profile map is
+  // never mutated; normal execution is completely unaffected.
+  const effectiveAgents = params.discoveryOnly
+    ? buildDiscoveryAgents(agents, params)
+    : agents;
 
   // Checkpoint/resume wiring (ABORT-RESUME-DESIGN.md). Stage indices:
   // 0=planA, 1=planB, 2=synthesis, then 3+2(k-1)=executor-k, 4+2(k-1)=verifier-k.
@@ -173,9 +254,16 @@ async function runDualPlanSynthesisExecuteVerify(
     ];
   } else {
     emit("Phase 1: spawning two independent planners with distinct routes.");
-    plannerOutputs = await runPlannerPhase(params, agents, spawnGuard, signal, emit, inheritedModel);
+    plannerOutputs = await runPlannerPhase(params, effectiveAgents, spawnGuard, signal, emit, inheritedModel, predictedWriteSet);
     checkpointStage(0, plannerOutputs[0].result);
     checkpointStage(1, plannerOutputs[1].result);
+  }
+
+  // Discovery-only gate: planner results must be attested read-only before
+  // synthesis is spawned.  Failures here prevent any synthesis spawn.
+  if (params.discoveryOnly) {
+    checkDiscoveryReadOnly("Plan A", plannerOutputs[0].result);
+    checkDiscoveryReadOnly("Plan B", plannerOutputs[1].result);
   }
 
   // Phase 2: critique and synthesize a single executable plan.
@@ -188,15 +276,26 @@ async function runDualPlanSynthesisExecuteVerify(
     synthesis = await spawnChecked(
       spawnGuard,
       params,
-      agents,
+      effectiveAgents,
       params.verifierAgent,
-      buildSynthesisPrompt(params.task, plannerOutputs),
+      buildSynthesisPrompt(params.task, plannerOutputs, predictedWriteSet),
       signal,
       emit,
       inheritedModel,
       SYNTHESIS_ROUTE,
     );
     checkpointStage(2, synthesis);
+  }
+
+  // Discovery-only: fail closed, then return predicted write set before any
+  // executor/verifier spawn.  Checks cover both freshly-spawned and restored
+  // (checkpoint-resume) synthesis results.
+  if (params.discoveryOnly) {
+    checkDiscoveryReadOnly("synthesis", synthesis);
+    emit("Discovery-only mode: synthesis complete. Returning predicted write set without spawning executor/verifier.");
+    const markdown = buildDiscoveryOnlyMarkdown(params, spawnGuard, plannerOutputs, synthesis, predictedWriteSet);
+    const details = buildDiscoveryOnlyDetails(params, spawnGuard, plannerOutputs, synthesis, predictedWriteSet);
+    return { markdown, details };
   }
 
   // Phase 3/4: bounded execute + verify loop.
@@ -223,7 +322,7 @@ async function runDualPlanSynthesisExecuteVerify(
           emit,
           inheritedModel,
           routes.executor,
-          survivalFor(executorIndex),
+          { ...survivalFor(executorIndex), phaseMutates: true },
         );
       } catch (error) {
         detachGuard(executorIndex, error);
@@ -286,17 +385,18 @@ async function runPlannerPhase(
   signal: AbortSignal | undefined,
   emit: (text: string) => void,
   inheritedModel: { provider?: string; model?: string } | undefined,
+  predictedWriteSet: string[],
 ): Promise<PlannerOutput[]> {
   const plannerJobs: Array<{ label: "Plan A" | "Plan B"; route: typeof PLAN_A_ROUTE | typeof PLAN_B_ROUTE; prompt: string }> = [
     {
       label: "Plan A",
       route: PLAN_A_ROUTE,
-      prompt: buildPlannerPrompt("Plan A", PLAN_A_ROUTE, params.task),
+      prompt: buildPlannerPrompt("Plan A", PLAN_A_ROUTE, params.task, predictedWriteSet),
     },
     {
       label: "Plan B",
       route: PLAN_B_ROUTE,
-      prompt: buildPlannerPrompt("Plan B", PLAN_B_ROUTE, params.task),
+      prompt: buildPlannerPrompt("Plan B", PLAN_B_ROUTE, params.task, predictedWriteSet),
     },
   ];
 
@@ -321,12 +421,16 @@ function buildPlannerPrompt(
   label: "Plan A" | "Plan B",
   route: { provider: string; model: string },
   task: string,
+  predictedWriteSet: string[],
 ): string {
   return `You are ${label} in a dual-plan-synthesis-execute-verify orchestration.
 You should be running as provider=${route.provider}, model=${route.model}.
 
 Original task:
 ${task}
+
+Authoritative contract-granted write set (do not plan outside it; if insufficient, report conflict rather than widen):
+${buildPredictedWriteSetBlock(predictedWriteSet)}
 
 Produce an independent implementation plan only. Do not edit files.
 
@@ -340,12 +444,15 @@ Return concise markdown with:
 Do not assume the other planner's answer.`;
 }
 
-function buildSynthesisPrompt(task: string, plannerOutputs: PlannerOutput[]): string {
+function buildSynthesisPrompt(task: string, plannerOutputs: PlannerOutput[], predictedWriteSet: string[]): string {
   return `You are the synthesis reviewer in a dual-plan-synthesis-execute-verify orchestration.
 You should be running as provider=${SYNTHESIS_ROUTE.provider}, model=${SYNTHESIS_ROUTE.model}.
 
 Original task:
 ${task}
+
+Authoritative contract-granted write set (do not plan outside it; if insufficient, report conflict rather than widen):
+${buildPredictedWriteSetBlock(predictedWriteSet)}
 
 Independent planner outputs:
 ${plannerOutputs
@@ -534,7 +641,7 @@ async function spawnChecked(
   onProgress: ((text: string) => void) | undefined,
   inheritedModel: { provider?: string; model?: string } | undefined,
   modelOverride: { model?: string; provider?: string } | undefined,
-  extraOptions?: Pick<SpawnSubagentOptions, "abortSurvival"> | Record<string, never>,
+  extraOptions?: Pick<SpawnSubagentOptions, "abortSurvival" | "phaseMutates"> | Record<string, never>,
 ): Promise<SubagentResult> {
   const spawned = spawnGuard.reserve();
   onProgress?.(`Spawning subagent ${agentName} (${spawned}/${spawnGuard.cap}) in ${params.cwd}`);
@@ -671,4 +778,84 @@ function buildFinalMarkdown(
   );
 
   return truncateWithNotice(lines.join("\n"), MAX_FINAL_MARKDOWN_CHARS, "final report");
+}
+
+// ── Discovery-only helpers ────────────────────────────────────────────────
+
+function normalizeWriteSet(raw: string[] | undefined): string[] {
+  if (!raw || raw.length === 0) return [];
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const entry of raw) {
+    // Split comma-separated entries and trim each.
+    for (const part of entry.split(",")) {
+      const trimmed = part.trim().replace(/\\/g, "/");
+      if (trimmed && !seen.has(trimmed)) {
+        seen.add(trimmed);
+        normalized.push(trimmed);
+      }
+    }
+  }
+  return normalized;
+}
+
+function buildDiscoveryOnlyMarkdown(
+  params: NormalizedParams,
+  spawnGuard: SpawnGuard,
+  plannerOutputs: PlannerOutput[],
+  synthesis: SubagentResult,
+  writeSet: string[],
+): string {
+  const lines = [
+    "# Discovery-only manifest",
+    "",
+    `**Task:** ${params.task}`,
+    "**Paradigm:** dual-plan-synthesis-execute-verify",
+    `**Mode:** discovery-only (no executor/verifier spawned)`,
+    `**Subagents spawned:** ${spawnGuard.spawned}/${spawnGuard.cap}`,
+    "",
+    "## Predicted write set",
+    ...(writeSet.length ? writeSet.map((p) => `- \`${p}\``) : ["- (empty — no files predicted)"]),
+    "",
+    "## Planner outputs",
+    ...plannerOutputs.map(
+      (output) =>
+        `### ${output.label} (${output.route.provider}/${output.route.model})\n${truncateWithNotice(output.result.text, 2500, `${output.label} output`)}`,
+    ),
+    "",
+    "## Synthesized plan",
+    truncateWithNotice(synthesis.text, 3500, "synthesis output"),
+  ];
+  return truncateWithNotice(lines.join("\n"), MAX_FINAL_MARKDOWN_CHARS, "discovery manifest");
+}
+
+function buildDiscoveryOnlyDetails(
+  params: NormalizedParams,
+  spawnGuard: SpawnGuard,
+  plannerOutputs: PlannerOutput[],
+  synthesis: SubagentResult,
+  writeSet: string[],
+): Record<string, unknown> {
+  return {
+    status: "discovery-only",
+    mode: "discovery-only",
+    paradigm: "dual-plan-synthesis-execute-verify",
+    predictedWriteSet: writeSet,
+    spawnedCount: spawnGuard.spawned,
+    spawnedCap: spawnGuard.cap,
+    plannerOutputs: plannerOutputs.map((output) => ({
+      label: output.label,
+      provider: output.route.provider,
+      model: output.route.model,
+      exitCode: output.result.exitCode,
+      durationMs: output.result.durationMs,
+      text: truncateWithNotice(output.result.text, MAX_DETAIL_TEXT_CHARS, `${output.label} output`),
+    })),
+    synthesis: {
+      exitCode: synthesis.exitCode,
+      durationMs: synthesis.durationMs,
+      text: truncateWithNotice(synthesis.text, MAX_DETAIL_TEXT_CHARS, "synthesis output"),
+    },
+    task: params.task,
+  };
 }

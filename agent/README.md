@@ -63,7 +63,7 @@ The installer downloads the Engram executable separately; no executable or memor
 
 `settings.json` loads `../pi-orchestrator-extension`, which provides `/orchestrate` and the `orchestrate` tool. The stable `planner`, `coder`, and `reviewer` agents form the default spine; specialist `orch-*` roles are optional sidecars.
 
-NenFlow v3 is retired. `/nenflow_v3` and `/pev` are compatibility prompts that redirect to `/orchestrate`. See `docs/nenflow-v3-retirement.md`.
+NenFlow v3 and the `pev-*` loop are retired and are not shipped. Route orchestration requests through `/orchestrate`; see `docs/nenflow-v3-retirement.md`.
 
 ## Key tools and commands
 

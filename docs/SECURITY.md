@@ -14,8 +14,8 @@ taken to prevent secret leakage, protect user data, and ensure safe operation.
    repositories as **private** by default, requiring explicit human approval
    to make public.
 
-3. **No runtime state committed** — Session data, orchestration runs, NenFlow
-   run artifacts, handoffs, diagnostics, and cache files are all gitignored.
+3. **No runtime state committed** — Session data, orchestration runs,
+   handoffs, diagnostics, and cache files are all gitignored.
 
 4. **No runtime executables committed** — The Engram executable and other native
    runtime binaries are downloaded or built during installation, not stored in the repository.
@@ -34,7 +34,7 @@ taken to prevent secret leakage, protect user data, and ensure safe operation.
 |----------|----------|
 | **Auth/Secrets** | `auth.json`, `mcp.json`, `gmail-config.json`, `.env` files |
 | **Sessions** | `agent/sessions/`, `agent/handoffs/` |
-| **Runs** | `agent/nenflow-v3/runs/`, `agent/orchestration/runs/` |
+| **Runs** | `agent/orchestration/runs/`, `agent/orchestrate-runs/`, `pi-orchestrator-extension/runs-state/` |
 | **State** | `scheduler.json`, `trust.json`, `verbosity-state.json` |
 | **Diagnostics** | `agent/diagnostics/`, trace files, crash logs |
 | **Memory** | Engram databases/observations; `graphify-brain/` project graphs and wiki pages |

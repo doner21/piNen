@@ -1,7 +1,6 @@
 # Abort-Survivor + Checkpoint/Resume — Design (2026-07-02)
 
-**Problem (evidence: SSI K1 Shape B attempts 2–3, bug note
-`2026-07-01-orchestrate-discards-completed-executor-phase-on-transport-drop.md`):**
+**Problem (evidence: repeated long-running shape attempts; tracked in the original private harness bug notes):**
 Pi core aborts the `orchestrate` tool-call AbortSignal on long silent tool calls (observed at 44 and
 57.5 min — upstream stream lifetime, not a fixed timer). The extension's spawn layer kills the
 productive coder child on that signal, and the run has NO resume path (recovery tiers exist only for
