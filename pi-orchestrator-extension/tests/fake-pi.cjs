@@ -239,9 +239,75 @@ function respond(prompt) {
     };
   }
 
+  // Ordered composable-pipeline fixture. It provides two independent candidate
+  // plans, critiques, a parseable synthesized final plan, mutating execution,
+  // and an env-driven verifier sequence for bounded retry tests.
+  if (process.env.FAKE_PI_COMPOSABLE_ORDER_RETRY === "1") {
+    if (/You are researcher \d+ of \d+ in a composable orchestration pipeline/.test(prompt)) {
+      return { toolEvents: [], text: "Fixture research: inspected constraints and found one bounded implementation target." };
+    }
+    if (/You are independent planner \d+ of \d+ in a composable orchestration pipeline/.test(prompt)) {
+      return {
+        toolEvents: [],
+        text: JSON.stringify({
+          tasks: [{ id: "task-1", description: `CREATE the fixture target using candidate ${process.pid}.`, dependsOn: [] }],
+          notes: `independent candidate plan from pid ${process.pid}`,
+        }),
+      };
+    }
+    if (/You are critic \d+ of \d+ in a composable orchestration pipeline/.test(prompt)) {
+      return { toolEvents: [], text: "Fixture critique: compared both candidate plans and retained the smallest safe task." };
+    }
+    if (/You are synthesizer \d+ of \d+ in a composable orchestration pipeline/.test(prompt)) {
+      return {
+        toolEvents: [],
+        text: JSON.stringify({
+          tasks: [{ id: "task-1", description: "CREATE the final synthesized fixture target.", dependsOn: [] }],
+          notes: "fixture final plan from synthesis",
+        }),
+      };
+    }
+    if (prompt.includes("You are executing one task from a deterministic composable orchestration.")) {
+      return {
+        toolEvents: [
+          { type: "tool_execution_start", toolName: "edit" },
+          { type: "tool_execution_end", toolName: "edit" },
+        ],
+        text: "Fixture executor applied the final synthesized plan.",
+      };
+    }
+    if (/You are verifier \d+ of \d+ in a composable orchestration/.test(prompt)) {
+      const specs = (process.env.FAKE_PI_COMPOSABLE_VERIFIER_SEQUENCE || "pass")
+        .split(",").map((item) => item.trim()).filter(Boolean);
+      const callIndex = Math.max(0, countLogRecords("reviewer") - 1);
+      const spec = specs[Math.min(callIndex, specs.length - 1)] || "pass";
+      const status = spec.startsWith("fail") ? "fail" : "pass";
+      let cleanupArtifact = null;
+      if (process.env.FAKE_PI_COMPOSABLE_VERIFIER_ARTIFACT === "1") {
+        const match = prompt.match(/use only this run-owned directory:\s*([^\n]+)/i);
+        if (match) {
+          cleanupArtifact = path.join(match[1].trim(), `verifier-${process.pid}.json`);
+          fs.mkdirSync(path.dirname(cleanupArtifact), { recursive: true });
+          fs.writeFileSync(cleanupArtifact, JSON.stringify({ status }), "utf8");
+        }
+      }
+      return {
+        toolEvents: cleanupArtifact ? [
+          { type: "tool_execution_start", toolName: "write" },
+          { type: "tool_execution_end", toolName: "write" },
+        ] : [],
+        text: JSON.stringify({
+          status,
+          reasons: [`fixture composable verifier ${status}`],
+          cleanupArtifact,
+        }),
+      };
+    }
+  }
+
   if (
     process.env.FAKE_PI_COMPOSABLE_PLAN_DEFAULT_ROUTE === "1" &&
-    prompt.includes("You are the planner in a composable orchestration pipeline")
+    /You are (?:independent )?planner(?: \d+ of \d+)? in a composable orchestration pipeline/.test(prompt)
   ) {
     return {
       toolEvents: [],
@@ -273,17 +339,9 @@ function respond(prompt) {
     }
     if (style === "impl-1-ws") {
       // Same single CREATE task, but the planner also declares its predicted
-      // write set (predict-then-write fixtures). The optional mutating event
-      // proves discovery-only telemetry fails closed even if a child violates
-      // its read-only tool profile.
-      const toolEvents = process.env.FAKE_PI_DISCOVERY_PLANNER_MUTATING === "1"
-        ? [
-            { type: "tool_execution_start", toolName: "bash" },
-            { type: "tool_execution_end", toolName: "bash" },
-          ]
-        : [];
+      // write set (predict-then-write fixtures).
       return {
-        toolEvents,
+        toolEvents: [],
         text: JSON.stringify({
           tasks: [{ id: "task-1", description: "CREATE file out-1.txt with the fixture content.", dependsOn: [] }],
           notes: "fixture impl plan (1 task, predicted write set)",
@@ -1092,8 +1150,20 @@ function main() {
     predictedWriteSetBlock = pwsbMatch[0];
   }
 
+  let composablePhase = null;
+  if (/You are researcher \d+ of \d+ in a composable orchestration pipeline/.test(prompt)) composablePhase = "research";
+  else if (/You are independent planner \d+ of \d+ in a composable orchestration pipeline/.test(prompt)) composablePhase = "plan";
+  else if (/You are critic \d+ of \d+ in a composable orchestration pipeline/.test(prompt)) composablePhase = "critique";
+  else if (/You are synthesizer \d+ of \d+ in a composable orchestration pipeline/.test(prompt)) composablePhase = "synthesize";
+  else if (prompt.includes("You are executing one task from a deterministic composable orchestration.")) composablePhase = "execute";
+  else if (/You are verifier \d+ of \d+ in a composable orchestration/.test(prompt)) composablePhase = "verify";
+  const candidatePlanCount = (prompt.match(/^### Candidate Plan \d+/gm) || []).length;
+
   const record = {
     agentName: agentNameFromSystemPrompt(),
+    composablePhase,
+    candidatePlanCount,
+    promptHasFinalSynthesizedPlan: prompt.includes("fixture final plan from synthesis"),
     provider: argValue("--provider") || null,
     model: argValue("--model") || null,
     tools: argValue("--tools") || null,

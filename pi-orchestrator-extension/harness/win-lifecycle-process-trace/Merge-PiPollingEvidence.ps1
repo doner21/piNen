@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Merge-PiPollingEvidence.ps1 -- HARNESS ARTIFACT
     Offline correlation engine for polling-mode evidence: joins action markers

@@ -86,13 +86,19 @@ function testLifecycleHelpers() {
   // Status ranks
   assert.equal(mod.SHAPE_BUILDER_LIFECYCLE_RANK["proposed"], 10);
   assert.equal(mod.SHAPE_BUILDER_LIFECYCLE_RANK["implementation_reported"], 20);
+  assert.equal(mod.SHAPE_BUILDER_LIFECYCLE_RANK["declarative_verified"], 30);
   assert.equal(mod.SHAPE_BUILDER_LIFECYCLE_RANK["implemented_verified"], 30);
+  assert.equal(mod.SHAPE_BUILDER_LIFECYCLE_RANK["runtime_discovered"], 40);
   assert.equal(mod.SHAPE_BUILDER_LIFECYCLE_RANK["reloaded_discovered"], 40);
   assert.equal(mod.SHAPE_BUILDER_LIFECYCLE_RANK["canary_passed"], 50);
 
   // Forward transitions OK
   assert.equal(mod.transitionLifecycleState("proposed", "implementation_reported").ok, true);
+  assert.equal(mod.transitionLifecycleState("implementation_reported", "declarative_verified").ok, true);
+  assert.equal(mod.transitionLifecycleState("declarative_verified", "runtime_discovered").ok, true);
   assert.equal(mod.transitionLifecycleState("implementation_reported", "implemented_verified").ok, true);
+  assert.equal(mod.transitionLifecycleState("implemented_verified", "runtime_discovered").ok, true);
+  assert.equal(mod.transitionLifecycleState("runtime_discovered", "canary_passed").ok, true);
   assert.equal(mod.transitionLifecycleState("implemented_verified", "reloaded_discovered").ok, true);
   assert.equal(mod.transitionLifecycleState("reloaded_discovered", "canary_passed").ok, true);
 
@@ -119,6 +125,7 @@ function testLifecycleHelpers() {
   assert.equal(mod.computeReloadRequired("canary_passed"), false);
   assert.equal(mod.computeNextRequiredGate("proposed"), "implementation");
   assert.equal(mod.computeNextRequiredGate("implementation_reported"), "implementation_verification");
+  assert.equal(mod.computeNextRequiredGate("declarative_verified"), "runtime_discovery");
   assert.equal(mod.computeNextRequiredGate("implemented_verified"), "agent_reload");
   assert.equal(mod.computeNextRequiredGate("reloaded_discovered"), "canary");
   assert.equal(mod.computeNextRequiredGate("canary_passed"), "none");
@@ -164,6 +171,29 @@ function testLifecycleHelpers() {
   const parsed = mod.parseShapeBuilderSpecFromTask(specJson);
   assert.ok(!("error" in parsed), `Parse should succeed: ${parsed.error || ""}`);
   assert.equal(parsed.targetName, "my-test-shape");
+  assert.equal(parsed.artifactKind, "declarative-workflow", "ordinary builds must default to declarative data");
+  assert.equal(parsed.scope, "user", "ordinary builds must default to durable user scope");
+
+  // Parser is strict: unknown fields and non-string phase fields are rejected
+  // rather than silently discarded/coerced before validation.
+  const unknownField = mod.parseShapeBuilderSpecFromTask(JSON.stringify({
+    ...JSON.parse(specJson),
+    coordinatorShell: "powershell",
+  }));
+  assert.ok("error" in unknownField);
+  assert.match(unknownField.error, /unknown field/);
+  const unknownPhaseField = mod.parseShapeBuilderSpecFromTask(JSON.stringify({
+    ...JSON.parse(specJson),
+    phases: [{ ...JSON.parse(specJson).phases[0], command: "echo unsafe" }],
+  }));
+  assert.ok("error" in unknownPhaseField);
+  assert.match(unknownPhaseField.error, /unknown field/);
+  const coercedPrompt = mod.parseShapeBuilderSpecFromTask(JSON.stringify({
+    ...JSON.parse(specJson),
+    phases: [{ ...JSON.parse(specJson).phases[0], prompt: { command: "no" } }],
+  }));
+  assert.ok("error" in coercedPrompt);
+  assert.match(coercedPrompt.error, /must be strings/);
 
   // Spec validation
   const reserved = new Set(["existing-shape"]);
@@ -184,6 +214,23 @@ function testLifecycleHelpers() {
   // maxSubagents < phase count
   const capSpec = { ...parsed, maxSubagents: 0 };
   assert.ok(mod.validateShapeBuilderSpec(capSpec, reserved).some((e) => /maxSubagents/.test(e)));
+  const fractionalCapSpec = { ...parsed, maxSubagents: 1.5 };
+  assert.ok(mod.validateShapeBuilderSpec(fractionalCapSpec, reserved).some((e) => /maxSubagents/.test(e)),
+    "fractional spawn caps must be rejected before compilation");
+  const unsafeRawName = { ...parsed, targetName: "../Normalized Away" };
+  assert.ok(mod.validateShapeBuilderSpec(unsafeRawName, reserved).some((e) => /already be safe lowercase kebab-case/.test(e)),
+    "unsafe raw names must not be silently normalized into an accepted artifact name");
+  const duplicatePhaseIds = {
+    ...parsed,
+    phases: [parsed.phases[0], { ...parsed.phases[0], name: "phase1!!" }],
+    maxSubagents: 2,
+  };
+  assert.ok(mod.validateShapeBuilderSpec(duplicatePhaseIds, reserved).some((e) => /duplicates normalized phase id/.test(e)));
+  const oversizedPrompt = {
+    ...parsed,
+    phases: [{ ...parsed.phases[0], prompt: "x".repeat(mod.MAX_SHAPE_BUILDER_PROMPT_CHARS + 1) }],
+  };
+  assert.ok(mod.validateShapeBuilderSpec(oversizedPrompt, reserved).some((e) => /prompt must be at most/.test(e)));
 
   // Strict parser must preserve invalid schemaVersion/action so validation rejects them.
   const invalidParsed = mod.parseShapeBuilderSpecFromTask(JSON.stringify({
@@ -234,6 +281,17 @@ function testShapeRendering() {
   assert.match(source, /spawnedCount:\s*0/);
   assert.match(source, /new SpawnGuard\(/);
   assert.match(source, /spawnSubagent\(/);
+
+  // Native rendering must JSON-quote policy text instead of interpolating it
+  // into a generated template literal (backslash + backtick is a breakout edge).
+  const injectionSource = mod.renderShapeSource({
+    ...spec,
+    terminationCondition: "stop\\`); throw new Error('injected') //",
+    evidenceModel: "evidence ${process.env.SECRET}",
+  });
+  assert.doesNotMatch(injectionSource, /\*\*Termination:\*\* stop\\`\)/);
+  assert.match(injectionSource, /"\*\*Termination:\*\* " \+ "stop/);
+  assert.match(injectionSource, /"\*\*Evidence model:\*\* " \+ "evidence \$\{process\.env\.SECRET\}"/);
 
   // Static checks
   const errors = mod.staticCheckGeneratedShape(source);
@@ -453,6 +511,24 @@ async function testLifecyclePersistence() {
     assert.equal(loaded.targetName, "test-persist");
     assert.equal(loaded.lifecycleStatus, "proposed");
     assert.equal(loaded.usable, false);
+
+    // Lifecycle persistence must not follow a file symlink out of the trusted
+    // root. Windows without Developer Mode may deny symlink creation; only
+    // that platform limitation is skipped.
+    const outside = path.join(tempDir, "outside-lifecycle.json");
+    fs.writeFileSync(outside, "{}\n");
+    const symlinkState = mod.buildInitialLifecycleState(tempDir, "symlinked", [], []);
+    let symlinkCreated = false;
+    try {
+      fs.symlinkSync(outside, symlinkState.lifecycleStatePath, "file");
+      symlinkCreated = true;
+    } catch (error) {
+      if (!["EPERM", "EACCES", "ENOTSUP"].includes(error.code)) throw error;
+    }
+    if (symlinkCreated) {
+      await assert.rejects(() => mod.writeLifecycleState(symlinkState), /symlink lifecycle state/);
+      assert.equal(fs.readFileSync(outside, "utf8"), "{}\n", "outside lifecycle target must remain untouched");
+    }
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -527,8 +603,17 @@ async function testTempRootBuildWithFakePi() {
 
   const extRoot = path.join(tempDir, "ext-root");
   prepareTempExtensionRoot(extRoot);
+  const immutableExtensionFiles = ["src/index.ts", "package.json", "README.md", "PARADIGMS.md"];
+  const extensionBaseline = new Map(immutableExtensionFiles.map((file) => [
+    file,
+    fs.readFileSync(path.join(extRoot, file), "utf8"),
+  ]));
 
   process.env.PI_SHAPE_BUILDER_EXTENSION_ROOT = extRoot;
+  const userWorkflowRoot = path.join(tempDir, "user-workflows");
+  const projectWorkflowRoot = path.join(tempDir, "project-workflows");
+  process.env.PI_ORCHESTRATOR_USER_WORKFLOWS_ROOT = userWorkflowRoot;
+  process.env.PI_ORCHESTRATOR_PROJECT_WORKFLOWS_ROOT = projectWorkflowRoot;
 
   try {
     const tool = loadOrchestrateTool();
@@ -569,38 +654,120 @@ async function testTempRootBuildWithFakePi() {
     const details = result.details;
     assert.equal(details.paradigm, "shape-builder");
     assert.equal(details.targetName, "temp-build-test");
-    assert.equal(details.lifecycleStatus, "implemented_verified");
+    assert.equal(details.lifecycleStatus, "canary_passed");
     assert.equal(details.implemented_verified, true);
-    assert.equal(details.usable, false);
-    assert.equal(details.reloadRequired, true);
-    assert.equal(details.nextRequiredGate, "agent_reload");
+    assert.equal(details.usable, true);
+    assert.equal(details.reloadRequired, false);
+    assert.equal(details.nextRequiredGate, "none");
+    assert.equal(details.artifactKind, "declarative-workflow");
+    assert.equal(details.canary.spawnedCount, 0);
+    assert.equal(details.spawnedCount, 0);
 
-    // Generated files should exist in the temp extRoot only
-    assert.ok(fs.existsSync(path.join(extRoot, "src", "shapes", "temp-build-test.ts")),
-      "generated shape should exist in temp root");
-    assert.ok(fs.existsSync(path.join(extRoot, "tests", "test-temp-build-test.cjs")),
-      "generated test should exist in temp root");
-    assert.ok(fs.existsSync(path.join(extRoot, "shape-builder-lifecycle", "temp-build-test.json")),
-      "lifecycle JSON should exist in temp root");
+    // Ordinary builds publish only durable JSON under the selected trusted
+    // workflow root; they do not generate extension TypeScript or tests.
+    const artifactPath = path.join(userWorkflowRoot, "temp-build-test.workflow.json");
+    const lifecyclePath = path.join(userWorkflowRoot, "shape-builder-lifecycle", "temp-build-test.json");
+    assert.ok(fs.existsSync(artifactPath), "declarative workflow should exist in temp user root");
+    assert.ok(fs.existsSync(lifecyclePath), "lifecycle JSON should exist beside the trusted workflow root");
+    assert.equal(fs.existsSync(path.join(extRoot, "src", "shapes", "temp-build-test.ts")), false);
+    assert.equal(fs.existsSync(path.join(extRoot, "tests", "test-temp-build-test.cjs")), false);
 
-    // Generated files should NOT exist in the real project root
-    assert.equal(fs.existsSync(path.join(PROJECT_ROOT, "src", "shapes", "temp-build-test.ts")), false,
-      "generated shape must NOT exist in real project root");
-    assert.equal(fs.existsSync(path.join(PROJECT_ROOT, "tests", "test-temp-build-test.cjs")), false,
-      "generated test must NOT exist in real project root");
+    const lifecycle = JSON.parse(fs.readFileSync(lifecyclePath, "utf8"));
+    assert.equal(lifecycle.lifecycleStatus, "canary_passed");
+    assert.equal(lifecycle.usable, true);
+    assert.equal(lifecycle.reloadRequired, false);
 
-    // Lifecycle JSON should have correct status
-    const lifecycleRaw = fs.readFileSync(path.join(extRoot, "shape-builder-lifecycle", "temp-build-test.json"), "utf8");
-    const lifecycle = JSON.parse(lifecycleRaw);
-    assert.equal(lifecycle.lifecycleStatus, "implemented_verified");
+    // A normal orchestrate invocation in this same loaded process discovers
+    // the new name immediately; no extension reload or static import is used.
+    const immediate = await tool.execute(
+      "test-shape-builder-immediate-canary",
+      { task: "SHAPE_CANARY", paradigm: "temp-build-test", preflight: false, cwd: extRoot },
+      undefined,
+      () => {},
+      { cwd: extRoot },
+    );
+    assert.equal(immediate.details.status, "pass");
+    assert.equal(immediate.details.canary, true);
+    assert.equal(immediate.details.spawnedCount, 0);
 
-    // Continuation template
-    assert.ok(details.continuationTemplate.startsWith("RESUME AFTER PI RELOAD:"));
+    // Differing content may not overwrite an existing durable artifact.
+    const originalArtifact = fs.readFileSync(artifactPath, "utf8");
+    const differingResult = await tool.execute(
+      "test-shape-builder-collision",
+      { task: JSON.stringify({ ...JSON.parse(specJson), purpose: "Different content." }), paradigm: "shape-builder", preflight: false, cwd: extRoot },
+      undefined,
+      () => {},
+      { cwd: extRoot },
+    );
+    assert.equal(differingResult.details.status, "fail");
+    assert.match(differingResult.details.failureReason, /already exists and differs/);
+    assert.equal(fs.readFileSync(artifactPath, "utf8"), originalArtifact, "collision must preserve original bytes");
+
+    // Explicit project scope publishes beneath the project-owned trusted root.
+    const projectSpec = {
+      ...JSON.parse(specJson),
+      targetName: "temp-project-build-test",
+      scope: "project",
+    };
+    const projectResult = await tool.execute(
+      "test-shape-builder-project-scope",
+      { task: JSON.stringify(projectSpec), paradigm: "shape-builder", preflight: false, cwd: extRoot, maxSubagents: 5 },
+      undefined,
+      () => {},
+      { cwd: extRoot },
+    );
+    assert.equal(projectResult.details.status, "pass");
+    assert.equal(projectResult.details.scope, "project");
+    assert.ok(fs.existsSync(path.join(projectWorkflowRoot, "temp-project-build-test.workflow.json")));
+
+    // A user-scope build may not claim success when a same-name project entry
+    // has deterministic precedence.
+    const hiddenUserResult = await tool.execute(
+      "test-shape-builder-project-precedence",
+      { task: JSON.stringify({ ...projectSpec, scope: "user" }), paradigm: "shape-builder", preflight: false, cwd: extRoot },
+      undefined,
+      () => {},
+      { cwd: extRoot },
+    );
+    assert.equal(hiddenUserResult.details.status, "fail");
+    assert.match(hiddenUserResult.details.failureReason, /already has precedence/);
+    assert.equal(fs.existsSync(path.join(userWorkflowRoot, "temp-project-build-test.workflow.json")), false);
+
+    // Existing symlinks are collisions, never publication targets. Skip only
+    // when the host cannot create symlinks (common on Windows without Dev Mode).
+    const outsideArtifact = path.join(tempDir, "outside.workflow.json");
+    fs.writeFileSync(outsideArtifact, originalArtifact);
+    const symlinkArtifact = path.join(userWorkflowRoot, "symlink-build-test.workflow.json");
+    let symlinkCreated = false;
+    try {
+      fs.symlinkSync(outsideArtifact, symlinkArtifact, "file");
+      symlinkCreated = true;
+    } catch (error) {
+      if (!["EPERM", "EACCES", "ENOTSUP"].includes(error.code)) throw error;
+    }
+    if (symlinkCreated) {
+      const symlinkResult = await tool.execute(
+        "test-shape-builder-symlink-collision",
+        { task: JSON.stringify({ ...JSON.parse(specJson), targetName: "symlink-build-test" }), paradigm: "shape-builder", preflight: false, cwd: extRoot },
+        undefined,
+        () => {},
+        { cwd: extRoot },
+      );
+      assert.equal(symlinkResult.details.status, "fail");
+      assert.match(symlinkResult.details.failureReason, /non-regular workflow artifact/);
+    }
+
+    for (const [file, baseline] of extensionBaseline) {
+      assert.equal(fs.readFileSync(path.join(extRoot, file), "utf8"), baseline, `ordinary build must not edit ${file}`);
+    }
+    assert.equal(fs.existsSync(logPath), false, "declarative build/discovery/canary must spawn no Pi subprocess");
 
   } finally {
     delete process.env.PI_CLI_PATH;
     delete process.env.FAKE_PI_LOG;
     delete process.env.PI_SHAPE_BUILDER_EXTENSION_ROOT;
+    delete process.env.PI_ORCHESTRATOR_USER_WORKFLOWS_ROOT;
+    delete process.env.PI_ORCHESTRATOR_PROJECT_WORKFLOWS_ROOT;
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 }
@@ -612,20 +779,22 @@ async function testVerifierFailFixture() {
   const logPath = path.join(tempDir, "fake-pi-log.jsonl");
   process.env.PI_CLI_PATH = path.join(__dirname, "fake-pi.cjs");
   process.env.FAKE_PI_LOG = logPath;
-  process.env.FAKE_PI_SHAPE_BUILDER_VERIFIER_STATUS = "fail";
 
   const extRoot = path.join(tempDir, "ext-root");
   prepareTempExtensionRoot(extRoot);
 
   process.env.PI_SHAPE_BUILDER_EXTENSION_ROOT = extRoot;
+  process.env.PI_ORCHESTRATOR_USER_WORKFLOWS_ROOT = path.join(tempDir, "user-workflows");
+  process.env.PI_ORCHESTRATOR_PROJECT_WORKFLOWS_ROOT = path.join(tempDir, "project-workflows");
 
   try {
     const tool = loadOrchestrateTool();
-    const specJson = JSON.stringify({
+    const spec = {
       schemaVersion: 1,
       action: "build",
-      targetName: "verifier-fail-test",
-      purpose: "Test verifier fail fixture.",
+      artifactKind: "native-shape",
+      targetName: "native-success-test",
+      purpose: "Test explicit native lifecycle.",
       phases: [{ name: "p1", role: "r1", agentName: "coder", prompt: "do", expectedOutput: "done" }],
       maxSubagents: 3,
       maxIterations: 1,
@@ -633,8 +802,40 @@ async function testVerifierFailFixture() {
       evidenceModel: "Evidence.",
       failureBehavior: "Fail.",
       userFacingExplanation: "Test.",
-    });
+    };
 
+    // A native build must not shadow an existing durable declarative name.
+    fs.mkdirSync(process.env.PI_ORCHESTRATOR_USER_WORKFLOWS_ROOT, { recursive: true });
+    fs.writeFileSync(path.join(process.env.PI_ORCHESTRATOR_USER_WORKFLOWS_ROOT, "native-collision-test.workflow.json"), "{}\n");
+    const collisionResult = await tool.execute(
+      "test-shape-builder-native-collision",
+      { task: JSON.stringify({ ...spec, targetName: "native-collision-test" }), paradigm: "shape-builder", preflight: false, cwd: extRoot, maxSubagents: 5 },
+      undefined,
+      () => {},
+      { cwd: extRoot },
+    );
+    assert.equal(collisionResult.details.status, "fail");
+    assert.match(collisionResult.details.failureReason, /collides with existing user workflow artifact/);
+    assert.equal(fs.existsSync(path.join(extRoot, "src", "shapes", "native-collision-test.ts")), false);
+
+    // Explicit native mode retains its historical verifier and reload gate.
+    const nativeSuccess = await tool.execute(
+      "test-shape-builder-native-success",
+      { task: JSON.stringify(spec), paradigm: "shape-builder", preflight: false, cwd: extRoot, maxSubagents: 5 },
+      undefined,
+      () => {},
+      { cwd: extRoot },
+    );
+    assert.equal(nativeSuccess.details.status, "pass");
+    assert.equal(nativeSuccess.details.lifecycleStatus, "implemented_verified");
+    assert.equal(nativeSuccess.details.usable, false);
+    assert.equal(nativeSuccess.details.reloadRequired, true);
+    assert.equal(nativeSuccess.details.nextRequiredGate, "agent_reload");
+    assert.equal(nativeSuccess.details.spawnedCount, 1);
+    assert.ok(fs.existsSync(path.join(extRoot, "src", "shapes", "native-success-test.ts")));
+
+    process.env.FAKE_PI_SHAPE_BUILDER_VERIFIER_STATUS = "fail";
+    const specJson = JSON.stringify({ ...spec, targetName: "verifier-fail-test", purpose: "Test verifier fail fixture." });
     const result = await tool.execute(
       "test-shape-builder-verifier-fail",
       {
@@ -661,6 +862,8 @@ async function testVerifierFailFixture() {
     delete process.env.PI_CLI_PATH;
     delete process.env.FAKE_PI_LOG;
     delete process.env.PI_SHAPE_BUILDER_EXTENSION_ROOT;
+    delete process.env.PI_ORCHESTRATOR_USER_WORKFLOWS_ROOT;
+    delete process.env.PI_ORCHESTRATOR_PROJECT_WORKFLOWS_ROOT;
     delete process.env.FAKE_PI_SHAPE_BUILDER_VERIFIER_STATUS;
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -725,7 +928,7 @@ async function run() {
   await testParadigmCreatorRegression();
   await testTempRootBuildWithFakePi();
   await testVerifierFailFixture();
-  console.log("PASS shape-builder: registry, static, lifecycle, rendering, verifier JSON, temp-root build, verifier-fail gate, persistence, continuation");
+  console.log("PASS shape-builder: strict schema/caps, lifecycle/path safety, reload-free declarative build/discovery/canary, collision protection, native reload regression");
 }
 
 run().catch((error) => {

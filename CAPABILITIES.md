@@ -2,7 +2,7 @@
 
 This inventory describes the reusable harness shipped in this repository. Counts refer to the sanitized tree, not to private runtime state.
 
-## Deterministic orchestration — 15 shapes
+## Deterministic orchestration — 16 shapes
 
 | Shape | Purpose |
 |---|---|
@@ -13,7 +13,8 @@ This inventory describes the reusable harness shipped in this repository. Counts
 | `verify-only` | Read-only evidence verification without execution |
 | `paradigm-creator` | Propose bounded reusable orchestration paradigms |
 | `shape-builder` | Deterministically generate, test, reload-gate, and canary a shape |
-| `safe-github-publish` | Sanitized private-first GitHub publication with remote verification |
+| `ssi-single-writer-exclusive-lane` | Serialized SSI writer/native-gate workflow with lock and bounded repair |
+| `venue-rescue-synthesis` | Bounded venue-rescue research/synthesis workflow |
 | `frozen-gate-fix-loop` | Bounded fixes against a content-hash-locked specification |
 | `evidence-audit` | Re-audit a completed run from frozen evidence |
 | `independent-replication` | Two isolated implementations and independent verification |
@@ -157,4 +158,4 @@ NenFlow v3 and its `pev-*` roles are retired. Historical runs, compatibility pro
 - gitleaks configuration and security docs are included;
 - Git backup uses isolated refs and never mutates the working branch;
 - dangerous shell commands require confirmation;
-- `safe-github-publish` provides delegated staging, scanning, private-first creation, and independent remote verification.
+- Publishing safeguards are documented in `docs/SECURITY.md`; routine Git publication remains an explicit user action.

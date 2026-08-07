@@ -1,6 +1,6 @@
 ---
 name: orchestration-wrapper
-description: Rich visible orchestration wrapper for Pi runs. Selects optional specialist `orch-*` sidecar agents for intake, research, planning, execution, verification, observation, witnessing, and postmortem capture. For durable-artifact orchestration runs, defer to the deterministic `/orchestrate` system.
+description: Rich visible orchestration wrapper for Pi runs. Selects optional specialist `orch-*` sidecar agents for intake, research, planning, execution, verification, observation, witnessing, and postmortem capture. For durable-artifact PEV runs, defer to the deterministic `/orchestrate` system.
 ---
 
 # Rich Orchestration Wrapper
@@ -21,9 +21,9 @@ The visible/current agent remains the ORCHESTRATOR and must not execute the main
 
 ## Supported Modes
 
-### Mode A — Deterministic orchestrator
+### Mode A — Deterministic orchestrator (RETIRED NenFlow slot)
 
-NenFlow v3 and its `pev-*` PEV spine are retired (2026-07-18). When the user asks for durable artifacts, explicit intake, or full phase orchestration, route the run through the deterministic `/orchestrate` command (`~/.pi/pi-orchestrator-extension`). It owns intake (including intake.md), planning, execution, and verification. `orch-*` sidecars may still be called around it. When a user or task explicitly requests a sidecar artifact, `ATT_SIDE_<PHASE>_<AGENT>.md` is the optional naming convention; ordinary sidecar responses need no artifact file.
+NenFlow v3 and its `pev-*` PEV spine are retired (2026-07-18). When the user asks for durable artifacts, explicit intake, or full phase orchestration, route the run through the deterministic `/orchestrate` command (`~/.pi/pi-orchestrator-extension`). It owns intake (including intake.md), planning, execution, and verification. `orch-*` sidecars may still be called around it; sidecar outputs are saved as `ATT_SIDE_<PHASE>_<AGENT>.md`.
 
 ### Mode B — Lightweight rich run
 
@@ -79,13 +79,17 @@ When calling a specialist subagent, include:
 - Do not call observer/witness agents for correctness verdicts.
 - Do not let verifier sidecars overwrite the deterministic orchestrator's final verdict.
 - Do not run more agents than needed; prefer 1-3 sidecars for small tasks.
-- **Failure recovery:** If a subagent or shape fails, diagnose the specific defect, repair it, and re-run while there is material progress. Use a different approach, independent diagnosis, model/provider fallback, or reversible scope reduction when useful. Involve the user only for a material subjective choice, irreversible action, unavailable credential/hardware, or sustained no-progress.
-- Do not add role-integrity ledgers, pin maps, closeout receipts, or other run paperwork beyond artifacts produced by the selected deterministic shape.
+- **Repair-only fallback:** If subagents fail or the shape/tool fails: diagnose, classify (product defect / shape defect / gate defect per `AGENTS.md`), repair the requested shape/tool or run a bounded gate repair, resume on success, escalate on failure. Never execute the main task directly and never silently switch to a different orchestration shape to complete the main task. Provider/model fallback is allowed.
+- **Gate-defect verdict:** A verification check that is contradictory or structurally unsatisfiable gets a GATE_DEFECT verdict and a bounded gate repair (see `AGENTS.md`), not a product FAIL and not a new full run.
 
-## Context Continuity
+## Orchestrator Role Integrity Ledger
 
-Use `context_usage` during long runs. When context reaches the configured high-water mark (85% by default), finish the current step, persist a short handoff, schedule continuation, and resume in a fresh session rather than starting another large read or execution wave.
+Every run must produce an *Orchestrator Role Integrity Ledger* at the tier defined in `AGENTS.md`: **full ledger** for runs touching product code, evidence, or Git history (requested shape/tool; current role = ORCHESTRATOR; subagents spawned + roles; subagent artifacts; direct orchestrator actions; classification; explicit statement whether orchestrator executed any main-task work; context checkpoints; repair attempts + outcomes; final role-integrity verdict); **lightweight one-page ledger** for repair-only runs (what failed, what was repaired before/after, who repaired it, verdict).
+
+## Orchestrator Self-Handoff (70%)
+
+If orchestrator context exceeds 70% during any run, create a self-handoff, save state, schedule continuation, and resume as orchestrator in the fresh session. This 70% threshold applies to the orchestrator role specifically; it is distinct from per-role subagent context thresholds.
 
 ## Completion Output
 
-End with the selected mode, agents called, files changed or artifacts written, machine verification performed, observed result, and any genuinely unverified item.
+End with selected mode, agents called, files changed or artifacts written, verification result, a final role-integrity verdict line, and recommended next step.

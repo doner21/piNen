@@ -53,9 +53,9 @@ Recommended implementation targets:
 
 ## Relevant files
 
-- `~/.pi/agent/skills/spotify-play/SKILL.md`
-- `~/.pi/agent/skills/spotify-play/intake.md`
-- `~/.pi/agent/AGENTS.md` (optional global policy hook)
+- `~\.pi\agent\skills\spotify-play\SKILL.md`
+- `~\.pi\agent\skills\spotify-play\intake.md`
+- `~\.pi\agent\AGENTS.md` (optional global policy hook)
 
 ---
 

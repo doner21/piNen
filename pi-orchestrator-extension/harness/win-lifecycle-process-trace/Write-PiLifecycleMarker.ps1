@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Write-PiLifecycleMarker.ps1 — HARNESS ARTIFACT
     Emits a timestamped action marker record to markers.jsonl per the planner's

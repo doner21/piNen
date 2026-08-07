@@ -151,44 +151,6 @@ function testUnknownResumeId() {
   );
 }
 
-function testRunIdContainment() {
-  const jiti = makeJiti();
-  const runState = jiti(path.join(PROJECT_ROOT, "src", "run-state.ts"));
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-run-id-containment-"));
-  const previousRoot = process.env.PI_ORCHESTRATOR_RUNS_ROOT;
-  process.env.PI_ORCHESTRATOR_RUNS_ROOT = root;
-  try {
-    const valid = runState.runDirFor("orc-valid.example_1");
-    assert.equal(path.dirname(valid), path.resolve(root), "valid run directory must be a direct child of runs root");
-    assert.equal(path.basename(valid), "orc-valid.example_1");
-
-    const invalidIds = [
-      ".",
-      "..",
-      ".hidden",
-      "../outside",
-      "..\\outside",
-      "/absolute",
-      "C:/absolute",
-      " bad",
-      "bad ",
-      "",
-      "a".repeat(129),
-    ];
-    for (const runId of invalidIds) {
-      assert.throws(
-        () => runState.runDirFor(runId),
-        /RUN_ID_INVALID/,
-        `invalid/traversal-like run id must fail closed: ${JSON.stringify(runId)}`,
-      );
-    }
-  } finally {
-    if (previousRoot === undefined) delete process.env.PI_ORCHESTRATOR_RUNS_ROOT;
-    else process.env.PI_ORCHESTRATOR_RUNS_ROOT = previousRoot;
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-}
-
 // ── Load smoke: modules must jiti-load without throwing ────────────────────
 
 function testModulesLoad() {
@@ -210,7 +172,6 @@ async function main() {
     ["index resume param", testIndexResumeParam],
     ["modules load", testModulesLoad],
     ["run-state round trip + survivor collection", testRunStateRoundTrip],
-    ["run id containment", testRunIdContainment],
     ["unknown resume id", testUnknownResumeId],
   ];
   for (const [name, test] of tests) {

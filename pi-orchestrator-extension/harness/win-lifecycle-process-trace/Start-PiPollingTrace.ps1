@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Start-PiPollingTrace.ps1 -- HARNESS ARTIFACT
     Starts a NON-ADMIN bounded polling-based process trace for Pi lifecycle

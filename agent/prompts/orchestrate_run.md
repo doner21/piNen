@@ -4,7 +4,7 @@ argument-hint: "<task>"
 ---
 Load and follow the global skill at `~/.pi/agent/skills/orchestration-wrapper/SKILL.md`.
 
-You are in explicit orchestration mode: coordinate the selected agents, use the wrapper's machine checks, and report concrete results without adding extra run paperwork.
+You remain the ORCHESTRATOR; do not execute the main task directly; emit the Orchestrator Role Integrity Ledger; on failure, repair the requested shape (do not switch shapes).
 
 Run a rich visible orchestration for this task:
 

@@ -2,8 +2,8 @@
  * Shape: composable-pipeline
  * ===========================
  * A composable orchestration shape that supports dynamic pipeline composition
- * via natural language. Supports hypothesize, critique, synthesize, plan,
- * execute, and verify phases with configurable concurrency per phase.
+ * via natural language. Supports research, hypothesize, critique, synthesize,
+ * plan, execute, and verify phases with configurable cardinality per phase.
  *   "use 3 hypothesizers then 2 critics then a synthesizer then a planner,
  *    then 3 executors, then a verifier"
  *   "just hypothesize and plan"  /  "full wave with 2 verifiers"
@@ -18,10 +18,10 @@ import {
   runWorkGraph,
   buildExecutionWaves,
   runBoundedPool,
+  preflightProviderHealth,
   formatRoutedModel,
   truncateWithNotice,
   throwIfAborted,
-  SubagentTerminalAmbiguousError,
   type AgentProfile,
   type SubagentResult,
 } from "../substrate";
@@ -33,17 +33,23 @@ import type {
   NormalizedParams,
   InferredModelRouting,
 } from "../types";
-import { resolveRouteOverride, formatRouteLabel } from "../routes";
-import { normalizeAnthropicModelId, resolveComposedPhaseModel } from "../model-aliases";
+import { resolveRouteWithFallback, formatRouteLabel, type ResolvedRoute } from "../routes";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { estimateExecutorContextBudget } from "../executor-recovery/budget-estimator";
 import { injectContinuationGuardrail } from "../executor-recovery/contract-types";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
-export type PhaseKind = "hypothesize" | "critique" | "synthesize" | "plan" | "execute" | "verify";
+export type PhaseKind = "research" | "hypothesize" | "critique" | "synthesize" | "plan" | "execute" | "verify";
 
 const PHASE_ORDER: readonly PhaseKind[] = [
+  "research", "hypothesize", "critique", "synthesize", "plan", "execute", "verify",
+];
+/** `full wave` predates research and intentionally retains its original six phases. */
+const LEGACY_FULL_WAVE_ORDER: readonly PhaseKind[] = [
   "hypothesize", "critique", "synthesize", "plan", "execute", "verify",
 ];
 
@@ -54,8 +60,15 @@ export interface PipelinePhase {
   promptBuilder: (index: number) => string;
 }
 
-export interface PipelineConfig { phases: PipelinePhase[] }
+export interface PipelineConfig {
+  phases: PipelinePhase[];
+  /** True only when the caller supplied an authoritative ordered declaration. */
+  explicitOrdered?: boolean;
+  /** True when only/just caused legacy prose to limit the selected phase list. */
+  explicitLimited?: boolean;
+}
 
+interface ResearchFinding { index: number; agentName: string; text: string }
 interface Hypothesis { index: number; agentName: string; text: string }
 interface Critique { index: number; agentName: string; text: string }
 interface Synthesis { index: number; agentName: string; text: string }
@@ -66,6 +79,7 @@ interface PlanTask {
 }
 
 interface Plan { tasks: PlanTask[]; notes: string; raw?: unknown }
+interface CandidatePlan { index: number; agentName: string; plan: Plan; text: string }
 
 interface ExecutorOutput {
   taskId: string; description: string; agentName: string;
@@ -75,6 +89,41 @@ interface ExecutorOutput {
 interface VerifierVote {
   verifierIndex: number; agentName: string; status: "pass" | "fail";
   reasons: string[]; raw: string; durationMs: number;
+}
+
+interface PipelineAttempt {
+  attempt: number;
+  executorOutputs: ExecutorOutput[];
+  voteResult: { votes: VerifierVote[]; passes: number; fails: number };
+  status: "pass" | "fail";
+}
+
+type ComposableRole = "planner" | "executor" | "verifier";
+
+interface RoleRoute {
+  primary: ResolvedRoute;
+  fallbacks: ResolvedRoute[];
+}
+
+type ComposableRoutes = Record<ComposableRole, RoleRoute>;
+type SelectedRoutes = Record<ComposableRole, ResolvedRoute>;
+
+interface RoutingEvidence {
+  phase: PhaseKind;
+  phaseIndex: number;
+  role: ComposableRole;
+  agentName: string;
+  provider?: string;
+  model?: string;
+  evidence: string;
+}
+
+interface PreflightEvidence {
+  role: ComposableRole;
+  provider: string;
+  model: string;
+  status: "healthy" | "failed" | "skipped";
+  selected: boolean;
 }
 
 // ── Constants ──────────────────────────────────────────────────────────────
@@ -88,7 +137,28 @@ const MAX_PHASE_CHARS = 4_000;
 const DEFAULT_EXEC_CONCURRENCY = 5;
 const MAX_TASK_WORDS = 200;
 
-const PHASE_FALLBACK_MODEL = { provider: "deepseek", model: "deepseek-v4-pro" };
+const PHASE_LIMITS: Record<PhaseKind, number> = {
+  research: MAX_PHASE_CONCURRENCY,
+  hypothesize: MAX_PHASE_CONCURRENCY,
+  critique: MAX_PHASE_CONCURRENCY,
+  synthesize: MAX_PHASE_CONCURRENCY,
+  plan: MAX_PHASE_CONCURRENCY,
+  execute: MAX_PHASE_CONCURRENCY,
+  verify: MAX_VERIFIER_COUNT,
+};
+
+// Deterministic role-safe defaults. Composable phases never derive a route
+// from an agent profile or an inferred runtime-role label.
+const DEFAULT_ROLE_ROUTES: Record<ComposableRole, ResolvedRoute> = {
+  planner: { provider: "openai-codex", model: "gpt-5.6-sol" },
+  executor: { provider: "openai-codex", model: "gpt-5.6-sol" },
+  verifier: { provider: "openai-codex", model: "gpt-5.5" },
+};
+const DEFAULT_EXECUTOR_FALLBACK: ResolvedRoute = {
+  provider: "openai-codex",
+  model: "gpt-5.5",
+};
+const FORBIDDEN_ROUTE_RE = /(?:deepseek|openrouter)/i;
 
 // ── Exhaustion detection ───────────────────────────────────────────────────
 
@@ -113,8 +183,6 @@ interface PhaseMeta {
   kind: PhaseKind;
   /** Regex for detecting this phase in NL task text. */
   detect: RegExp;
-  /** Regex for extracting count ("3 hypothesizers"). */
-  countRe: RegExp;
   /** Regex for negating this phase. */
   negateRe: RegExp;
 }
@@ -123,39 +191,38 @@ interface PhaseMeta {
 // then each appends the phase-specific word list with plural forms and optional trailing 's'.
 const PHASE_META: PhaseMeta[] = [
   {
+    kind: "research",
+    detect: /\b(?:reconnaissance|research(?:ers?|ed|ing)?|scouts?|scouting)\b/i,
+    negateRe: /\b(?:no\s+(?:need\s+(?:for|to)\s+)?|without\s+|skip\s+(?:the\s+)?)(?:reconnaissance|research(?:ers?|ing)?|scouts?|scouting)\b/i,
+  },
+  {
     kind: "hypothesize",
     detect: /\b(?:hypothesiz(?:ers?|e[ds]?|ing)|hypothes(?:is|es))\b/i,
-    countRe: /(?:\b(\d+)\s*(?:hypothesiz(?:ers?|e)|hypothes(?:is|es))\b|\b(?:hypothesiz(?:ers?|e)|hypothes(?:is|es))\b\s*(?:x|×)\s*(\d+)\b)/i,
     negateRe: /\b(?:no\s+(?:need\s+(?:for|to)\s+)?|without\s+|skip\s+(?:the\s+)?)(?:hypothesiz(?:ers?|e[ds]?|ing)|hypothes(?:is|es))\b/i,
   },
   {
     kind: "critique",
     detect: /\b(?:critics?|critiques?|reviews?|reviewers?)\b/i,
-    countRe: /(?:\b(\d+)\s*(?:critics?|critiques?|reviews?|reviewers?)\b|\b(?:critics?|critiques?|reviews?|reviewers?)\b\s*(?:x|×)\s*(\d+)\b)/i,
     negateRe: /\b(?:no\s+(?:need\s+(?:for|to)\s+)?|without\s+|skip\s+(?:the\s+)?)(?:critics?|critiques?|reviews?|reviewers?)\b/i,
   },
   {
     kind: "synthesize",
     detect: /\b(?:synthesiz(?:ers?|e[ds]?|ing)|synthes(?:is|es))\b/i,
-    countRe: /(?:\b(\d+)\s*(?:synthesiz(?:ers?|e)|synthes(?:is|es))\b|\b(?:synthesiz(?:ers?|e)|synthes(?:is|es))\b\s*(?:x|×)\s*(\d+)\b)/i,
     negateRe: /\b(?:no\s+(?:need\s+(?:for|to)\s+)?|without\s+|skip\s+(?:the\s+)?)(?:synthesiz(?:ers?|e[ds]?|ing)|synthes(?:is|es))\b/i,
   },
   {
     kind: "plan",
     detect: /\b(?:planners?|plans?|planning|strategiz(?:e[ds]?|ing))\b/i,
-    countRe: /(?:\b(\d+)\s*(?:planners?|plans?|planning)\b|\b(?:planners?|plans?|planning)\b\s*(?:x|×)\s*(\d+)\b)/i,
     negateRe: /\b(?:no\s+(?:need\s+(?:for|to)\s+)?|without\s+|skip\s+(?:the\s+)?)(?:planners?|plans?|planning|strategiz(?:e[ds]?|ing))\b/i,
   },
   {
     kind: "execute",
     detect: /\b(?:executors?|execut(?:e[ds]?|ions?|ing)|implement(?:s|ers?|ings?|ations?)?|build(?:s|ers?|ings?)?)\b/i,
-    countRe: /(?:\b(\d+)\s*(?:executors?|execut(?:e|ions?)|implement(?:ers?|ations?)|builders?)\b|\b(?:executors?|execut(?:e|ions?)|implement(?:ers?|ations?)|builders?)\b\s*(?:x|×)\s*(\d+)\b)/i,
     negateRe: /\b(?:no\s+(?:need\s+(?:for|to)\s+)?|without\s+|skip\s+(?:the\s+)?)(?:executors?|execut(?:e[ds]?|ions?|ing)|implement(?:s|ers?|ings?|ations?)?|build(?:s|ers?|ings?)?)\b/i,
   },
   {
     kind: "verify",
     detect: /\b(?:verif(?:iers?|y|ies|ied|ying|ications?)|checks?|checkers?|checking|validat(?:ors?|e[ds]?|ing|ions?))\b/i,
-    countRe: /(?:\b(\d+)\s*(?:verif(?:iers?|y|ications?)|checks?|checkers?|validat(?:ors?|e|ions?))\b|\b(?:verif(?:iers?|y|ications?)|checks?|checkers?|validat(?:ors?|e|ions?))\b\s*(?:x|×)\s*(\d+)\b)/i,
     negateRe: /\b(?:no\s+(?:need\s+(?:for|to)\s+)?|without\s+|skip\s+(?:the\s+)?)(?:verif(?:iers?|y|ies|ied|ying|ications?)|checks?|checkers?|checking|validat(?:ors?|e[ds]?|ing|ions?))\b/i,
   },
 ];
@@ -164,26 +231,136 @@ function getMeta(kind: PhaseKind): PhaseMeta {
   return PHASE_META.find((m) => m.kind === kind)!;
 }
 
-/** Resolve per-phase model override from inferredModelRouting.runtimeRoles or fall back to core role models. */
-function getPhaseModelOverride(phaseKind: PhaseKind, params: NormalizedParams, inferred: InferredModelRouting): { model?: string; provider?: string } | undefined {
-  const roleMap: Record<string, string> = { hypothesize: "hypothesizer", critique: "critic", synthesize: "synthesizer" };
-  const roleName = roleMap[phaseKind];
-  if (roleName) {
-    // Composed middle phases (hypothesize/critique/synthesize) are NOT reachable
-    // by the planner/executor/verifier override params. Resolve against a
-    // runtime-role hint, else INHERIT an explicitly-routed valid role default
-    // (executor route first, then planner) rather than any label-derived id.
-    // Any residual dotted anthropic id is normalized to dashes (WAVE3-SPEC
-    // ITEM C; bug composable-pipeline-composed-phase-malformed-sonnet-model-id.md).
-    return resolveComposedPhaseModel({
-      runtimeRole: inferred.runtimeRoles?.[roleName],
-      executorRoute: toMO(params.executorModel, params.executorProvider),
-      plannerRoute: toMO(params.plannerModel, params.plannerProvider),
-    });
+function roleForPhase(kind: PhaseKind): ComposableRole {
+  if (kind === "execute") return "executor";
+  if (kind === "verify") return "verifier";
+  return "planner";
+}
+
+function splitFallbackRoutes(
+  models: string | undefined,
+  providers: string | undefined,
+  roleDefault: ResolvedRoute,
+): ResolvedRoute[] {
+  const modelList = (models ?? "").split(",").map((value) => value.trim()).filter(Boolean);
+  const providerList = (providers ?? "").split(",").map((value) => value.trim()).filter(Boolean);
+  const count = Math.max(modelList.length, providerList.length);
+  const routes: ResolvedRoute[] = [];
+  for (let index = 0; index < count; index++) {
+    routes.push(resolveRouteWithFallback(
+      modelList[index] ?? modelList[modelList.length - 1],
+      providerList[index] ?? providerList[providerList.length - 1],
+      roleDefault,
+    ));
   }
-  if (phaseKind === "plan") return { model: params.plannerModel, provider: params.plannerProvider };
-  if (phaseKind === "verify") return { model: params.verifierModel, provider: params.verifierProvider };
-  return { model: params.executorModel, provider: params.executorProvider };
+  return routes;
+}
+
+function assertAllowedRoute(role: ComposableRole, route: ResolvedRoute, source: string): void {
+  if (FORBIDDEN_ROUTE_RE.test(route.provider) || FORBIDDEN_ROUTE_RE.test(route.model)) {
+    throw new PipelineConfigurationError(
+      "FORBIDDEN_MODEL_ROUTE",
+      `${source} route for ${role} uses forbidden provider/model ${route.provider}/${route.model}.`,
+      { role, source, provider: route.provider, model: route.model },
+    );
+  }
+}
+
+function resolveComposableRoutes(params: NormalizedParams): ComposableRoutes {
+  const plannerPrimary = resolveRouteWithFallback(
+    params.plannerModel, params.plannerProvider, DEFAULT_ROLE_ROUTES.planner,
+  );
+  const executorPrimary = resolveRouteWithFallback(
+    params.executorModel, params.executorProvider, DEFAULT_ROLE_ROUTES.executor,
+  );
+  const verifierPrimary = resolveRouteWithFallback(
+    params.verifierModel, params.verifierProvider, DEFAULT_ROLE_ROUTES.verifier,
+  );
+  const routes: ComposableRoutes = {
+    planner: {
+      primary: plannerPrimary,
+      fallbacks: splitFallbackRoutes(
+        params.plannerFallbackModel, params.plannerFallbackProvider, DEFAULT_ROLE_ROUTES.planner,
+      ),
+    },
+    executor: {
+      primary: executorPrimary,
+      fallbacks: splitFallbackRoutes(
+        params.executorFallbackModel, params.executorFallbackProvider, DEFAULT_EXECUTOR_FALLBACK,
+      ),
+    },
+    verifier: {
+      primary: verifierPrimary,
+      fallbacks: splitFallbackRoutes(
+        params.verifierFallbackModel, params.verifierFallbackProvider, DEFAULT_ROLE_ROUTES.verifier,
+      ),
+    },
+  };
+  if (routes.executor.fallbacks.length === 0 &&
+      (executorPrimary.provider !== DEFAULT_EXECUTOR_FALLBACK.provider ||
+       executorPrimary.model !== DEFAULT_EXECUTOR_FALLBACK.model)) {
+    routes.executor.fallbacks.push(DEFAULT_EXECUTOR_FALLBACK);
+  }
+  for (const role of ["planner", "executor", "verifier"] as const) {
+    assertAllowedRoute(role, routes[role].primary, "primary");
+    routes[role].fallbacks.forEach((route, index) => assertAllowedRoute(role, route, `fallback ${index + 1}`));
+  }
+  return routes;
+}
+
+async function preflightComposableRoutes(
+  routes: ComposableRoutes,
+  phases: PipelinePhase[],
+  params: NormalizedParams,
+  signal: AbortSignal | undefined,
+  emit: (text: string) => void,
+  evidence: PreflightEvidence[],
+): Promise<SelectedRoutes> {
+  const selected: SelectedRoutes = {
+    planner: routes.planner.primary,
+    executor: routes.executor.primary,
+    verifier: routes.verifier.primary,
+  };
+  const usedRoles = new Set(phases.map((phase) => roleForPhase(phase.kind)));
+
+  for (const role of ["planner", "executor", "verifier"] as const) {
+    if (!usedRoles.has(role)) continue;
+    const candidates = [routes[role].primary, ...routes[role].fallbacks];
+    if (!params.preflight) {
+      evidence.push({ role, ...candidates[0], status: "skipped", selected: true });
+      continue;
+    }
+
+    let healthy: ResolvedRoute | undefined;
+    for (const [index, route] of candidates.entries()) {
+      const [result] = await preflightProviderHealth(
+        [{ roles: [`composable-${role}`], provider: route.provider, model: route.model }],
+        {
+          cwd: params.cwd,
+          allowLocalModel: params.allowLocalModel,
+          signal,
+          onProgress: emit,
+          timeoutMs: 20_000,
+        },
+      );
+      const status = result?.ok ? "healthy" : "failed";
+      evidence.push({ role, ...route, status, selected: Boolean(result?.ok) });
+      if (result?.ok) {
+        healthy = route;
+        if (index > 0) emit(`Composable ${role} route selected fallback ${index}: ${route.provider}/${route.model}.`);
+        break;
+      }
+    }
+    if (!healthy) {
+      throw new PipelineConfigurationError(
+        "ROUTE_PREFLIGHT_FAILED",
+        `No healthy ${role} route remained after ${candidates.length} preflight attempt(s).`,
+        { role, candidates },
+      );
+    }
+    selected[role] = healthy;
+  }
+  return selected;
 }
 
 // ── Shape export ───────────────────────────────────────────────────────────
@@ -191,8 +368,8 @@ function getPhaseModelOverride(phaseKind: PhaseKind, params: NormalizedParams, i
 export const composablePipelineShape: OrchestrationShape = {
   name: "composable-pipeline",
   description:
-    "Dynamic pipeline composition via natural language. Supports hypothesize, critique, " +
-    "synthesize, plan, execute, and verify phases with configurable concurrency per phase.",
+    "Dynamic pipeline composition via natural language. Supports research, hypothesize, critique, " +
+    "synthesize, plan, execute, and verify phases with configurable cardinality per phase.",
   run: runComposablePipeline,
 };
 
@@ -205,81 +382,130 @@ async function runComposablePipeline(
   const emit = (text: string) => onUpdate?.({ content: [{ type: "text", text }] });
   const spawnGuard = new SpawnGuard(params.maxSubagents);
 
-  // Parse pipeline from NL
+  // Parse and validate the entire declared pipeline before the first spawn.
   emit("Composable pipeline: parsing configuration...");
   const rawConfig = parsePipelineConfig(params.task);
   const phases = resolvePipelineConfig(rawConfig, params);
+  validatePipelineBeforeSpawn(params.task, rawConfig, phases, params, spawnGuard);
+  const configuredRoutes = resolveComposableRoutes(params);
+  const routingEvidence: RoutingEvidence[] = [];
+  const preflightEvidence: PreflightEvidence[] = [];
+  const selectedRoutes = await preflightComposableRoutes(
+    configuredRoutes, phases, params, signal, emit, preflightEvidence,
+  );
   emit(`Pipeline: ${phases.map((p) => `${p.kind}×${p.count}`).join(" → ") || "(empty)"}`);
 
-  // Accumulated phase results
+  // Accumulated phase results. Candidate plans remain independent until a
+  // later critique/synthesis explicitly combines them.
+  let research: ResearchFinding[] = [];
   let hypotheses: Hypothesis[] = [];
   let critiques: Critique[] = [];
   let syntheses: Synthesis[] = [];
+  let candidatePlans: CandidatePlan[] = [];
   let plan: Plan | null = null;
+  let finalPlanSource: "planner" | "synthesis" | "fallback" | null = null;
   let executorOutputs: ExecutorOutput[] = [];
   let voteResult: { votes: VerifierVote[]; passes: number; fails: number } | null = null;
+  const attempts: PipelineAttempt[] = [];
+  let retryableExecutePhase: PipelinePhase | null = null;
+  const expectedExecuteCount = phases.find((phase) => phase.kind === "execute")?.count ?? 1;
+  const maxRetries = Number.isFinite(params.maxRetries) ? Math.max(0, Math.trunc(params.maxRetries)) : 0;
 
-  // Execute phases sequentially
+  // Declared phases run once. Only the execute→verify segment below can repeat.
   for (const phase of phases) {
     throwIfAborted(signal);
     emit(`Phase ${phase.kind.toUpperCase()}: spawning ${phase.count} agent(s)...`);
 
     switch (phase.kind) {
+      case "research":
+        research = await runPhase("research", phase, params, agents, spawnGuard, signal,
+          emit, inheritedModel, selectedRoutes.planner, routingEvidence,
+          (idx, total) => buildPhasePrompt("research", idx, total, params.task, inferredModelRouting));
+        break;
       case "hypothesize":
         hypotheses = await runPhase("hypothesize", phase, params, agents, spawnGuard, signal,
-          emit, inheritedModel, inferredModelRouting,
-          getPhaseModelOverride("hypothesize", params, inferredModelRouting),
+          emit, inheritedModel, selectedRoutes.planner, routingEvidence,
           (idx, total) => buildPhasePrompt("hypothesize", idx, total, params.task, inferredModelRouting));
         break;
       case "critique":
         critiques = await runPhase("critique", phase, params, agents, spawnGuard, signal,
-          emit, inheritedModel, inferredModelRouting,
-          getPhaseModelOverride("critique", params, inferredModelRouting),
-          (idx, total) => buildPhasePrompt("critique", idx, total, params.task, inferredModelRouting, hypotheses));
+          emit, inheritedModel, selectedRoutes.planner, routingEvidence,
+          (idx, total) => buildPhasePrompt("critique", idx, total, params.task, inferredModelRouting,
+            hypotheses, undefined, candidatePlans));
         break;
       case "synthesize":
         syntheses = await runPhase("synthesize", phase, params, agents, spawnGuard, signal,
-          emit, inheritedModel, inferredModelRouting,
-          getPhaseModelOverride("synthesize", params, inferredModelRouting),
-          (idx, total) => buildPhasePrompt("synthesize", idx, total, params.task, inferredModelRouting, hypotheses, critiques));
+          emit, inheritedModel, selectedRoutes.planner, routingEvidence,
+          (idx, total) => buildPhasePrompt("synthesize", idx, total, params.task, inferredModelRouting,
+            hypotheses, critiques, candidatePlans, expectedExecuteCount));
+        if (candidatePlans.length > 0 && syntheses.length > 0) {
+          // The synthesis phase is the declared final-plan conversion. Its JSON
+          // is parsed directly; malformed text converts deterministically to a
+          // one-task plan via parsePlan (and is transparently marked fallback).
+          plan = parsePlan(syntheses[0].text, params.task);
+          finalPlanSource = plan.notes.includes("not parseable") ? "fallback" : "synthesis";
+          emit(`Final synthesized plan: ${plan.tasks.length} task(s), ${buildExecutionWaves(plan.tasks).length} wave(s).`);
+        }
         break;
       case "plan": {
-        const prompt = buildPlanPrompt(params.task, hypotheses, critiques, syntheses, inferredModelRouting);
-        const result = await spawnChecked(spawnGuard, params, agents, phase.agentName, prompt,
-          signal, emit, inheritedModel, toMO(params.plannerModel, params.plannerProvider));
-        plan = parsePlan(result.text, params.task);
-        emit(`Plan: ${plan.tasks.length} task(s), ${buildExecutionWaves(plan.tasks).length} wave(s).`);
+        const plannerOutputs = await runPhase<{ index: number; agentName: string; text: string }>(
+          "plan", phase, params, agents, spawnGuard, signal, emit, inheritedModel,
+          selectedRoutes.planner, routingEvidence,
+          (idx, total) => buildPlanPrompt(params.task, research, hypotheses, critiques, syntheses,
+            inferredModelRouting, idx, total, expectedExecuteCount),
+        );
+        candidatePlans = plannerOutputs.map((output) => ({
+          ...output,
+          plan: parsePlan(output.text, params.task),
+        }));
+        plan = candidatePlans[0]?.plan ?? null;
+        finalPlanSource = plan ? (plan.notes.includes("not parseable") ? "fallback" : "planner") : null;
+        emit(`Plans: ${candidatePlans.length} candidate(s); selected candidate 1 pending any declared critique/synthesis.`);
         break;
       }
       case "execute":
+        retryableExecutePhase = phase;
         executorOutputs = await runExecutePhase(params, agents, spawnGuard, signal, emit,
-          inheritedModel, inferredModelRouting, plan);
+          inheritedModel, selectedRoutes.executor, routingEvidence, plan, phase);
         break;
-      case "verify":
+      case "verify": {
         voteResult = await runVerifyPhase(params, agents, spawnGuard, signal, emit,
-          inheritedModel, inferredModelRouting, phase, plan, executorOutputs,
-          hypotheses, critiques, syntheses);
+          inheritedModel, selectedRoutes.verifier, routingEvidence, inferredModelRouting,
+          phase, plan, executorOutputs, hypotheses, critiques, syntheses);
+        if (retryableExecutePhase) {
+          attempts.push(toAttemptRecord(attempts.length + 1, executorOutputs, voteResult));
+          for (let retry = 1; voteResult.passes <= voteResult.fails && retry <= maxRetries; retry++) {
+            throwIfAborted(signal);
+            emit(`Verifier majority FAIL: retrying execute → verify (${retry}/${maxRetries}).`);
+            executorOutputs = await runExecutePhase(params, agents, spawnGuard, signal, emit,
+              inheritedModel, selectedRoutes.executor, routingEvidence, plan, retryableExecutePhase);
+            voteResult = await runVerifyPhase(params, agents, spawnGuard, signal, emit,
+              inheritedModel, selectedRoutes.verifier, routingEvidence, inferredModelRouting,
+              phase, plan, executorOutputs, hypotheses, critiques, syntheses);
+            attempts.push(toAttemptRecord(attempts.length + 1, executorOutputs, voteResult));
+          }
+        }
         break;
+      }
     }
   }
 
-  // Determine final status
   let status: "pass" | "fail" = "pass";
   if (voteResult) status = voteResult.passes > voteResult.fails ? "pass" : "fail";
 
-  const details = buildDetails(status, params, spawnGuard, phases, {
-    hypotheses, critiques, syntheses, plan, executorOutputs, voteResult,
-  });
-  const markdown = buildFinalResult(status, params, spawnGuard, phases, {
-    hypotheses, critiques, syntheses, plan, executorOutputs, voteResult,
-  });
+  const artifacts: PhaseArtifacts = {
+    research, hypotheses, critiques, syntheses, candidatePlans, plan, finalPlanSource,
+    executorOutputs, voteResult, attempts, selectedRoutes, routingEvidence, preflightEvidence,
+  };
+  const details = buildDetails(status, params, spawnGuard, phases, artifacts);
+  const markdown = buildFinalResult(status, params, spawnGuard, phases, artifacts);
   return { markdown, details };
 }
 
 // ── Generic phase runner (hypothesize / critique / synthesize) ─────────────
 
 async function runPhase<T extends { index: number; agentName: string; text: string }>(
-  _kind: PhaseKind,
+  kind: PhaseKind,
   phase: PipelinePhase,
   params: NormalizedParams,
   agents: Map<string, AgentProfile>,
@@ -287,42 +513,20 @@ async function runPhase<T extends { index: number; agentName: string; text: stri
   signal: AbortSignal | undefined,
   emit: (text: string) => void,
   inheritedModel: { provider?: string; model?: string } | undefined,
-  inferredModelRouting: InferredModelRouting,
-  perPhaseModel: { model?: string; provider?: string } | undefined,
+  route: ResolvedRoute,
+  routingEvidence: RoutingEvidence[],
   buildPrompt: (index: number, total: number) => string,
 ): Promise<T[]> {
-  // Defense-in-depth: normalize any residual dotted anthropic id (e.g. a
-  // label-derived "claude-sonnet-4.5") to dashes before it reaches a spawn
-  // (WAVE3-SPEC ITEM C). Non-anthropic ids (gpt-5.5, deepseek-*) pass through.
-  const effectiveModel = normalizeAnthropicModelId(perPhaseModel ?? toMO(params.executorModel, params.executorProvider));
   const items = Array.from({ length: phase.count }, (_, i) => i);
   const results = await runBoundedPool(items, MAX_PHASE_CONCURRENCY, signal, async (index, _pi, ws) => {
     const prompt = buildPrompt(index, phase.count);
-
-    // Spawn with fallback model support
-    let result: SubagentResult;
-    try {
-      result = await spawnChecked(spawnGuard, params, agents, phase.agentName, prompt,
-        ws, emit, inheritedModel, effectiveModel);
-    } catch (firstErr) {
-      // Never relaunch after a terminal ambiguous mutating state: the first
-      // child may already have written to disk, so a model fallback could
-      // duplicate writes. Preserve the original structured error verbatim.
-      if (isTerminalAmbiguousMutation(firstErr)) throw firstErr;
-      emit(`WARNING: Phase ${phase.kind} agent ${index + 1} spawn failed with primary model, retrying with fallback (${PHASE_FALLBACK_MODEL.provider}/${PHASE_FALLBACK_MODEL.model})...`);
-      try {
-        result = await spawnChecked(spawnGuard, params, agents, phase.agentName, prompt,
-          ws, emit, inheritedModel, PHASE_FALLBACK_MODEL);
-      } catch (fallbackErr) {
-        // If the fallback itself mutated before losing its result, that newer
-        // structured terminal state is the one callers must inspect.
-        if (isTerminalAmbiguousMutation(fallbackErr)) throw fallbackErr;
-        throw firstErr;
-      }
-    }
+    const result = await spawnChecked(
+      spawnGuard, params, agents, phase.agentName, prompt, ws, emit,
+      inheritedModel, route, roleForPhase(kind), kind, index + 1, routingEvidence,
+    );
 
     // Budget estimation
-    const budgetModel = effectiveModel?.model ?? params.executorModel;
+    const budgetModel = route.model;
     const budget = estimateExecutorContextBudget(prompt.length, budgetModel, { criticalThreshold: 60 });
     if (budget.saturationPercent > 60) {
       emit(`Phase ${phase.kind} agent ${index + 1}: pre-spawn budget ${budget.saturationPercent}% sat (${budget.risk}) — risk of context exhaustion.`);
@@ -370,16 +574,19 @@ async function runExecutePhase(
   signal: AbortSignal | undefined,
   emit: (text: string) => void,
   inheritedModel: { provider?: string; model?: string } | undefined,
-  inferredModelRouting: InferredModelRouting,
+  route: ResolvedRoute,
+  routingEvidence: RoutingEvidence[],
   plan: Plan | null,
+  phase: PipelinePhase,
 ): Promise<ExecutorOutput[]> {
   const effective = (plan && plan.tasks.length > 0) ? plan : {
     tasks: [{ id: "task-1", description: params.task, dependsOn: [] }],
     notes: "No plan was produced; falling back to single executor task.",
   };
+  const executionTasks = buildExecutionTasks(effective, phase.count);
 
   // Task-size cap enforcement
-  for (const task of effective.tasks) {
+  for (const task of executionTasks) {
     const words = task.description.split(/\s+/).length;
     if (words > MAX_TASK_WORDS) {
       emit(`Task ${task.id}: WARNING — description is ${words} words (cap: ${MAX_TASK_WORDS}). Consider splitting.`);
@@ -387,22 +594,22 @@ async function runExecutePhase(
     }
   }
 
-  const waves = buildExecutionWaves(effective.tasks);
+  const waves = buildExecutionWaves(executionTasks);
 
-  const results = await runWorkGraph(waves, DEFAULT_EXEC_CONCURRENCY, signal, async (task, _idx, ws) => {
+  const results = await runWorkGraph(waves, DEFAULT_EXEC_CONCURRENCY, signal, async (task, phaseIndex, ws) => {
     const prompt = buildExecutorPrompt(params.task, effective, task);
     const resolvedAgent = task.agent?.trim() && agents.has(task.agent.trim())
       ? task.agent.trim() : params.executorAgent;
     if (resolvedAgent !== params.executorAgent) {
       emit(`Task ${task.id}: assigned to "${resolvedAgent}" (role: ${task.role ?? "(none)"}).`);
     }
-    const runtimeOv = inferredRuntimeModelForTask(task, resolvedAgent, inferredModelRouting);
-    const override = mergeOverrides(
-      mergeOverrides(toMO(params.executorModel, params.executorProvider), runtimeOv),
-      { model: task.model, provider: task.provider },
+    if (normalizePlannerRouteHint(task.model) || normalizePlannerRouteHint(task.provider)) {
+      emit(`Task ${task.id}: ignored planner-authored route fields; using the preflighted executor route ${route.provider}/${route.model}.`);
+    }
+    const result = await spawnChecked(
+      spawnGuard, params, agents, resolvedAgent, prompt, ws, emit, inheritedModel,
+      route, "executor", "execute", phaseIndex + 1, routingEvidence, true,
     );
-    const result = await spawnChecked(spawnGuard, params, agents, resolvedAgent, prompt,
-      ws, emit, inheritedModel, override, true);
 
     // Budget estimation
     const budget = estimateExecutorContextBudget(prompt.length, params.executorModel, { criticalThreshold: 60 });
@@ -444,6 +651,26 @@ async function runExecutePhase(
   return results;
 }
 
+/** Make the declared execute cardinality equal the number of mutating spawns. */
+function buildExecutionTasks(plan: Plan, count: number): PlanTask[] {
+  if (count === 1) {
+    if (plan.tasks.length === 1) return plan.tasks;
+    return [{
+      id: "execution-1",
+      description: "Execute every task in the final plan exactly once, preserving its dependency order.",
+      dependsOn: [],
+    }];
+  }
+  if (plan.tasks.length !== count) {
+    throw new PipelineConfigurationError(
+      "EXECUTE_CARDINALITY_MISMATCH",
+      `Declared execute×${count} requires a final plan with exactly ${count} tasks; received ${plan.tasks.length}.`,
+      { executeCount: count, finalPlanTaskCount: plan.tasks.length },
+    );
+  }
+  return plan.tasks;
+}
+
 // ── Verify phase (N verifiers → majority vote) ────────────────────────────
 
 async function runVerifyPhase(
@@ -453,6 +680,8 @@ async function runVerifyPhase(
   signal: AbortSignal | undefined,
   emit: (text: string) => void,
   inheritedModel: { provider?: string; model?: string } | undefined,
+  route: ResolvedRoute,
+  routingEvidence: RoutingEvidence[],
   inferredModelRouting: InferredModelRouting,
   phase: PipelinePhase,
   plan: Plan | null,
@@ -462,29 +691,36 @@ async function runVerifyPhase(
   syntheses: Synthesis[],
 ): Promise<{ votes: VerifierVote[]; passes: number; fails: number }> {
   const count = Math.min(phase.count, MAX_VERIFIER_COUNT);
+  const artifactDir = mkdtempSync(path.join(os.tmpdir(), "pi-composable-verifier-"));
   const verifiers = Array.from({ length: count }, (_, i) => ({
     index: i + 1,
     agentName: params.verifierAgent,
     prompt: buildVerifierPrompt(i + 1, count, params.task, plan, executorOutputs,
-      hypotheses, critiques, syntheses, inferredModelRouting),
-    override: toMO(params.verifierModel, params.verifierProvider),
+      hypotheses, critiques, syntheses, inferredModelRouting, artifactDir),
   }));
 
-  const votes = await runBoundedPool(verifiers, Math.min(MAX_PHASE_CONCURRENCY, count), signal,
-    async (verifier, _pi, ws) => {
-      emit(`Verifier ${verifier.index}/${count} starting...`);
-      const startedAt = Date.now();
-      const result = await spawnChecked(spawnGuard, params, agents, verifier.agentName,
-        verifier.prompt, ws, emit, inheritedModel, verifier.override);
-      const parsed = parseVerifierResult(result.text);
-      emit(`Verifier ${verifier.index}/${count}: ${parsed.status.toUpperCase()} (${parsed.reasons.join("; ") || "no reasons"}).`);
-      return {
-        verifierIndex: verifier.index, agentName: result.agentName,
-        status: parsed.status, reasons: parsed.reasons, raw: result.text,
-        durationMs: Date.now() - startedAt,
-      };
-    },
-  );
+  let votes: VerifierVote[];
+  try {
+    votes = await runBoundedPool(verifiers, Math.min(MAX_PHASE_CONCURRENCY, count), signal,
+      async (verifier, _pi, ws) => {
+        emit(`Verifier ${verifier.index}/${count} starting...`);
+        const startedAt = Date.now();
+        const result = await spawnChecked(
+          spawnGuard, params, agents, verifier.agentName, verifier.prompt, ws, emit,
+          inheritedModel, route, "verifier", "verify", verifier.index, routingEvidence,
+        );
+        const parsed = parseVerifierResult(result.text);
+        emit(`Verifier ${verifier.index}/${count}: ${parsed.status.toUpperCase()} (${parsed.reasons.join("; ") || "no reasons"}).`);
+        return {
+          verifierIndex: verifier.index, agentName: result.agentName,
+          status: parsed.status, reasons: parsed.reasons, raw: result.text,
+          durationMs: Date.now() - startedAt,
+        };
+      },
+    );
+  } finally {
+    rmSync(artifactDir, { recursive: true, force: true });
+  }
 
   const passes = votes.filter((v) => v.status === "pass").length;
   const fails = votes.length - passes;
@@ -494,32 +730,36 @@ async function runVerifyPhase(
 
 // ── Prompt builders ────────────────────────────────────────────────────────
 
-function routingNote(role: string | undefined, inferred: InferredModelRouting): string {
-  return inferred[role as keyof InferredModelRouting]
-    ? `\nModel routing hint: prefer ${formatRoutedModel((inferred as any)[role].provider, (inferred as any)[role].model)}.`
-    : "";
-}
-
 function buildPhasePrompt(
-  kind: "hypothesize" | "critique" | "synthesize",
+  kind: "research" | "hypothesize" | "critique" | "synthesize",
   index: number,
   total: number,
   originalTask: string,
   inferred: InferredModelRouting,
   hypotheses?: Hypothesis[],
   critiques?: Critique[],
+  candidatePlans?: CandidatePlan[],
+  expectedExecuteCount = 1,
 ): string {
   const labels: Record<string, string> = {
+    research: `researcher ${index + 1} of ${total}`,
     hypothesize: `hypothesizer ${index + 1} of ${total}`,
     critique: `critic ${index + 1} of ${total}`,
     synthesize: `synthesizer ${index + 1} of ${total}`,
   };
   const instructions: Record<string, string> = {
+    research: "Perform bounded reconnaissance/research. Gather concrete evidence and constraints; do NOT plan or execute.",
     hypothesize: "Generate hypotheses, approaches, or interpretations. Be creative — do NOT execute.",
-    critique: "Critically review the hypotheses for weaknesses, gaps, risks, and assumptions. Be thorough — do NOT execute.",
-    synthesize: "Synthesize hypotheses and critiques into a coherent, actionable understanding. Do NOT execute.",
+    critique: candidatePlans?.length
+      ? "Critically compare every candidate plan for gaps, risks, dependency errors, and task fit. Do NOT execute."
+      : "Critically review the hypotheses for weaknesses, gaps, risks, and assumptions. Be thorough — do NOT execute.",
+    synthesize: candidatePlans?.length
+      ? `Synthesize the candidate plans and critiques into the FINAL execution plan. Return ONLY parseable JSON with exactly ${expectedExecuteCount} task(s): {"tasks":[{"id":"task-1","description":"...","dependsOn":[]}],"notes":"..."}. Do NOT execute.`
+      : "Synthesize hypotheses and critiques into a coherent, actionable understanding. Do NOT execute.",
   };
-  const rn = routingNote("executor", inferred);
+  // Routing is selected structurally before spawn; natural-language/profile
+  // hints are intentionally not echoed as authority in composed-seat prompts.
+  void inferred;
   let extra = "";
   if (hypotheses && hypotheses.length > 0) {
     const truncated = hypotheses.map((h) =>
@@ -527,30 +767,41 @@ function buildPhasePrompt(
     ).join("\n\n");
     extra += "\n## Hypotheses\n" + truncateWithNotice(truncated, MAX_PHASE_CHARS * 3 / 2, "all hypotheses");
   }
+  if (candidatePlans && candidatePlans.length > 0) {
+    const truncated = candidatePlans.map((candidate) =>
+      `### Candidate Plan ${candidate.index + 1} (${candidate.agentName})\n${truncateWithNotice(candidate.text, MAX_PHASE_CHARS, `candidate plan ${candidate.index + 1}`)}`
+    ).join("\n\n");
+    extra += "\n\n## Candidate Plans\n" + truncateWithNotice(truncated, MAX_PHASE_CHARS * 2, "all candidate plans");
+  }
   if (critiques && critiques.length > 0) {
     const truncated = critiques.map((c) =>
       `### C${c.index + 1} (${c.agentName})\n${truncateWithNotice(c.text, MAX_PHASE_CHARS, `critique C${c.index + 1}`)}`
     ).join("\n\n");
     extra += "\n\n## Critiques\n" + truncateWithNotice(truncated, MAX_PHASE_CHARS * 3 / 2, "all critiques");
   }
-  return `You are ${labels[kind]} in a composable orchestration pipeline.\n${instructions[kind]}\n${rn}\n\nOriginal task:\n${originalTask}${extra}\n\nReturn your response as structured text.`;
+  return `You are ${labels[kind]} in a composable orchestration pipeline.\n${instructions[kind]}\n\nOriginal task:\n${originalTask}${extra}\n\n${candidatePlans?.length && kind === "synthesize" ? "Return only the final plan JSON." : "Return your response as structured text."}`;
 }
 
 function buildPlanPrompt(
   originalTask: string,
+  research: ResearchFinding[],
   hypotheses: Hypothesis[],
   critiques: Critique[],
   syntheses: Synthesis[],
   inferred: InferredModelRouting,
+  plannerIndex: number,
+  plannerTotal: number,
+  expectedExecuteCount: number,
 ): string {
-  const rn = inferred.planner
-    ? `\nModel routing hint: use ${formatRoutedModel(inferred.planner.provider, inferred.planner.model)} for planning.`
-    : "";
-  const synRaw = syntheses.length > 0
-    ? syntheses.map((s) => `## Synthesis ${s.index + 1} (${s.agentName})\n${truncateWithNotice(s.text, MAX_PHASE_CHARS, `synthesis ${s.index + 1}`)}`).join("\n\n")
-    : "_No synthesis produced._";
-  const synText = truncateWithNotice(synRaw, MAX_PHASE_CHARS * 2, "all syntheses");
-  return `You are the planner in a composable orchestration pipeline. Based on the original task and synthesis, produce a structured execution plan. Return JSON:\n{"tasks":[{"id":"...","description":"...","dependsOn":[],"agent":"coder","role":"...","model":"...","provider":"..."}],"notes":"..."}\n\nOriginal task:\n${originalTask}${rn}\n\nSynthesis:\n${synText}\n\nRules: Keep task IDs stable (task-1, task-2...). Make descriptions self-contained. Do not execute. Each task may optionally specify agent, role, model, provider.`;
+  void inferred;
+  const prior = [
+    ...research.map((item) => `## Research ${item.index + 1}\n${truncateWithNotice(item.text, MAX_PHASE_CHARS, "research")}`),
+    ...hypotheses.map((item) => `## Hypothesis ${item.index + 1}\n${truncateWithNotice(item.text, MAX_PHASE_CHARS, "hypothesis")}`),
+    ...critiques.map((item) => `## Critique ${item.index + 1}\n${truncateWithNotice(item.text, MAX_PHASE_CHARS, "critique")}`),
+    ...syntheses.map((item) => `## Synthesis ${item.index + 1}\n${truncateWithNotice(item.text, MAX_PHASE_CHARS, "synthesis")}`),
+  ];
+  const priorText = truncateWithNotice(prior.join("\n\n") || "_No prior phase output._", MAX_PHASE_CHARS * 3, "prior phase outputs");
+  return `You are independent planner ${plannerIndex + 1} of ${plannerTotal} in a composable orchestration pipeline. Produce your own candidate execution plan; do not copy another planner. Return JSON:\n{"tasks":[{"id":"...","description":"...","dependsOn":[]}],"notes":"..."}\n\nOriginal task:\n${originalTask}\n\nPrior phase outputs:\n${priorText}\n\nRules: Return exactly ${expectedExecuteCount} task(s) so declared execute cardinality is honored. Keep task IDs stable (task-1, task-2...). Make descriptions self-contained. Do not execute. Route selection is orchestrator-owned; do not emit agent/model/provider fields.`;
 }
 
 function buildExecutorPrompt(originalTask: string, plan: Plan, task: PlanTask): string {
@@ -585,11 +836,9 @@ function buildVerifierPrompt(
   verifierIndex: number, totalVerifiers: number,
   originalTask: string, plan: Plan | null, executorOutputs: ExecutorOutput[],
   hypotheses: Hypothesis[], critiques: Critique[], syntheses: Synthesis[],
-  inferred: InferredModelRouting,
+  inferred: InferredModelRouting, artifactDir: string,
 ): string {
-  const rn = inferred.verifier
-    ? `\nYou should be running as ${formatRoutedModel(inferred.verifier.provider, inferred.verifier.model)}.`
-    : "";
+  void inferred;
   const planJson = plan
     ? truncateWithNotice(JSON.stringify(plan, null, 2), MAX_PHASE_CHARS * 2, "plan JSON")
     : "(no plan)";
@@ -603,7 +852,7 @@ function buildVerifierPrompt(
     MAX_PHASE_CHARS * 4,
     "executor outputs",
   );
-  return `You are verifier ${verifierIndex} of ${totalVerifiers} in a composable orchestration.\nJudge whether executor outputs satisfy the original task via majority vote.\n\nOriginal task:\n${originalTask}${rn}\n\nPlan:\n${planJson}\n\nExecutor outputs:\n${outputsJson}\n\nReturn JSON: {"status":"pass"|"fail","reasons":["..."]}\n\nVote independently. Use "pass" only if all outputs clearly satisfy the task. Be strict.`;
+  return `You are verifier ${verifierIndex} of ${totalVerifiers} in a composable orchestration.\nJudge whether executor outputs satisfy the original task via majority vote.\n\nOriginal task:\n${originalTask}\n\nPlan:\n${planJson}\n\nExecutor outputs:\n${outputsJson}\n\nVERIFIER ARTIFACT POLICY:\n- Return the verdict inline; never write the verdict/report into the project or arbitrary system-temp paths.\n- If a command absolutely requires temporary output, use only this run-owned directory: ${artifactDir}\n- Do not modify product/project files. The orchestrator removes the run-owned directory in a finally block.\n\nReturn JSON: {"status":"pass"|"fail","reasons":["..."]}\n\nVote independently. Use "pass" only if all outputs clearly satisfy the task. Be strict.`;
 }
 
 // ── Natural language pipeline parser ───────────────────────────────────────
@@ -615,52 +864,313 @@ function buildVerifierPrompt(
  */
 function parsePipelineConfig(task: string): PipelineConfig {
   const lower = task.toLowerCase();
-
-  // "just/only" mode: limit to explicitly detected phases from full text.
-  // Previous regex-based scope extraction was brittle with em-dashes, semicolons,
-  // and multi-clause sentences. Now we simply detect presence and filter from the
-  // entire task text — "just hypothesize and plan" in a long task still limits to
-  // exactly those phases because only their detect patterns will match.
-  const justMode = /\b(?:just|only)\b/.test(lower);
-
-  // Negated phases
-  const negated: Set<PhaseKind> = new Set();
-  for (const meta of PHASE_META) {
-    if (meta.negateRe.test(lower)) negated.add(meta.kind);
+  const orderedDeclaration = extractOrderedDeclaration(task);
+  if (orderedDeclaration) {
+    const phases = parseOrderedPhases(orderedDeclaration);
+    if (phases.length === 0) {
+      throw new PipelineConfigurationError(
+        "EMPTY_ORDERED_PIPELINE",
+        "An explicit ordered phase declaration was present but contained no recognized phases.",
+        { declaration: orderedDeclaration },
+      );
+    }
+    const seen = new Set<PhaseKind>();
+    for (const phase of phases) {
+      if (seen.has(phase.kind)) {
+        throw new PipelineConfigurationError(
+          "DUPLICATE_ORDERED_PHASE",
+          `Explicit ordered pipeline repeats ${phase.kind}; repeated phase segments are not supported safely.`,
+          { phase: phase.kind },
+        );
+      }
+      seen.add(phase.kind);
+      assertPhaseCountWithinBounds(phase.kind, phase.count);
+    }
+    return { phases, explicitOrdered: true, explicitLimited: false };
   }
 
-  // Per-phase counts
+  // In legacy unordered mode, only/just authoritatively limits phase detection
+  // and cardinality parsing to its controlled phase-list clause. Task intent
+  // outside that clause still participates in implementation safety checks.
+  const limitedClause = extractLimitedPhaseClause(lower);
+  const justMode = limitedClause !== null;
+  const phaseScan = limitedClause ?? lower;
+  const negationScan = lower.replace(
+    /\bno\s+execution\s+before\s+(?:the\s+)?execute\s+phase\b/g,
+    "",
+  );
+  const negated: Set<PhaseKind> = new Set();
+  for (const meta of PHASE_META) {
+    if (meta.negateRe.test(negationScan)) negated.add(meta.kind);
+  }
+
   const counts = new Map<PhaseKind, number>();
   for (const meta of PHASE_META) {
-    const m = lower.match(meta.countRe);
-    const explicit = m?.[1] ?? m?.[2];
-    if (explicit) {
-      const count = parseInt(explicit, 10);
-      if (count > 0) counts.set(meta.kind, count);
+    const count = findExplicitPhaseCount(phaseScan, meta);
+    if (count !== undefined) {
+      assertPhaseCountWithinBounds(meta.kind, count);
+      counts.set(meta.kind, count);
     }
   }
 
-  // Determine active phases
   let active: PhaseKind[];
   const fullMatch = /\b(?:full(?:\s+wave)?|all(?:\s+phases|\s+stages)?)\b/i.test(lower);
   if (justMode) {
-    // "just/only" present → limit to phases whose detect regex matches the full
-    // task text. Full-wave shortcut is ignored in just-mode.
-    active = PHASE_ORDER.filter((p) => !negated.has(p) && getMeta(p).detect.test(lower));
+    active = PHASE_ORDER.filter((p) => !negated.has(p) && getMeta(p).detect.test(phaseScan));
   } else if (fullMatch) {
-    active = PHASE_ORDER.filter((p) => !negated.has(p));
+    active = LEGACY_FULL_WAVE_ORDER.filter((p) => !negated.has(p));
   } else {
     active = PHASE_ORDER.filter((p) => !negated.has(p) && getMeta(p).detect.test(lower));
   }
 
-  const phases: PipelinePhase[] = active.map((kind) => ({
-    kind,
-    count: counts.get(kind) ?? DEFAULT_COUNT,
-    agentName: getDefaultAgent(kind, "planner", "coder", "reviewer"),
-    promptBuilder: (_idx: number) => "", // filled at runtime by resolvePipelineConfig
-  }));
+  const phases = active.map((kind) => makePipelinePhase(kind, counts.get(kind) ?? DEFAULT_COUNT));
+  return { phases, explicitOrdered: false, explicitLimited: justMode };
+}
 
-  return { phases };
+/**
+ * Find a syntactically explicit phase count without conflating zero with
+ * "unspecified". Aliases come from the phase detector so prefix/suffix forms
+ * cannot drift apart: `0 plan`, `x0 plan`, `plan x0`, and their ×/signed forms.
+ */
+function findExplicitPhaseCount(text: string, meta: PhaseMeta): number | undefined {
+  const aliasSource = meta.detect.source.replace(/^\\b/, "").replace(/\\b$/, "");
+  const countRe = new RegExp(
+    `(?:^|[\\s,;:(])(?:(?:x|×)\\s*)?([+-]?(?:\\d+|infinity|inf|nan))\\s*(?:${aliasSource})\\b|` +
+    `(?:${aliasSource})\\b\\s*(?:x|×)\\s*([+-]?(?:\\d+|infinity|inf|nan))\\b`,
+    "i",
+  );
+  const match = countRe.exec(text);
+  const explicit = match?.[1] ?? match?.[2];
+  return explicit === undefined ? undefined : Number(explicit);
+}
+
+/**
+ * Extract the contiguous phase list governed by only/just. The parser accepts
+ * normal list punctuation/connectives, but stops as soon as prose resumes, so
+ * phase words in earlier task intent or later explanatory clauses cannot leak
+ * into the authoritative limiter.
+ */
+function extractLimitedPhaseClause(task: string): string | null {
+  const aliasSource = PHASE_META
+    .map((meta) => `(?:${meta.detect.source.replace(/^\\b/, "").replace(/\\b$/, "")})`)
+    .join("|");
+  const countSource = "[+-]?(?:\\d+|infinity|inf|nan)";
+  const tokenRe = new RegExp(
+    `(?:(?:(?:x|×)\\s*)?${countSource}\\s*)?\\b(?:${aliasSource})\\b` +
+    `(?:\\s*(?:x|×)\\s*${countSource}\\b)?`,
+    "gi",
+  );
+  const markerRe = /\b(?:only|just)\b/gi;
+  let marker: RegExpExecArray | null;
+
+  while ((marker = markerRe.exec(task))) {
+    const tail = task.slice(markerRe.lastIndex);
+    const tokens = [...tail.matchAll(tokenRe)];
+    if (tokens.length === 0) continue;
+
+    const first = tokens[0];
+    const firstIndex = first.index ?? 0;
+    const prelude = tail.slice(0, firstIndex);
+    if (!isLimitedPhasePrelude(prelude)) continue;
+
+    let end = firstIndex + first[0].length;
+    for (let index = 1; index < tokens.length; index++) {
+      const token = tokens[index];
+      const tokenIndex = token.index ?? end;
+      if (!isLimitedPhaseConnector(tail.slice(end, tokenIndex))) break;
+      end = tokenIndex + token[0].length;
+    }
+    return tail.slice(firstIndex, end).trim();
+  }
+  return null;
+}
+
+function isLimitedPhasePrelude(text: string): boolean {
+  const words = text.toLowerCase().match(/[a-z]+/g) ?? [];
+  const allowed = new Set([
+    "run", "use", "include", "perform", "do", "have", "these", "the",
+    "following", "phases", "phase", "stages", "stage", "pipeline", "of",
+    "with", "consisting",
+  ]);
+  return words.every((word) => allowed.has(word));
+}
+
+function isLimitedPhaseConnector(text: string): boolean {
+  return /^[\s,:/+&]*(?:(?:and|then|plus|followed\s+by)\b[\s,:/+&]*)?(?:(?:a|an|one)\b[\s,:/+&]*)?$/i.test(text);
+}
+
+function extractOrderedDeclaration(task: string): string | null {
+  const exact = task.match(/\b(?:in\s+this\s+exact\s+order|in\s+exact\s+order|exact\s+order)\s*:\s*([^\n.]+)/i);
+  if (exact?.[1]) return exact[1].trim();
+  if (!/(?:->|→)/.test(task)) return null;
+
+  // Arrow declarations are structural. Select exactly one phase token from
+  // each arrow-delimited segment (nearest the arrow), rather than scanning all
+  // surrounding prose. This prevents "Implement X. plan -> execute" from
+  // injecting an extra execute phase from the word "Implement".
+  const segments = task.split(/\s*(?:->|→)\s*/);
+  if (segments.length < 2) return null;
+  const selected = segments.map((segment, index) =>
+    selectOrderedToken(segment, index === 0 ? "last" : "first"));
+  if (selected.some((token) => token === null)) return null;
+  return selected.join(" -> ");
+}
+
+function selectOrderedToken(segment: string, which: "first" | "last"): string | null {
+  const matches: Array<{ index: number; text: string }> = [];
+  for (const meta of PHASE_META) {
+    const re = new RegExp(meta.detect.source, "gi");
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(segment))) {
+      let start = match.index;
+      let end = match.index + match[0].length;
+      const prefix = segment.slice(0, start).match(/(?:(?:x|×)\s*)?[+-]?(?:\d+|infinity|inf|nan)\s*$/i);
+      if (prefix) start -= prefix[0].length;
+      const suffix = segment.slice(end).match(/^\s*(?:x|×)\s*[+-]?(?:\d+|infinity|inf|nan)\b/i);
+      if (suffix) end += suffix[0].length;
+      matches.push({ index: match.index, text: segment.slice(start, end).trim() });
+    }
+  }
+  matches.sort((a, b) => a.index - b.index);
+  if (matches.length === 0) return null;
+  return (which === "first" ? matches[0] : matches[matches.length - 1]).text;
+}
+
+function phaseKindFromAlias(alias: string): PhaseKind {
+  const value = alias.toLowerCase();
+  if (/^(?:reconnaissance|research|scout)/.test(value)) return "research";
+  if (/^hypothes/.test(value)) return "hypothesize";
+  if (/^(?:critic|critique|review)/.test(value)) return "critique";
+  if (/^synthes/.test(value)) return "synthesize";
+  if (/^(?:plan|strategiz)/.test(value)) return "plan";
+  if (/^(?:execut|implement|build)/.test(value)) return "execute";
+  return "verify";
+}
+
+function parseOrderedPhases(declaration: string): PipelinePhase[] {
+  const tokenRe = /(?:^|[\s,;:(])(?:(?:(?:x|×)\s*)?([+-]?(?:\d+|infinity|inf|nan))\s*)?(reconnaissance|research(?:ers?|ed|ing)?|scouts?|scouting|hypothesiz(?:ers?|e[ds]?|ing)|hypothes(?:is|es)|critics?|critiques?|reviews?|reviewers?|synthesiz(?:ers?|e[ds]?|ing)|synthes(?:is|es)|planners?|plans?|planning|strategiz(?:e[ds]?|ing)|executors?|execut(?:e[ds]?|ions?|ing)|implement(?:s|ers?|ings?|ations?)?|build(?:s|ers?|ings?)?|verif(?:iers?|y|ies|ied|ying|ications?)|checks?|checkers?|checking|validat(?:ors?|e[ds]?|ing|ions?))\b(?:\s*(?:x|×)\s*([+-]?(?:\d+|infinity|inf|nan))\b)?/gi;
+  const phases: PipelinePhase[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = tokenRe.exec(declaration))) {
+    const kind = phaseKindFromAlias(match[2]);
+    const count = Number(match[1] ?? match[3] ?? DEFAULT_COUNT);
+    phases.push(makePipelinePhase(kind, count));
+  }
+  return phases;
+}
+
+function makePipelinePhase(kind: PhaseKind, count: number): PipelinePhase {
+  return {
+    kind,
+    count,
+    agentName: getDefaultAgent(kind, "planner", "coder", "reviewer"),
+    promptBuilder: (_idx: number) => "",
+  };
+}
+
+function assertPhaseCountWithinBounds(kind: PhaseKind, count: number): void {
+  const limit = PHASE_LIMITS[kind];
+  if (!Number.isInteger(count) || count < 1 || count > limit) {
+    throw new PipelineConfigurationError(
+      "PHASE_COUNT_OUT_OF_BOUNDS",
+      `Phase ${kind} count ${count} is invalid; supported range is 1..${limit}.`,
+      { phase: kind, count, limit },
+    );
+  }
+}
+
+class PipelineConfigurationError extends Error {
+  readonly code: string;
+  readonly details: Record<string, unknown>;
+
+  constructor(code: string, message: string, details: Record<string, unknown> = {}) {
+    super(`[COMPOSABLE_PIPELINE_CONFIG:${code}] ${message}`);
+    this.name = "PipelineConfigurationError";
+    this.code = code;
+    this.details = details;
+  }
+}
+
+function isImplementationRequest(task: string): boolean {
+  return /\b(?:(?:implement|fix|repair|build|create|modify|edit|write|add|change|refactor)(?:s|ed|ing)?|implementation|file\s+change|code\s+change)\b/i.test(task);
+}
+
+function hasExplicitSkipExecute(task: string): boolean {
+  const scan = task.replace(
+    /\bno[\s,:;_\-]*execution\s+before\s+(?:the\s+)?execute\s+phase\b/gi,
+    "",
+  );
+  const executeNoun = "(?:execute|execution|executors?|implementation|implementing|build(?:ing)?)";
+  return new RegExp(
+    `\\b(?:skip|omit)(?:[\\s,:;_\\-]+)(?:the[\\s,:;_\\-]+)?${executeNoun}(?:[\\s_-]+phase)?\\b`,
+    "i",
+  ).test(scan) || new RegExp(
+    `\\bwithout(?:[\\s,:;_\\-]+)(?:(?:an?|the)[\\s,:;_\\-]+)?${executeNoun}(?:[\\s_-]+phase)?\\b`,
+    "i",
+  ).test(scan) || new RegExp(
+    `\\bno(?:[\\s,:;_\\-]+)(?:(?:llm|agent|subagent)[\\s,:;_\\-]+)?${executeNoun}(?:[\\s_-]+phase)?\\b`,
+    "i",
+  ).test(scan) || new RegExp(
+    `\\b(?:(?:do|must|should)\\s+not|never)[\\s,:;_\\-]+(?:${executeNoun}|implement|build)\\b`,
+    "i",
+  ).test(scan) || /\b(?:execution|execute\s+phase)\s+(?:is\s+)?(?:forbidden|prohibited|disallowed)\b/i.test(scan);
+}
+
+function validatePipelineBeforeSpawn(
+  task: string,
+  config: PipelineConfig,
+  phases: PipelinePhase[],
+  params: NormalizedParams,
+  spawnGuard: SpawnGuard,
+): void {
+  const kinds = phases.map((phase) => phase.kind);
+  if (isImplementationRequest(task)) {
+    if (hasExplicitSkipExecute(task)) {
+      throw new PipelineConfigurationError(
+        "CONTRADICTORY_SKIP_EXECUTE",
+        "Implementation work explicitly skips execute; refusing to run a non-mutating pipeline.",
+        { pipeline: kinds },
+      );
+    }
+    if ((config.explicitOrdered || config.explicitLimited) && !kinds.includes("execute")) {
+      throw new PipelineConfigurationError(
+        "IMPLEMENTATION_PIPELINE_OMITS_EXECUTE",
+        "Implementation work explicitly limits the pipeline but omits execute.",
+        { pipeline: kinds },
+      );
+    }
+  }
+
+  phases.forEach((phase) => assertPhaseCountWithinBounds(phase.kind, phase.count));
+  const executeIndex = kinds.indexOf("execute");
+  const verifyIndex = kinds.indexOf("verify");
+  const retrySegmentExists = executeIndex >= 0 && verifyIndex > executeIndex;
+  const baseSpawns = phases.reduce((sum, phase) => sum + phase.count, 0);
+  const maxRetries = Number.isFinite(params.maxRetries) ? Math.max(0, Math.trunc(params.maxRetries)) : 0;
+  const retrySpawns = retrySegmentExists
+    ? maxRetries * (phases[executeIndex].count + phases[verifyIndex].count)
+    : 0;
+  const requiredSpawns = baseSpawns + retrySpawns;
+  if (!spawnGuard.wouldFit(requiredSpawns)) {
+    throw new PipelineConfigurationError(
+      "SUBAGENT_BUDGET_TOO_SMALL",
+      `Pipeline requires ${requiredSpawns} spawn slots but maxSubagents is ${spawnGuard.cap}.`,
+      { baseSpawns, retrySpawns, requiredSpawns, maxSubagents: spawnGuard.cap },
+    );
+  }
+}
+
+function toAttemptRecord(
+  attempt: number,
+  executorOutputs: ExecutorOutput[],
+  voteResult: { votes: VerifierVote[]; passes: number; fails: number },
+): PipelineAttempt {
+  return {
+    attempt,
+    executorOutputs,
+    voteResult,
+    status: voteResult.passes > voteResult.fails ? "pass" : "fail",
+  };
 }
 
 function scanEscapeClauses(description: string): string[] {
@@ -701,6 +1211,7 @@ function resolvePipelineConfig(config: PipelineConfig, params: NormalizedParams)
 
 function getDefaultAgent(kind: PhaseKind, planner: string, executor: string, verifier: string): string {
   switch (kind) {
+    case "research": return "researcher";
     case "plan": return planner;
     case "verify": return verifier;
     default: return executor;
@@ -791,40 +1302,34 @@ function extractBalancedObject(text: string): string | null {
 
 // ── Spawn helpers ───────────────────────────────────────────────────────────
 
-function isTerminalAmbiguousMutation(error: unknown): boolean {
-  if (error instanceof SubagentTerminalAmbiguousError) return true;
-  if (!error || typeof error !== "object") return false;
-  const candidate = error as { name?: unknown; info?: { code?: unknown; retryAllowed?: unknown } };
-  return candidate.name === "SubagentTerminalAmbiguousError" ||
-    (candidate.info?.retryAllowed === false &&
-      (candidate.info.code === "RESULT_LOST_AFTER_MUTATION" || candidate.info.code === "AMBIGUOUS_COMPLETION"));
-}
-
 async function spawnChecked(
   spawnGuard: SpawnGuard, params: NormalizedParams, agents: Map<string, AgentProfile>,
   agentName: string, task: string, signal: AbortSignal | undefined,
   onProgress: ((text: string) => void) | undefined,
   inheritedModel: { provider?: string; model?: string } | undefined,
-  modelOverride: { model?: string; provider?: string } | undefined,
+  modelOverride: ResolvedRoute,
+  role: ComposableRole,
+  phase: PhaseKind,
+  phaseIndex: number,
+  routingEvidence: RoutingEvidence[],
   phaseMutates = false,
 ): Promise<SubagentResult> {
   const spawned = spawnGuard.reserve();
   onProgress?.(`Spawning ${agentName} (${spawned}/${spawnGuard.cap}) in ${params.cwd}`);
-  return spawnSubagent(agentName, task, {
+  const result = await spawnSubagent(agentName, task, {
     agents, cwd: params.cwd, allowLocalModel: params.allowLocalModel,
     signal, inheritedModel, onProgress, modelOverride, phaseMutates,
   });
-}
-
-function inferredRuntimeModelForTask(
-  task: PlanTask, resolvedAgent: string, inferred: InferredModelRouting,
-): { model?: string; provider?: string } | undefined {
-  const rt = inferred.runtimeRoles ?? {};
-  const candidates = [resolvedAgent, task.agent, task.role]
-    .map((v) => v?.trim().toLowerCase()).filter((v): v is string => Boolean(v));
-  if (candidates.some((v) => /\bresearch/.test(v))) candidates.push("researcher");
-  for (const c of candidates) { const ov = rt[c]; if (ov?.model || ov?.provider) return ov; }
-  return undefined;
+  routingEvidence.push({
+    phase,
+    phaseIndex,
+    role,
+    agentName: result.agentName,
+    provider: result.provider,
+    model: result.model,
+    evidence: `Phase ${phase} ${phaseIndex}: ${result.agentName} spawned as ${role} on ${formatRoutedModel(result.provider, result.model)}.`,
+  });
+  return result;
 }
 
 function normalizePlannerRouteHint(value: string | undefined): string | undefined {
@@ -837,58 +1342,72 @@ function normalizePlannerRouteHint(value: string | undefined): string | undefine
   return trimmed;
 }
 
-function mergeOverrides(
-  a: { model?: string; provider?: string } | undefined,
-  b: { model?: string; provider?: string } | undefined,
-): { model?: string; provider?: string } | undefined {
-  // Planner-authored task routes are untrusted hints. Models commonly emit
-  // placeholders such as provider/model "default" to mean "use the configured
-  // route"; passing those literally creates `pi --provider default` and bypasses
-  // the healthy explicit route that preflight checked.
-  const m = normalizePlannerRouteHint(b?.model) ?? a?.model;
-  const p = normalizePlannerRouteHint(b?.provider) ?? a?.provider;
-  return (m || p) ? { model: m, provider: p } : undefined;
-}
-
-// Route override resolution delegated to the shared helper (src/routes.ts) so
-// every plan/execute/verify spawn and the report Routes line derive from
-// identical values (silent-route-override bug class, 2026-07-02).
-function toMO(model?: string, provider?: string): { model?: string; provider?: string } | undefined {
-  return resolveRouteOverride(model, provider);
-}
-
 // ── Result builders ────────────────────────────────────────────────────────
 
 interface PhaseArtifacts {
+  research: ResearchFinding[];
   hypotheses: Hypothesis[];
   critiques: Critique[];
   syntheses: Synthesis[];
+  candidatePlans: CandidatePlan[];
   plan: Plan | null;
+  finalPlanSource: "planner" | "synthesis" | "fallback" | null;
   executorOutputs: ExecutorOutput[];
   voteResult: { votes: VerifierVote[]; passes: number; fails: number } | null;
+  attempts: PipelineAttempt[];
+  selectedRoutes: SelectedRoutes;
+  routingEvidence: RoutingEvidence[];
+  preflightEvidence: PreflightEvidence[];
 }
 
 function buildFinalResult(
   status: "pass" | "fail", params: NormalizedParams, spawnGuard: SpawnGuard,
   phases: PipelinePhase[], a: PhaseArtifacts,
 ): string {
-  const { hypotheses, critiques, syntheses, plan, executorOutputs, voteResult } = a;
+  const {
+    research, hypotheses, critiques, syntheses, candidatePlans, plan, finalPlanSource,
+    executorOutputs, voteResult, attempts, selectedRoutes, routingEvidence, preflightEvidence,
+  } = a;
+  const actualCardinality = phases.map((phase) => ({
+    kind: phase.kind,
+    count: routingEvidence.filter((item) => item.phase === phase.kind).length,
+  }));
   const lines: string[] = [
     `# Composable Pipeline: ${status.toUpperCase()}`,
     "",
     `**Task:** ${params.task}`,
     `**Pipeline:** ${phases.map((p) => `${p.kind}×${p.count}`).join(" → ") || "(empty)"}`,
-    // Routes line derives from the SAME resolved override values passed to the
-    // plan/execute/verify spawns (via toMO → resolveRouteOverride).
-    `**Routes:** Planner=${formatRouteLabel(toMO(params.plannerModel, params.plannerProvider))}; ` +
-      `Executor=${formatRouteLabel(toMO(params.executorModel, params.executorProvider))}; ` +
-      `Verifier=${formatRouteLabel(toMO(params.verifierModel, params.verifierProvider))}`,
+    // Routes line derives from the exact post-preflight routes passed to spawns,
+    // including any selected fallback.
+    `**Routes:** Planner=${formatRouteLabel(selectedRoutes.planner)}; ` +
+      `Executor=${formatRouteLabel(selectedRoutes.executor)}; ` +
+      `Verifier=${formatRouteLabel(selectedRoutes.verifier)}`,
+    `**Actual phase spawns:** ${actualCardinality.map((item) => `${item.kind}×${item.count}`).join(" → ") || "(empty)"}`,
     `**Subagents:** ${spawnGuard.spawned}/${spawnGuard.cap}`,
+    "",
+    "## Model Routing Evidence",
+    ...(routingEvidence.length ? routingEvidence.map((item) => `- ${item.evidence}`) : ["- No composed seats were spawned."]),
+    "",
+    "## Route Preflight Evidence",
+    ...preflightEvidence.map((item) =>
+      `- ${item.role}: ${item.provider}/${item.model} — ${item.status}${item.selected ? " (selected)" : ""}`),
   ];
 
   if (plan) {
-    lines.push("", "## Plan", "```json",
+    lines.push("", `## Final Plan (${finalPlanSource ?? "unknown"})`, "```json",
       JSON.stringify({ tasks: plan.tasks, notes: plan.notes }, null, 2), "```");
+  }
+
+  if (candidatePlans.length > 0) {
+    lines.push("", "## Candidate Plans",
+      ...candidatePlans.map((candidate) =>
+        `### P${candidate.index + 1} (${candidate.agentName})\n${truncateWithNotice(candidate.text, MAX_PHASE_CHARS, `candidate plan ${candidate.index + 1}`)}`));
+  }
+
+  if (attempts.length > 0) {
+    lines.push("", "## Execute / Verify Attempts",
+      ...attempts.map((attempt) =>
+        `- Attempt ${attempt.attempt}: ${attempt.status.toUpperCase()} (${attempt.executorOutputs.length} executor(s), ${attempt.voteResult.votes.length} verifier(s))`));
   }
 
   if (voteResult) {
@@ -897,6 +1416,10 @@ function buildFinalResult(
       `- Outcome: **${status.toUpperCase()}**`);
   }
 
+  if (research.length > 0) {
+    lines.push("", "## Research",
+      ...research.map((item) => `### R${item.index + 1} (${item.agentName})\n${truncateWithNotice(item.text, MAX_PHASE_CHARS, `research R${item.index + 1}`)}`));
+  }
   if (hypotheses.length > 0) {
     lines.push("", "## Hypotheses",
       ...hypotheses.map((h) => `### H${h.index + 1} (${h.agentName})\n${truncateWithNotice(h.text, MAX_PHASE_CHARS, `hypothesis H${h.index + 1}`)}`));
@@ -936,15 +1459,37 @@ function buildDetails(
   status: "pass" | "fail", params: NormalizedParams, spawnGuard: SpawnGuard,
   phases: PipelinePhase[], a: PhaseArtifacts,
 ): Record<string, unknown> {
-  const { hypotheses, critiques, syntheses, plan, executorOutputs, voteResult } = a;
+  const {
+    research, hypotheses, critiques, syntheses, candidatePlans, plan, finalPlanSource,
+    executorOutputs, voteResult, attempts, selectedRoutes, routingEvidence, preflightEvidence,
+  } = a;
   return {
     status, paradigm: "composable-pipeline",
+    selectedRoutes,
+    routingEvidence,
+    preflightEvidence,
+    actualCardinality: phases.map((phase) => ({
+      kind: phase.kind,
+      declared: phase.count,
+      spawned: routingEvidence.filter((item) => item.phase === phase.kind).length,
+    })),
+    research: research.map((item) => ({ index: item.index, agentName: item.agentName, text: truncateWithNotice(item.text, MAX_DETAIL_CHARS, `research R${item.index + 1}`) })),
     hypotheses: hypotheses.map((h) => ({ index: h.index, agentName: h.agentName, text: truncateWithNotice(h.text, MAX_DETAIL_CHARS, `hypothesis H${h.index + 1}`) })),
     critiques: critiques.map((c) => ({ index: c.index, agentName: c.agentName, text: truncateWithNotice(c.text, MAX_DETAIL_CHARS, `critique C${c.index + 1}`) })),
     syntheses: syntheses.map((s) => ({ index: s.index, agentName: s.agentName, text: truncateWithNotice(s.text, MAX_DETAIL_CHARS, `synthesis S${s.index + 1}`) })),
     pipeline: phases.map((p) => ({ kind: p.kind, count: p.count })),
     params: { ...params, task: truncateWithNotice(params.task, MAX_DETAIL_CHARS, "task") },
     spawnedCount: spawnGuard.spawned, spawnedCap: spawnGuard.cap,
+    candidatePlans: candidatePlans.map((candidate) => ({
+      index: candidate.index,
+      agentName: candidate.agentName,
+      plan: {
+        tasks: candidate.plan.tasks.map((task) => ({ ...task, description: truncateWithNotice(task.description, MAX_DETAIL_CHARS, `candidate task ${task.id}`) })),
+        notes: truncateWithNotice(candidate.plan.notes, MAX_DETAIL_CHARS, "candidate plan notes"),
+      },
+      text: truncateWithNotice(candidate.text, MAX_DETAIL_CHARS, `candidate plan ${candidate.index + 1}`),
+    })),
+    finalPlanSource,
     plan: plan ? {
       tasks: plan.tasks.map((t) => ({ ...t, description: truncateWithNotice(t.description, MAX_DETAIL_CHARS, `task ${t.id}`) })),
       notes: truncateWithNotice(plan.notes, MAX_DETAIL_CHARS, "plan notes"),
@@ -959,6 +1504,22 @@ function buildDetails(
         raw: truncateWithNotice(v.raw, MAX_DETAIL_CHARS, "verifier raw"),
       })),
     } : null,
+    attempts: attempts.map((attempt) => ({
+      attempt: attempt.attempt,
+      status: attempt.status,
+      executorCount: attempt.executorOutputs.length,
+      verifierCount: attempt.voteResult.votes.length,
+      passes: attempt.voteResult.passes,
+      fails: attempt.voteResult.fails,
+      executorOutputs: attempt.executorOutputs.map((output) => ({
+        ...output,
+        output: truncateWithNotice(output.output, MAX_DETAIL_CHARS, `attempt ${attempt.attempt} output ${output.taskId}`),
+      })),
+      votes: attempt.voteResult.votes.map((vote) => ({
+        ...vote,
+        raw: truncateWithNotice(vote.raw, MAX_DETAIL_CHARS, `attempt ${attempt.attempt} verifier raw`),
+      })),
+    })),
   };
 }
 

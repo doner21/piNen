@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 // ── Predicted-write-set enforcement (predict-then-write) ──────────────
@@ -60,22 +61,6 @@ export function normalizeWriteSetEntry(entry: string): string {
   return normalized.replace(/\/{2,}/g, "/");
 }
 
-function isAbsoluteEntry(entry: string): boolean {
-  const normalized = normalizeWriteSetEntry(entry);
-  return path.isAbsolute(normalized) || /^[a-zA-Z]:\//.test(normalized);
-}
-
-function validateWriteSetEntry(entry: string): string {
-  const normalized = normalizeWriteSetEntry(entry);
-  if (!normalized) return normalized;
-  if (!isAbsoluteEntry(normalized) && normalized.split("/").includes("..")) {
-    throw new Error(
-      `WRITE_SET_INVALID_ENTRY: relative write-set entries must not contain '..' path segments: ${JSON.stringify(entry)}.`,
-    );
-  }
-  return normalized;
-}
-
 /**
  * Parse a write-set input into normalized entries. Accepts a string
  * (comma- and/or newline-separated) or an array of strings. Returns
@@ -86,12 +71,17 @@ export function parseWriteSetInput(raw: unknown): string[] | undefined {
   const items = Array.isArray(raw)
     ? raw.map((item) => String(item))
     : String(raw).split(/[\n,]/);
-  const normalized = items.map(validateWriteSetEntry).filter(Boolean);
+  const normalized = items.map(normalizeWriteSetEntry).filter(Boolean);
   return normalized.length ? [...new Set(normalized)] : undefined;
 }
 
 function escapeRegex(text: string): string {
   return text.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isAbsoluteEntry(entry: string): boolean {
+  const normalized = normalizeWriteSetEntry(entry);
+  return path.isAbsolute(normalized) || /^[a-zA-Z]:\//.test(normalized);
 }
 
 function toNativePath(entry: string): string {
@@ -120,7 +110,7 @@ function relativeVariantForCwd(entry: string, cwd: string): string | undefined {
 }
 
 function allowedEntryVariants(entry: string, cwd?: string): string[] {
-  const normalized = validateWriteSetEntry(entry);
+  const normalized = normalizeWriteSetEntry(entry);
   const variants = [normalized];
   if (cwd) {
     const rel = relativeVariantForCwd(normalized, cwd);
@@ -188,9 +178,9 @@ export function evaluateWriteSet(
  * declares out-of-scope mutations — fail BEFORE any executor spawns.
  */
 export function planEntriesOutsideContract(planSet: string[], contractSet: string[]): string[] {
-  const contractNormalized = contractSet.map((entry) => validateWriteSetEntry(entry).toLowerCase());
+  const contractNormalized = contractSet.map((entry) => normalizeWriteSetEntry(entry).toLowerCase());
   return planSet
-    .map(validateWriteSetEntry)
+    .map(normalizeWriteSetEntry)
     .filter(Boolean)
     .filter((entry) => {
       if (fileMatchesWriteSet(entry, contractSet)) return false;
@@ -267,7 +257,7 @@ export function evaluateWriteSetObservation(
 function externalObservationRoots(cwdAbs: string, allowed: string[]): string[] {
   const roots: string[] = [];
   for (const raw of allowed) {
-    const normalized = validateWriteSetEntry(raw);
+    const normalized = normalizeWriteSetEntry(raw);
     if (!isAbsoluteEntry(normalized)) continue;
     const firstGlob = normalized.search(/[\*]/);
     const concrete = firstGlob >= 0 ? normalized.slice(0, firstGlob) : normalized;
@@ -284,20 +274,49 @@ function externalObservationRoots(cwdAbs: string, allowed: string[]): string[] {
 }
 
 function captureCwdObservation(cwd: string): CwdObservation | undefined {
-  const statusLines = captureGitStatus(cwd);
-  if (!statusLines) return undefined;
+  const rawStatusLines = captureGitStatus(cwd);
+  if (!rawStatusLines) return undefined;
+  // RunStateStore writes checkpoints while the orchestration is running. Those
+  // are transport bookkeeping, not executor/product mutations, and must not
+  // poison predicted-write-set enforcement. Filtering before signatures also
+  // avoids hashing thousands of historical checkpoint files in dirty repos.
+  const statusLines = rawStatusLines.filter((line) => {
+    const paths = pathsFromGitStatusLine(line);
+    return paths.length === 0 || !paths.every((file) => isManagedRunStatePath(cwd, file));
+  });
   const files = captureCwdStatusFileSignatures(cwd, statusLines);
   if (!files) return undefined;
   return { statusLines, files };
 }
 
+function managedRunsRoot(): string {
+  const override = process.env.PI_ORCHESTRATOR_RUNS_ROOT?.trim();
+  return normalizeAbsoluteFsPath(
+    override || path.join(os.homedir(), ".pi", "pi-orchestrator-extension", "runs-state"),
+  );
+}
+
+function isManagedRunStatePath(cwd: string, relativeFile: string): boolean {
+  const absolute = normalizeAbsoluteFsPath(path.resolve(toNativePath(cwd), toNativePath(relativeFile)));
+  return pathInsideOrEqual(absolute, managedRunsRoot());
+}
+
 function captureGitStatus(cwd: string): string[] | undefined {
   try {
-    const result = spawnSync("git", ["-C", toNativePath(cwd), "status", "--short", "--untracked-files=all"], {
-      timeout: 5000,
-      encoding: "utf8",
-      windowsHide: true,
-    });
+    const result = spawnSync(
+      "git",
+      ["-C", toNativePath(cwd), "status", "--short", "--untracked-files=all", "--", "."],
+      {
+        timeout: 5000,
+        encoding: "utf8",
+        windowsHide: true,
+        // Dirty orchestration worktrees can legitimately contain thousands of
+        // generated/run-state files. Node's 1 MiB spawnSync default otherwise
+        // returns ENOBUFS and incorrectly classifies an observable Git cwd as
+        // WRITE_SET_UNOBSERVABLE before any executor can start.
+        maxBuffer: 32 * 1024 * 1024,
+      },
+    );
     if (result.status !== 0) return undefined;
     return (result.stdout ?? "")
       .split("\n")

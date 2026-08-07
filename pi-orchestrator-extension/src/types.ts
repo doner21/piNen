@@ -113,11 +113,11 @@ export interface NormalizedParams {
   executorFallbackProvider?: string;
   verifierFallbackModel?: string;
   verifierFallbackProvider?: string;
-  /** Comma-separated or array of proposed/allowed file paths. PEV and frozen-gate
-   *  enforce this during execution; dual-plan accepts it only in discovery-only mode. */
+  /** Comma-separated or array of file paths the contract allows the executor to mutate.
+   *  Used by discovery-only mode and write-set enforcement (predict-then-write). */
   predictedWriteSet?: string[];
-  /** When true on PEV or dual-plan, run read-only planning and return the predicted
-   *  write set without spawning executor or verifier subagents. */
+  /** When true, run planners and synthesis only; return the predicted write set
+   *  without spawning any executor or verifier subagents. */
   discoveryOnly: boolean;
 }
 

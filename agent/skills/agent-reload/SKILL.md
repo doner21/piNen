@@ -109,8 +109,8 @@ Example:
 
 ```
 RESUME AFTER PI RELOAD:
-cwd: <project-directory>
-Prior task: implementing the agent-reload extension and skill (NenFlow run historical orchestration run).
+cwd: ~/.pi
+Prior task: implementing the agent-reload extension and skill (NenFlow run RUN_20260620-194054).
 Next steps: write ATT_4_EXECUTION.md and ATT_4_VERIFIER_BRIEF.md, then run the static verification grep/TS checks from the plan.
 Relevant files: agent/extensions/agent-reload/index.ts, agent/skills/agent-reload/SKILL.md
 ```

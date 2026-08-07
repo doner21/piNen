@@ -114,11 +114,11 @@ Title: "[Meeting Topic] - Pre-Read (Internal)"
 
 Content structure:
 - **Meeting Overview**: Date, time, attendees, purpose
-- **Background Context**: 
+- **Background Context**:
   - What this meeting is about (2-3 sentences)
   - Why it matters (business context)
   - Links to related Notion pages
-- **Current Status**: 
+- **Current Status**:
   - Where we are now (from Notion content)
   - Recent updates and progress
   - Key metrics or data
@@ -153,12 +153,12 @@ Content structure:
   1. Topic 1 (10 min)
   2. Topic 2 (20 min)
   3. Topic 3 (15 min)
-- **Discussion Topics**: 
+- **Discussion Topics**:
   - Key items to cover
   - Questions to answer
-- **Decisions Needed**: 
+- **Decisions Needed**:
   - Clear decision points
-- **Action Items**: 
+- **Action Items**:
   - (To be filled during meeting)
 - **Related Resources**:
   - Links to relevant pages

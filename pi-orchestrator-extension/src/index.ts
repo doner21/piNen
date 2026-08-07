@@ -44,20 +44,18 @@ export { modelAliasFromText } from "./model-aliases";
 
 // ── Shape imports (orchestration paradigms) ───────────────────────────
 import { composablePipelineShape } from "./shapes/composable-pipeline";
-import {
-  dualPlanSynthesisExecuteVerifyShape,
-  DUAL_PLAN_DISCOVERY_PREFLIGHT_ROUTES,
-} from "./shapes/dual-plan-synthesis-execute-verify";
+import { dualPlanSynthesisExecuteVerifyShape } from "./shapes/dual-plan-synthesis-execute-verify";
 import { evidenceAuditShape } from "./shapes/evidence-audit";
 import { frozenGateFixLoopShape } from "./shapes/frozen-gate-fix-loop";
 import { independentReplicationShape } from "./shapes/independent-replication";
 import { multiVerifyVoteShape } from "./shapes/multi-verify-vote";
 import { paradigmCreatorShape } from "./shapes/paradigm-creator";
 import { planExecuteVerifyShape } from "./shapes/plan-execute-verify";
-import { safeGithubPublishShape } from "./shapes/safe-github-publish";
 // shape-builder generated imports:start
+import { venueRescueSynthesisShape } from "./shapes/venue-rescue-synthesis";
 import { preregisteredConcurrencySpikeShape } from "./shapes/preregistered-concurrency-spike";
 import { m66ExplicitRoutingProofShape } from "./shapes/m66-explicit-routing-proof";
+import { ssiSingleWriterExclusiveLaneShape } from "./shapes/ssi-single-writer-exclusive-lane";
 // shape-builder generated imports:end
 import { shapeBuilderShape } from "./shapes/shape-builder";
 import { verifyOnlyShape } from "./shapes/verify-only";
@@ -101,6 +99,12 @@ import {
   SubagentTerminalAmbiguousError,
 } from "./substrate";
 import { getPiChildFirstJsonTimeoutMs, isPiJsonProtocolEvent, killOwnedProcessTree, resolvePiChildCommand } from "./child-launch.ts";
+import {
+  resolveDynamicWorkflow,
+  resolvePinnedDynamicWorkflow,
+  runDynamicWorkflow,
+  type ResolvedDynamicWorkflow,
+} from "./dynamic-workflow";
 
 // ── Orchestration paradigm names (kept in sync with shapeRegistry) ───
 const ORCHESTRATION_PARADIGM_NAMES: readonly string[] = [
@@ -116,10 +120,11 @@ const ORCHESTRATION_PARADIGM_NAMES: readonly string[] = [
   "frozen-gate-fix-loop",
   "evidence-audit",
   "independent-replication",
-  "safe-github-publish",
   // shape-builder generated paradigm names:start
+    "venue-rescue-synthesis",
   "preregistered-concurrency-spike",
   "m66-explicit-routing-proof",
+  "ssi-single-writer-exclusive-lane",
 // shape-builder generated paradigm names:end
 ];
 
@@ -136,13 +141,17 @@ const shapeRegistry = new Map<string, OrchestrationShape>([
   ["frozen-gate-fix-loop", frozenGateFixLoopShape],
   ["evidence-audit", evidenceAuditShape],
   ["independent-replication", independentReplicationShape],
-  ["safe-github-publish", safeGithubPublishShape],
   // shape-builder generated registry entries:start
+    ["venue-rescue-synthesis", venueRescueSynthesisShape],
   ["preregistered-concurrency-spike", preregisteredConcurrencySpikeShape],
   ["m66-explicit-routing-proof", m66ExplicitRoutingProofShape],
+  ["ssi-single-writer-exclusive-lane", ssiSingleWriterExclusiveLaneShape],
 // shape-builder generated registry entries:end
   ["shape-builder", shapeBuilderShape],
 ]);
+
+/** Native names are reserved: declarative artifacts can never shadow them. */
+export const NATIVE_SHAPE_NAMES: ReadonlySet<string> = new Set(shapeRegistry.keys());
 
 interface AgentProfile {
   name: string;
@@ -427,7 +436,7 @@ const MAX_SUBAGENTS_LIMIT = 100;
 
 const orchestrateParamsSchema = Type.Object({
   task: Type.Optional(Type.String({ description: "Task for deterministic multi-agent orchestration. Optional when `resume` is provided (the stored task is reused)." })),
-  resume: Type.Optional(Type.String({ description: "Resume a previously aborted run by its run id (e.g. example-run-id). Restores checkpointed phases, re-attaches detached survivor subagents, and continues from the first incomplete phase (ABORT-RESUME-DESIGN.md). Supported paradigms: plan-execute-verify, preregistered-concurrency-spike, dual-plan-synthesis-execute-verify, frozen-gate-fix-loop, evidence-audit, independent-replication." })),
+  resume: Type.Optional(Type.String({ description: "Resume a previously aborted run by its run id (e.g. orc-mr3hsj4y-6j3b). Restores checkpointed phases, re-attaches detached survivor subagents, and continues from the first incomplete phase (ABORT-RESUME-DESIGN.md). Supported paradigms: plan-execute-verify, preregistered-concurrency-spike, dual-plan-synthesis-execute-verify, frozen-gate-fix-loop, evidence-audit, independent-replication." })),
   plannerAgent: Type.Optional(Type.String({ default: "planner" })),
   executorAgent: Type.Optional(Type.String({ default: "coder" })),
   verifierAgent: Type.Optional(Type.String({ default: "reviewer" })),
@@ -446,11 +455,11 @@ const orchestrateParamsSchema = Type.Object({
   executorProvider: Type.Optional(Type.String({ description: "Override provider for executor agent(s) (e.g. deepseek)." })),
   verifierModel: Type.Optional(Type.String({ description: "Override model for the verifier agent (e.g. gpt-5.5 for thorough review)." })),
   verifierProvider: Type.Optional(Type.String({ description: "Override provider for the verifier agent (e.g. openai-codex)." })),
-  paradigm: Type.Optional(Type.String({ description: `Explicitly select the orchestration paradigm/shape. Valid values: ${ORCHESTRATION_PARADIGM_NAMES.join(", ")}. When omitted, the paradigm is inferred from task keywords. V1 paradigm-creator, shape-builder, win-console-spawn-root-cause, and win-lifecycle-process-trace must be selected explicitly.` })),
+  paradigm: Type.Optional(Type.String({ description: `Explicitly select an orchestration paradigm/shape. Built-ins: ${ORCHESTRATION_PARADIGM_NAMES.join(", ")}. A safe kebab-case declarative workflow name discovered from a trusted user/project workflow root is also accepted immediately, without reload. When omitted, a built-in paradigm is inferred from task keywords.` })),
   hardGates: Type.Optional(Type.String({ description: 'Hard-gate mode: "strict" | "advisory" | "off". Default "advisory": text-shape heuristics are demoted to warnings, the verifier verdict gates, and only effect-based contradictions (zero observed mutations for implementation work) can force FAIL.' })),
   preflight: Type.Optional(Type.Boolean({ description: "Run a 1-token provider health ping for each routed provider/model before spawning any subagent (default true). Failures produce a structured machine-readable error and a partial report." })),
-  predictedWriteSet: Type.Optional(Type.String({ description: 'Optional write scope: comma- or newline-separated repo-relative paths ("docs/a.md"), directory prefixes ("docs/"), simple globs ("tools/*.mjs"), or absolute external paths. Deterministic post-execution enforcement is supported by plan-execute-verify and frozen-gate-fix-loop. dual-plan-synthesis-execute-verify accepts this only with discoveryOnly as proposed scope; other shapes fail closed with PREDICTED_WRITE_SET_UNSUPPORTED_PARADIGM.' })),
-  discoveryOnly: Type.Optional(Type.Boolean({ description: "Discovery-only mode (predict-then-write): supported by plan-execute-verify and dual-plan-synthesis-execute-verify. It runs read-only planning, returns the plan plus predicted write set, and spawns no executors or verifiers. Other shapes fail closed with DISCOVERY_ONLY_UNSUPPORTED_PARADIGM." })),
+  predictedWriteSet: Type.Optional(Type.String({ description: 'Contract-granted predicted write set: comma- or newline-separated repo-relative paths ("docs/a.md"), directory prefixes ("docs/"), or simple globs ("tools/*.mjs"). When set, per-task worktree deltas are checked deterministically after execution — any file mutated outside the set forces FAIL with WRITE_SET_VIOLATION naming the file, before verifier spawn. A plan whose predicted_write_set exceeds this scope fails before any executor spawns.' })),
+  discoveryOnly: Type.Optional(Type.Boolean({ description: "Discovery-only mode (predict-then-write): run intake and planning, return the plan plus predicted write set as a manifest, and spawn no executors or verifiers. Use it to review/authorize scope cheaply before any mutation." })),
   plannerFallbackModel: Type.Optional(Type.String({ description: "Fallback model(s) for the planner when its primary route fails pre-flight. Comma-separated for a chain (e.g. 'claude-opus-4-20250514,deepseek-v4-pro,deepseek-v4-flash')." })),
   plannerFallbackProvider: Type.Optional(Type.String({ description: "Fallback provider(s) for the planner when its primary route fails pre-flight. Comma-separated, paired positionally with plannerFallbackModel." })),
   executorFallbackModel: Type.Optional(Type.String({ description: "Fallback model(s) for executors when their primary route fails pre-flight. Comma-separated for a chain." })),
@@ -508,7 +517,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("orchestrate", {
-    description: "Run deterministic planner/executor/verifier orchestration. Flags: --max-subagents N, --max-retries N, --concurrency/--executor-concurrency N, --planner-count N, --verifier-count N, --planner-model, --executor-model, --verifier-model, --planner-fallback-model (comma-sep chain), --write-set paths (PEV/frozen enforcement), --discovery-only (PEV/dual-plan read-only planning), etc.",
+    description: "Run deterministic planner/executor/verifier orchestration. Flags: --max-subagents N, --max-retries N, --concurrency/--executor-concurrency N, --planner-count N, --verifier-count N, --planner-model, --executor-model, --verifier-model, --planner-fallback-model (comma-sep chain), --write-set paths (deterministic write-scope enforcement), --discovery-only (plan without executing), etc.",
     handler: async (args, ctx) => {
       let commandParams: Record<string, unknown>;
       try {
@@ -750,7 +759,7 @@ function parseOrchestrateCommandArgs(args: string): Record<string, unknown> {
         params.verifierFallbackProvider = value;
         break;
       default:
-        throw new Error(`Unknown flag --${flag}. Supported flags: --max-subagents, --max-retries, --concurrency, --executor-concurrency, --executor-count, --planner-count, --planner-concurrency, --verifier-count, --verifier-concurrency, --planner-agent, --executor-agent, --verifier-agent, --cwd, --allow-local-model, --paradigm, --hard-gates, --write-set, --discovery-only, --preflight/--no-preflight, --planner-model, --planner-provider, --executor-model, --executor-provider, --verifier-model, --verifier-provider, --planner-fallback-model, --planner-fallback-provider, --executor-fallback-model, --executor-fallback-provider, --verifier-fallback-model, --verifier-fallback-provider. Fallback params accept comma-separated chains (e.g. --planner-fallback-model opus,deepseek-v4-pro,deepseek-v4-flash). --write-set is enforced by plan-execute-verify and frozen-gate-fix-loop (or proposed by dual-plan discovery); --discovery-only is supported by plan-execute-verify and dual-plan-synthesis-execute-verify.`);
+        throw new Error(`Unknown flag --${flag}. Supported flags: --max-subagents, --max-retries, --concurrency, --executor-concurrency, --executor-count, --planner-count, --planner-concurrency, --verifier-count, --verifier-concurrency, --planner-agent, --executor-agent, --verifier-agent, --cwd, --allow-local-model, --paradigm, --hard-gates, --write-set, --discovery-only, --preflight/--no-preflight, --planner-model, --planner-provider, --executor-model, --executor-provider, --verifier-model, --verifier-provider, --planner-fallback-model, --planner-fallback-provider, --executor-fallback-model, --executor-fallback-provider, --verifier-fallback-model, --verifier-fallback-provider. Fallback params accept comma-separated chains (e.g. --planner-fallback-model opus,deepseek-v4-pro,deepseek-v4-flash). --write-set takes comma-separated repo-relative paths/prefixes and enables deterministic write-set enforcement; --discovery-only plans without executing.`);
     }
   }
 
@@ -865,27 +874,6 @@ function normalizeParams(params: Record<string, unknown>, defaultCwd: string): N
   };
 }
 
-function assertOptionalControlSupport(paradigm: string, params: NormalizedParams): void {
-  const discoverySupported = paradigm === "plan-execute-verify" || paradigm === "dual-plan-synthesis-execute-verify";
-  if (params.discoveryOnly && !discoverySupported) {
-    throw new Error(
-      `DISCOVERY_ONLY_UNSUPPORTED_PARADIGM: discoveryOnly is not supported by "${paradigm}". ` +
-        `Use plan-execute-verify or dual-plan-synthesis-execute-verify.`,
-    );
-  }
-
-  const writeSetSupported =
-    paradigm === "plan-execute-verify" ||
-    paradigm === "frozen-gate-fix-loop" ||
-    (paradigm === "dual-plan-synthesis-execute-verify" && params.discoveryOnly);
-  if (params.predictedWriteSet?.length && !writeSetSupported) {
-    throw new Error(
-      `PREDICTED_WRITE_SET_UNSUPPORTED_PARADIGM: predictedWriteSet is not enforced by "${paradigm}". ` +
-        `Use plan-execute-verify or frozen-gate-fix-loop, or use it only as proposed scope with dual-plan discoveryOnly.`,
-    );
-  }
-}
-
 async function runOrchestration(
   params: NormalizedParams,
   signal?: AbortSignal,
@@ -930,6 +918,23 @@ async function runOrchestration(
   };
 
   const paradigm = inferOrchestrationParadigm(params);
+  let resolvedDynamicWorkflow: ResolvedDynamicWorkflow | undefined;
+  if (!shapeRegistry.has(paradigm)) {
+    // Invocation-time resolution is deliberately uncached: a workflow created
+    // earlier in this same Pi process is immediately visible without reload.
+    // Resume never re-reads mutable source; it validates and uses the exact
+    // snapshot pinned in the original run state.
+    resolvedDynamicWorkflow = resumeState
+      ? resolvePinnedDynamicWorkflow(
+          resumeState.state.dynamicWorkflow,
+          paradigm,
+          NATIVE_SHAPE_NAMES,
+        )
+      : resolveDynamicWorkflow(paradigm, {
+          cwd: params.cwd,
+          nativeNames: NATIVE_SHAPE_NAMES,
+        });
+  }
   emit(`Run ${state.runId}: paradigm=${paradigm}, hardGates=${params.hardGates}, preflight=${params.preflight}.`);
   const plannerSelected = resolveNamedRoleRoute(agents, params.plannerAgent, params.plannerModel, params.plannerProvider);
   const executorSelected = resolveNamedRoleRoute(agents, params.executorAgent, params.executorModel, params.executorProvider);
@@ -954,21 +959,28 @@ async function runOrchestration(
   }
 
   try {
-  // Optional controls are shape-specific. Fail before provider preflight so an
-  // unsupported control can never be silently ignored or spawn any subprocess.
-  assertOptionalControlSupport(paradigm, params);
-
   // ── Pre-flight provider health checks (F5) ──────────────────────────
-  if (params.preflight) {
-    await runProviderPreflight(params, agents, inheritedModel, paradigm, signal, emit);
+  const deterministicDynamicCanary = Boolean(resolvedDynamicWorkflow) && params.task.trim() === "SHAPE_CANARY";
+  // composable-pipeline owns role-safe route resolution because its composed
+  // planner seats do not map one-to-one to named agent profiles. Let the shape
+  // reject forbidden routes and preflight every actually-used role before any
+  // work spawn; generic named-profile preflight would ping the wrong route.
+  const shapeOwnsPreflight = paradigm === "composable-pipeline";
+  if (params.preflight && !deterministicDynamicCanary && !shapeOwnsPreflight) {
+    await runProviderPreflight(params, agents, inheritedModel, signal, emit);
+  } else if (shapeOwnsPreflight && params.preflight) {
+    emit("Preflight delegated to composable-pipeline role-safe route resolution.");
+  } else if (deterministicDynamicCanary && params.preflight) {
+    emit("Dynamic workflow canary: skipping provider preflight to preserve the deterministic zero-process contract.");
   }
 
   // ── Shape-based orchestration dispatch ────────────────────────────────
   if (paradigm !== "plan-execute-verify") {
     const shape = shapeRegistry.get(paradigm);
-    if (!shape) {
+    if (!shape && !resolvedDynamicWorkflow) {
       throw new Error(
-        `Unknown orchestration paradigm "${paradigm}". Available paradigms: ${[...shapeRegistry.keys()].join(", ")}.`,
+        `Unknown orchestration paradigm "${paradigm}". Available paradigms: ${[...shapeRegistry.keys()].join(", ")}. ` +
+          `No ${paradigm}.workflow.json artifact was found in the trusted project or user workflow roots.`,
       );
     }
 
@@ -996,7 +1008,9 @@ async function runOrchestration(
     }
     emitShape(`[orchestrate] Dispatching to "${paradigm}" shape…`);
 
-    const result: OrchestrationShapeResult = await shape.run(context);
+    const result: OrchestrationShapeResult = resolvedDynamicWorkflow
+      ? await runDynamicWorkflow(resolvedDynamicWorkflow, context)
+      : await shape!.run(context);
     emit(`[orchestrate] "${paradigm}" shape completed.`);
 
     return {
@@ -1013,18 +1027,6 @@ async function runOrchestration(
   }
   const maxAttempts = params.maxRetries + 1;
 
-  // Discovery planners receive a cloned read-only profile. This preserves the
-  // selected route and prompt while removing shell and mutation-capable tools.
-  if (params.discoveryOnly) {
-    const plannerProfile = agents.get(params.plannerAgent);
-    if (plannerProfile) {
-      agents.set(params.plannerAgent, {
-        ...plannerProfile,
-        tools: ["read", "grep", "find", "ls"],
-      });
-    }
-  }
-
   // ── Checkpoint/resume wiring (ABORT-RESUME-DESIGN.md) ───────────────────
   // Phases are NAME-keyed so the executor phase can be split PER TASK
   // (attempt-N-executor-<taskId>), each spawned in abort-survivor mode and each
@@ -1032,8 +1034,8 @@ async function runOrchestration(
   // single per-attempt phases (attempt-N-planner / attempt-N-verifier). Phase
   // indices are allocated deterministically in first-touch order; on resume they
   // are recovered by NAME from the persisted state.json so they line up with the
-  // checkpoints/survivors already on disk (even the pre-any-phase abort edge
-  // observed in production). On resume, completed phases are RESTORED
+  // checkpoints/survivors already on disk (even the pre-any-phase abort edge,
+  // production run orc-mr3x90b5-00iz). On resume, completed phases are RESTORED
   // (not re-spawned) and a detached survivor is re-attached via bounded polling.
   const pevStore = resumeState
     ? RunStateStore.open(resumeState.state.runId)
@@ -1184,16 +1186,6 @@ async function runOrchestration(
       planner = plannerOutputs[selectedPlannerIndex];
       pevCheckpoint(plannerName, planner, plannerRoute ?? {});
     }
-    if (params.discoveryOnly) {
-      const mutatingPlannerResults = plannerOutputs.filter((result) => (result.toolCalls?.mutating ?? 0) > 0);
-      if (mutatingPlannerResults.length > 0) {
-        throw new Error(
-          `DISCOVERY_ONLY_MUTATION_DETECTED: ${mutatingPlannerResults.length} planner result(s) reported mutating tool calls; ` +
-            `refusing to return a discovery manifest.`,
-        );
-      }
-    }
-
     state.planText = planner.text;
     let plan = parsePlan(planner.text, params.task);
     plan = enforceTaskSizeCap(plan, computeAdaptiveTaskSizeCap(params.executorModel));
@@ -1252,7 +1244,7 @@ async function runOrchestration(
       const manifestLines = [
         `# Discovery manifest (run ${state.runId})`,
         "",
-        "Discovery-only mode: no executor or verifier subagents were spawned; this run made no project mutations.",
+        "Discovery-only mode: no executor or verifier subagents were spawned; this run mutated no files.",
         "",
         `## Plan (${plan.tasks.length} task(s))`,
         ...plan.tasks.map((t) => `- ${t.id}: ${t.description}${t.dependsOn.length ? ` (depends on ${t.dependsOn.join(", ")})` : ""}`),
@@ -1679,7 +1671,6 @@ async function runProviderPreflight(
   params: NormalizedParams,
   agents: Map<string, AgentProfile>,
   inheritedModel: { provider?: string; model?: string } | undefined,
-  paradigm: string,
   signal: AbortSignal | undefined,
   emit: (text: string) => void,
 ): Promise<void> {
@@ -1716,17 +1707,9 @@ async function runProviderPreflight(
     return chain;
   };
 
-  interface PreflightRoleConfig {
-    role: string;
-    provider?: string;
-    model?: string;
-    fallbackChain: Array<{ model?: string; provider?: string }>;
-    applyFallback: (model?: string, provider?: string) => void;
-  }
-
-  const allConfiguredRoles: PreflightRoleConfig[] = [
+  const roles = [
     {
-      role: "planner",
+      role: "planner" as const,
       ...resolveRoute(params.plannerAgent, params.plannerModel, params.plannerProvider),
       fallbackChain: parseFallbackChain(params.plannerFallbackModel, params.plannerFallbackProvider),
       applyFallback: (model?: string, provider?: string) => {
@@ -1735,7 +1718,7 @@ async function runProviderPreflight(
       },
     },
     {
-      role: "executor",
+      role: "executor" as const,
       ...resolveRoute(params.executorAgent, params.executorModel, params.executorProvider),
       fallbackChain: parseFallbackChain(params.executorFallbackModel, params.executorFallbackProvider),
       applyFallback: (model?: string, provider?: string) => {
@@ -1744,7 +1727,7 @@ async function runProviderPreflight(
       },
     },
     {
-      role: "verifier",
+      role: "verifier" as const,
       ...resolveRoute(params.verifierAgent, params.verifierModel, params.verifierProvider),
       fallbackChain: parseFallbackChain(params.verifierFallbackModel, params.verifierFallbackProvider),
       applyFallback: (model?: string, provider?: string) => {
@@ -1752,28 +1735,15 @@ async function runProviderPreflight(
         if (provider) params.verifierProvider = provider;
       },
     },
-  ];
+  ].filter((role) => role.provider || role.model);
 
-  const roles: PreflightRoleConfig[] = params.discoveryOnly
-    ? paradigm === "dual-plan-synthesis-execute-verify"
-      ? DUAL_PLAN_DISCOVERY_PREFLIGHT_ROUTES.map((route) => ({
-          role: route.role,
-          provider: route.provider,
-          model: route.model,
-          fallbackChain: [],
-          applyFallback: () => {},
-        }))
-      : allConfiguredRoles.filter((role) => role.role === "planner")
-    : allConfiguredRoles;
-  const routedRoles = roles.filter((role) => role.provider || role.model);
-
-  if (routedRoles.length === 0) {
+  if (roles.length === 0) {
     emit("Preflight: no explicitly routed provider/model pairs — skipping health pings.");
     return;
   }
 
   const results = await preflightProviderHealth(
-    routedRoles.map((role) => ({ roles: [role.role], provider: role.provider, model: role.model })),
+    roles.map((role) => ({ roles: [role.role], provider: role.provider, model: role.model })),
     {
       cwd: params.cwd,
       allowLocalModel: params.allowLocalModel,
@@ -1786,7 +1756,7 @@ async function runProviderPreflight(
   const unrecovered: ProviderHealthError[] = [];
   for (const result of results.filter((r) => !r.ok)) {
     for (const roleName of result.roles) {
-      const role = routedRoles.find((r) => r.role === roleName);
+      const role = roles.find((r) => r.role === roleName);
       if (!role) continue;
 
       // F4 companion: multi-step fallback chain — try each fallback in order
@@ -1848,7 +1818,7 @@ async function runProviderPreflight(
     throw error;
   }
 
-  emit(`Preflight: all ${routedRoles.length} routed role route(s) healthy.`);
+  emit(`Preflight: all ${roles.length} routed role route(s) healthy.`);
 }
 
 function computeRequiredSubagentBudget(
@@ -2182,9 +2152,7 @@ async function executeExecutorTaskWithRecovery(
         undefined,
         true,
       );
-    } catch (err) {
-      if (err instanceof SubagentDetachedError) throw err;
-      if (err instanceof SubagentTerminalAmbiguousError) throw err;
+    } catch {
       emit("Task " + task.id + ": handoff continuation spawn failed — escalating to split.");
       state.recoveryLog.push(
         "[RECOVERY] " + task.id + ": CONTINUE spawn failed — escalating to SPLIT.",
@@ -2310,8 +2278,6 @@ async function splitAndExecuteTask(
         true,
       );
     } catch (err) {
-      if (err instanceof SubagentDetachedError) throw err;
-      if (err instanceof SubagentTerminalAmbiguousError) throw err;
       emit("Task " + task.id + ": subtask " + subtask.id + " spawn failed — " + String(err));
       subtaskOutputs.push({
         taskId: subtask.id,
@@ -3909,8 +3875,8 @@ function parseModelCandidate(candidate: string): RoleModelOverride | undefined {
   // NOT a model. Only route it if it validates against the known-models
   // registry (modelAliasFromText / structured provider forms above). Unknown
   // tokens are ignored with a logged notice — never routed — so ordinary prose
-  // can no longer hijack a role route (production evidence showed a planner
-  // routed to anthropic/today → preflight 404).
+  // can no longer hijack a role route (production evidence: run orc-mr43a2em-dvzs,
+  // planner routed to anthropic/today → preflight 404).
   noteRejectedNlRouteToken(cleaned);
   return undefined;
 }
@@ -4775,14 +4741,8 @@ function optionalString(value: unknown): string | undefined {
 }
 
 function stringArray(value: unknown): string[] | undefined {
-  const items = Array.isArray(value)
-    ? value
-    : typeof value === "string"
-      ? value.split(",")
-      : undefined;
-  if (!items) return undefined;
-  const normalized = items.map((item) => String(item).trim()).filter(Boolean);
-  return normalized.length ? normalized : undefined;
+  if (!Array.isArray(value)) return undefined;
+  return value.map((item) => String(item).trim()).filter(Boolean);
 }
 
 function clampInt(value: unknown, fallback: number, min: number, max: number): number {

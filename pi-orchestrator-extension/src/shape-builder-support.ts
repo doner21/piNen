@@ -11,17 +11,23 @@
  * shape-builder shape and by tests.
  */
 
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { existsSync, lstatSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
 
 // ── Constants ─────────────────────────────────────────────────────────────
 
 export const SHAPE_BUILDER_LIFECYCLE_STATUSES = [
   "proposed",
   "implementation_reported",
+  /** Data-only artifact verification; unlike native code, never implies reload. */
+  "declarative_verified",
   "implemented_verified",
+  /** Same-process discovery for declarative workflows. */
+  "runtime_discovered",
+  /** Post-reload discovery retained for explicit native shapes. */
   "reloaded_discovered",
   "canary_passed",
 ] as const;
@@ -31,7 +37,9 @@ export type ShapeBuilderLifecycleStatus = (typeof SHAPE_BUILDER_LIFECYCLE_STATUS
 export const SHAPE_BUILDER_LIFECYCLE_RANK: Record<ShapeBuilderLifecycleStatus, number> = {
   proposed: 10,
   implementation_reported: 20,
+  declarative_verified: 30,
   implemented_verified: 30,
+  runtime_discovered: 40,
   reloaded_discovered: 40,
   canary_passed: 50,
 };
@@ -41,6 +49,24 @@ export const MAX_SHAPE_BUILDER_PHASES = 8;
 export const MIN_SHAPE_BUILDER_PHASES = 1;
 export const MAX_SHAPE_BUILDER_MAX_SUBAGENTS = 20;
 export const MIN_SHAPE_BUILDER_MAX_SUBAGENTS = 1;
+export const MAX_SHAPE_BUILDER_NAME_CHARS = 64;
+export const MAX_SHAPE_BUILDER_PURPOSE_CHARS = 2_000;
+export const MAX_SHAPE_BUILDER_ROLE_CHARS = 64;
+export const MAX_SHAPE_BUILDER_AGENT_NAME_CHARS = 128;
+export const MAX_SHAPE_BUILDER_PROMPT_CHARS = 16_000;
+export const MAX_SHAPE_BUILDER_EXPECTED_OUTPUT_CHARS = 4_000;
+export const MAX_SHAPE_BUILDER_POLICY_CHARS = 2_000;
+export const MAX_SHAPE_BUILDER_EXPLANATION_CHARS = 4_000;
+
+const SHAPE_BUILDER_SPEC_KEYS = new Set([
+  "schemaVersion", "action", "artifactKind", "scope", "targetName", "purpose",
+  "phases", "maxSubagents", "maxIterations", "terminationCondition",
+  "evidenceModel", "failureBehavior", "userFacingExplanation",
+]);
+const SHAPE_BUILDER_PHASE_KEYS = new Set([
+  "name", "role", "agentName", "prompt", "expectedOutput",
+]);
+const SAFE_BUILDER_TOKEN = /^[a-zA-Z][a-zA-Z0-9._-]*$/;
 
 // Collection of all reserved / registered names. Updated by shape builder.
 export const RESERVED_SHAPE_NAMES: ReadonlySet<string> = new Set([
@@ -53,6 +79,13 @@ export const RESERVED_SHAPE_NAMES: ReadonlySet<string> = new Set([
   "shape-builder",
   "win-console-spawn-root-cause",
   "win-lifecycle-process-trace",
+  "frozen-gate-fix-loop",
+  "evidence-audit",
+  "independent-replication",
+  "venue-rescue-synthesis",
+  "preregistered-concurrency-spike",
+  "m66-explicit-routing-proof",
+  "ssi-single-writer-exclusive-lane",
 ]);
 
 export const SHAPE_BUILDER_VERIFIER_MARKER = "SHAPE-BUILDER IMPLEMENTATION VERIFIER";
@@ -82,6 +115,24 @@ export interface ShapeBuilderVerifierJson {
   failReasons: string[];
 }
 
+/** Deterministic verification contract for ordinary declarative builds. */
+export interface ShapeBuilderDeclarativeVerification {
+  overall: "pass";
+  implemented_verified: true;
+  reloadRequired: false;
+  targetName: string;
+  artifactKind: "declarative-workflow";
+  scope: "user" | "project";
+  sourcePath: string;
+  contentHash: string;
+  schemaVersion: number;
+  checks: Array<{
+    id: "schema" | "trusted-write" | "runtime-discovery" | "deterministic-canary";
+    status: "pass";
+    citation: string;
+  }>;
+}
+
 export interface ShapeBuilderAnchoredEdit {
   path: string;
   anchor: string;
@@ -102,8 +153,11 @@ export interface ShapeBuilderLifecycleState {
   updatedAt: string;
   generatedFiles: string[];
   anchoredEdits: ShapeBuilderAnchoredEdit[];
+  /** Absent on legacy state files; defaults conceptually to native-shape. */
+  artifactKind?: "declarative-workflow" | "native-shape";
+  scope?: "user" | "project";
   implementationReport?: Record<string, unknown>;
-  verification?: ShapeBuilderVerifierJson;
+  verification?: ShapeBuilderVerifierJson | ShapeBuilderDeclarativeVerification;
   discoveryProbe?: Record<string, unknown>;
   canary?: Record<string, unknown>;
   failures: Array<{ at: string; gate: string; reason: string; evidence?: unknown }>;
@@ -148,6 +202,10 @@ export interface ShapeBuilderSpecPhase {
 export interface ShapeBuilderSpec {
   schemaVersion: 1;
   action: "build";
+  /** Ordinary builds are data-only and immediately discoverable. */
+  artifactKind: "declarative-workflow" | "native-shape";
+  /** Applies to declarative workflows; native shapes always target the extension. */
+  scope: "user" | "project";
   targetName: string;
   purpose: string;
   phases: ShapeBuilderSpecPhase[];
@@ -194,22 +252,51 @@ export function parseShapeBuilderSpecFromTask(task: string): ShapeBuilderSpec | 
   }
 
   const raw = parsed as Record<string, unknown>;
-  const phases: ShapeBuilderSpecPhase[] = Array.isArray(raw.phases)
-    ? raw.phases.map((item: unknown) => {
-        const phase = item && typeof item === "object" ? item as Record<string, unknown> : {};
-        return {
-          name: String(phase.name ?? "").trim(),
-          role: String(phase.role ?? "").trim(),
-          agentName: String(phase.agentName ?? "").trim(),
-          prompt: String(phase.prompt ?? "").trim(),
-          expectedOutput: String(phase.expectedOutput ?? "").trim(),
-        };
-      })
-    : [];
+  const unknownSpecKeys = Object.keys(raw).filter((key) => !SHAPE_BUILDER_SPEC_KEYS.has(key));
+  if (unknownSpecKeys.length > 0) {
+    return { error: `Spec contains unknown field(s): ${unknownSpecKeys.join(", ")}.` };
+  }
+  const scalarTypeErrors: string[] = [];
+  for (const [key, expectedType] of [
+    ["schemaVersion", "number"], ["action", "string"], ["artifactKind", "string"],
+    ["scope", "string"], ["targetName", "string"], ["purpose", "string"],
+    ["maxSubagents", "number"], ["maxIterations", "number"],
+    ["terminationCondition", "string"], ["evidenceModel", "string"],
+    ["failureBehavior", "string"], ["userFacingExplanation", "string"],
+  ] as const) {
+    if (raw[key] !== undefined && typeof raw[key] !== expectedType) scalarTypeErrors.push(`${key} must be a ${expectedType}`);
+  }
+  if (scalarTypeErrors.length > 0) return { error: `Invalid spec field type(s): ${scalarTypeErrors.join("; ")}.` };
+  if (raw.phases !== undefined && !Array.isArray(raw.phases)) return { error: "phases must be an array." };
+
+  const phases: ShapeBuilderSpecPhase[] = [];
+  for (const [index, item] of (Array.isArray(raw.phases) ? raw.phases : []).entries()) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      return { error: `phases[${index}] must be an object.` };
+    }
+    const phase = item as Record<string, unknown>;
+    const unknownPhaseKeys = Object.keys(phase).filter((key) => !SHAPE_BUILDER_PHASE_KEYS.has(key));
+    if (unknownPhaseKeys.length > 0) {
+      return { error: `phases[${index}] contains unknown field(s): ${unknownPhaseKeys.join(", ")}.` };
+    }
+    const nonString = [...SHAPE_BUILDER_PHASE_KEYS].filter(
+      (key) => phase[key] !== undefined && typeof phase[key] !== "string",
+    );
+    if (nonString.length > 0) return { error: `phases[${index}] field(s) must be strings: ${nonString.join(", ")}.` };
+    phases.push({
+      name: String(phase.name ?? "").trim(),
+      role: String(phase.role ?? "").trim(),
+      agentName: String(phase.agentName ?? "").trim(),
+      prompt: String(phase.prompt ?? "").trim(),
+      expectedOutput: String(phase.expectedOutput ?? "").trim(),
+    });
+  }
 
   return {
     schemaVersion: raw.schemaVersion as 1,
     action: raw.action as "build",
+    artifactKind: (raw.artifactKind === undefined ? "declarative-workflow" : raw.artifactKind) as ShapeBuilderSpec["artifactKind"],
+    scope: (raw.scope === undefined ? "user" : raw.scope) as ShapeBuilderSpec["scope"],
     targetName: String(raw.targetName ?? "").trim(),
     purpose: String(raw.purpose ?? "").trim(),
     phases,
@@ -229,34 +316,59 @@ export function validateShapeBuilderSpec(spec: ShapeBuilderSpec, reservedNames: 
 
   if (spec.schemaVersion !== 1) errors.push("schemaVersion must be 1.");
   if (spec.action !== "build") errors.push("action must be 'build'.");
+  if (spec.artifactKind !== "declarative-workflow" && spec.artifactKind !== "native-shape") {
+    errors.push("artifactKind must be 'declarative-workflow' or 'native-shape'.");
+  }
+  if (spec.scope !== "user" && spec.scope !== "project") {
+    errors.push("scope must be 'user' or 'project'.");
+  }
+  if (spec.artifactKind === "native-shape" && spec.scope !== "user") {
+    errors.push("native-shape builds do not accept project scope; native code is extension-owned and reload-gated.");
+  }
 
-  const name = normalizeShapeName(spec.targetName);
-  if (!name) errors.push("targetName is required.");
-  if (name && !/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(name)) {
-    errors.push("targetName must normalize to safe kebab-case starting with a letter.");
+  const rawName = String(spec.targetName ?? "").trim();
+  const name = normalizeShapeName(rawName);
+  if (!rawName) errors.push("targetName is required.");
+  if (rawName && (rawName !== name || !/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(rawName))) {
+    errors.push("targetName must already be safe lowercase kebab-case starting with a letter.");
+  }
+  if (rawName.length > MAX_SHAPE_BUILDER_NAME_CHARS) {
+    errors.push(`targetName must be at most ${MAX_SHAPE_BUILDER_NAME_CHARS} characters.`);
   }
   if (name && reservedNames.has(name)) {
     errors.push(`targetName "${name}" is already registered or reserved.`);
   }
 
   if (!spec.purpose.trim()) errors.push("purpose is required.");
+  if (spec.purpose.length > MAX_SHAPE_BUILDER_PURPOSE_CHARS) {
+    errors.push(`purpose must be at most ${MAX_SHAPE_BUILDER_PURPOSE_CHARS} characters.`);
+  }
 
   if (!Array.isArray(spec.phases) || spec.phases.length < MIN_SHAPE_BUILDER_PHASES) {
     errors.push(`At least ${MIN_SHAPE_BUILDER_PHASES} phase is required.`);
   } else if (spec.phases.length > MAX_SHAPE_BUILDER_PHASES) {
     errors.push(`At most ${MAX_SHAPE_BUILDER_PHASES} phases are allowed.`);
   } else {
+    const phaseIds = new Set<string>();
     spec.phases.forEach((phase, index) => {
+      const phaseId = normalizeShapeName(phase.name);
       if (!phase.name.trim()) errors.push(`Phase ${index + 1} requires a name.`);
+      if (!phaseId || phaseId.length > MAX_SHAPE_BUILDER_NAME_CHARS) errors.push(`Phase ${index + 1} name must normalize to a safe ID of at most ${MAX_SHAPE_BUILDER_NAME_CHARS} characters.`);
+      if (phaseId && phaseIds.has(phaseId)) errors.push(`Phase ${index + 1} duplicates normalized phase id "${phaseId}".`);
+      if (phaseId) phaseIds.add(phaseId);
       if (!phase.role.trim()) errors.push(`Phase ${index + 1} requires a role.`);
+      if (phase.role.length > MAX_SHAPE_BUILDER_ROLE_CHARS || (phase.role && !SAFE_BUILDER_TOKEN.test(phase.role))) errors.push(`Phase ${index + 1} role must be a bounded identifier token.`);
       if (!phase.agentName.trim()) errors.push(`Phase ${index + 1} requires an agentName.`);
+      if (phase.agentName.length > MAX_SHAPE_BUILDER_AGENT_NAME_CHARS || (phase.agentName && !SAFE_BUILDER_TOKEN.test(phase.agentName))) errors.push(`Phase ${index + 1} agentName must be a bounded identifier token.`);
       if (!phase.prompt.trim()) errors.push(`Phase ${index + 1} requires a prompt.`);
+      if (phase.prompt.length > MAX_SHAPE_BUILDER_PROMPT_CHARS) errors.push(`Phase ${index + 1} prompt must be at most ${MAX_SHAPE_BUILDER_PROMPT_CHARS} characters.`);
       if (!phase.expectedOutput.trim()) errors.push(`Phase ${index + 1} requires expectedOutput.`);
+      if (phase.expectedOutput.length > MAX_SHAPE_BUILDER_EXPECTED_OUTPUT_CHARS) errors.push(`Phase ${index + 1} expectedOutput must be at most ${MAX_SHAPE_BUILDER_EXPECTED_OUTPUT_CHARS} characters.`);
     });
   }
 
   const maxSubagents = spec.maxSubagents;
-  if (!Number.isFinite(maxSubagents) || maxSubagents < MIN_SHAPE_BUILDER_MAX_SUBAGENTS || maxSubagents > MAX_SHAPE_BUILDER_MAX_SUBAGENTS) {
+  if (!Number.isFinite(maxSubagents) || !Number.isInteger(maxSubagents) || maxSubagents < MIN_SHAPE_BUILDER_MAX_SUBAGENTS || maxSubagents > MAX_SHAPE_BUILDER_MAX_SUBAGENTS) {
     errors.push(`maxSubagents must be between ${MIN_SHAPE_BUILDER_MAX_SUBAGENTS} and ${MAX_SHAPE_BUILDER_MAX_SUBAGENTS}.`);
   }
   const phaseCount = Array.isArray(spec.phases) ? spec.phases.length : 0;
@@ -267,13 +379,14 @@ export function validateShapeBuilderSpec(spec: ShapeBuilderSpec, reservedNames: 
     errors.push("maxIterations must be exactly 1 — shape builder uses one sequential pass.");
   }
 
-  for (const [field, label] of [
-    [spec.terminationCondition, "Termination condition"],
-    [spec.evidenceModel, "Evidence model"],
-    [spec.failureBehavior, "Failure behavior"],
-    [spec.userFacingExplanation, "User-facing explanation"],
+  for (const [field, label, max] of [
+    [spec.terminationCondition, "Termination condition", MAX_SHAPE_BUILDER_POLICY_CHARS],
+    [spec.evidenceModel, "Evidence model", MAX_SHAPE_BUILDER_POLICY_CHARS],
+    [spec.failureBehavior, "Failure behavior", MAX_SHAPE_BUILDER_POLICY_CHARS],
+    [spec.userFacingExplanation, "User-facing explanation", MAX_SHAPE_BUILDER_EXPLANATION_CHARS],
   ] as const) {
     if (!field.trim()) errors.push(`${label} is required.`);
+    if (field.length > max) errors.push(`${label} must be at most ${max} characters.`);
   }
 
   const joined = JSON.stringify(spec).toLowerCase();
@@ -291,8 +404,49 @@ export function validateShapeBuilderSpec(spec: ShapeBuilderSpec, reservedNames: 
   return errors;
 }
 
-// ── Shape Source Rendering ────────────────────────────────────────────────
+// ── Declarative Workflow Compilation ─────────────────────────────────────
 
+/**
+ * Compile the builder spec to JSON-compatible workflow data. Dependencies are
+ * deliberately sequential to preserve the historical ShapeBuilderSpec phase
+ * semantics without generating executable TypeScript.
+ */
+export function compileDeclarativeWorkflow(spec: ShapeBuilderSpec): Record<string, unknown> {
+  const phases = spec.phases.map((phase, index) => {
+    const id = normalizeShapeName(phase.name);
+    const previousId = index > 0 ? normalizeShapeName(spec.phases[index - 1].name) : undefined;
+    const routeRole = (["planner", "executor", "verifier"] as string[]).includes(phase.role.toLowerCase())
+      ? phase.role.toLowerCase()
+      : "inherit";
+    return {
+      id,
+      role: phase.role,
+      agentName: phase.agentName,
+      prompt: phase.prompt,
+      expectedOutput: phase.expectedOutput,
+      dependsOn: previousId ? [previousId] : [],
+      route: { role: routeRole },
+    };
+  });
+  return {
+    schemaVersion: 1,
+    name: normalizeShapeName(spec.targetName),
+    description: spec.purpose,
+    phases,
+    maxSubagents: spec.maxSubagents,
+    maxConcurrency: 1,
+    maxIterations: spec.maxIterations,
+    continueOnFailure: false,
+    terminationCondition: spec.terminationCondition,
+    evidenceModel: spec.evidenceModel,
+    failureBehavior: spec.failureBehavior,
+    userFacingExplanation: spec.userFacingExplanation,
+  };
+}
+
+// ── Native Shape Source Rendering ─────────────────────────────────────────
+
+/** Native code generation is retained only for artifactKind=native-shape. */
 export function renderShapeSource(spec: ShapeBuilderSpec): string {
   const name = normalizeShapeName(spec.targetName);
   const exportName = `${toIdentifier(name)}Shape`;
@@ -449,8 +603,8 @@ function buildReport(status: "pass" | "fail", task: string, spawnGuard: SpawnGua
     "",
     \`**Task:** \${truncateWithNotice(task, 2000, "task")}\`,
     \`**Subagents spawned:** \${spawnGuard.spawned}/\${spawnGuard.cap}\`,
-    \`**Termination:** ${escapeTemplateLiteral(spec.terminationCondition)}\`,
-    \`**Evidence model:** ${escapeTemplateLiteral(spec.evidenceModel)}\`,
+    "**Termination:** " + ${JSON.stringify(spec.terminationCondition)},
+    "**Evidence model:** " + ${JSON.stringify(spec.evidenceModel)},
     "",
     "## Phase outputs",
   ];
@@ -634,7 +788,9 @@ export function computeNextRequiredGate(status: ShapeBuilderLifecycleStatus): Sh
   switch (status) {
     case "proposed": return "implementation";
     case "implementation_reported": return "implementation_verification";
+    case "declarative_verified": return "runtime_discovery";
     case "implemented_verified": return "agent_reload";
+    case "runtime_discovered": return "canary";
     case "reloaded_discovered": return "canary";
     case "canary_passed": return "none";
   }
@@ -647,8 +803,12 @@ export function transitionLifecycleState(
   const currentRank = SHAPE_BUILDER_LIFECYCLE_RANK[current];
   const nextRank = SHAPE_BUILDER_LIFECYCLE_RANK[next];
 
-  // Allow same-status write (idempotent — for adding evidence/failure data)
-  if (currentRank === nextRank) return { ok: true };
+  // Allow same-status write (idempotent — for adding evidence/failure data),
+  // but never cross between native and declarative statuses at the same rank.
+  if (current === next) return { ok: true };
+  if (currentRank === nextRank) {
+    return { ok: false, error: `Incompatible lifecycle transition from "${current}" to "${next}".` };
+  }
 
   // Forward transitions only — must be exactly adjacent
   const allowedForward = nextRank === currentRank + 10;
@@ -693,7 +853,22 @@ export async function writeLifecycleState(
 ): Promise<void> {
   const dir = path.dirname(state.lifecycleStatePath);
   await mkdir(dir, { recursive: true });
-  await writeFile(state.lifecycleStatePath, JSON.stringify(state, null, 2) + "\n", "utf8");
+  const trustedRoot = realpathSync.native(path.resolve(state.extensionRoot));
+  const trustedDirectory = realpathSync.native(path.resolve(dir));
+  const relative = path.relative(trustedRoot, trustedDirectory);
+  if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(`Lifecycle path escapes trusted root: ${state.lifecycleStatePath}`);
+  }
+  if (existsSync(state.lifecycleStatePath) && lstatSync(state.lifecycleStatePath).isSymbolicLink()) {
+    throw new Error(`Refusing to replace symlink lifecycle state: ${state.lifecycleStatePath}`);
+  }
+  const temporary = path.join(trustedDirectory, `.${path.basename(state.lifecycleStatePath)}.${process.pid}.${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporary, JSON.stringify(state, null, 2) + "\n", { encoding: "utf8", flag: "wx" });
+    await rename(temporary, state.lifecycleStatePath);
+  } finally {
+    await rm(temporary, { force: true }).catch(() => undefined);
+  }
 }
 
 export async function readLifecycleState(filePath: string): Promise<ShapeBuilderLifecycleState | null> {
@@ -1019,7 +1194,7 @@ export function parseVerifierJson(
 export function buildContinuationTemplate(targetName: string): string {
   return [
     "RESUME AFTER PI RELOAD:",
-    "1. Read reload diagnostics at <PI_HOME>/agent/agent-reload-diagnostics.json.",
+    "1. Read reload diagnostics at ~/.pi/agent/agent-reload-diagnostics.json.",
     "2. Continue only if diagnostics confirm reload success and do not show a rejected command or silent failure.",
     `3. Verify runtime discovery lists "${targetName}" before using it.`,
     `4. If discovery succeeds, run the downstream task with --paradigm ${targetName}; otherwise ask for a manual reload and stop.`,
@@ -1069,10 +1244,6 @@ function extractBalancedObject(text: string): string | null {
 
 function escapeComment(value: string): string {
   return String(value).replace(/\*\//g, "* /");
-}
-
-function escapeTemplateLiteral(value: string): string {
-  return String(value).replace(/`/g, "\\`").replace(/\$\{/g, "\\${");
 }
 
 function escapeRegex(value: string): string {

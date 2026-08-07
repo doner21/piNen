@@ -2,12 +2,13 @@
 /**
  * Item B regression tests — shared route helper + per-shape override honoring.
  * ===========================================================================
- * Proves that the audited public shapes (multi-verify-vote, verify-only,
- * safe-github-publish, composable-pipeline) honor planner/executor/verifier
- * route overrides in actual subprocess spawns. Shapes with a `Routes:` report
- * line must also report those overrides. This closes the silent-route-override
- * bug class through the shared helper (src/routes.ts) and proves parity with
- * dual-plan's prior production behavior.
+ * Proves that for every audited shape (multi-verify-vote, verify-only,
+ * venue-rescue-synthesis, composable-pipeline) passing executor/verifier
+ * (and planner) route overrides changes BOTH the actual spawn routing (via the
+ * fake-pi call log) AND the report `Routes:` line — closing the silent-route-
+ * override bug class through the shared helper (src/routes.ts). Also proves the
+ * shared helper's semantics are identical to dual-plan's prior production
+ * behavior (parity truth table).
  */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -93,42 +94,38 @@ async function testVerifyOnly() {
   assert.match(markdown, /\*\*Routes:\*\* Verifier=vprov\/vmodel/, "Routes line must reflect verifier override");
 }
 
-async function testSafeGithubPublish() {
-  const { calls } = await runShape("safe-github-publish", {
-    task: "Publish a sanitized fixture repository and independently verify it.",
-    plannerProvider: "pprov", plannerModel: "pmodel",
-    executorProvider: "exprov", executorModel: "exmodel",
+async function testVenueRescueSynthesis() {
+  const { calls, markdown } = await runShape("venue-rescue-synthesis", {
+    task: "Rescue plan for a struggling venue using the provided accounts.",
     verifierProvider: "vprov", verifierModel: "vmodel",
   });
-  const planner = calls.find((c) => c.agentName === "planner");
-  const executor = calls.find((c) => c.agentName === "coder");
-  const verifier = calls.find((c) => c.agentName === "reviewer");
-  assert.ok(planner, "safe-github-publish must spawn the planner role");
-  assert.ok(executor, "safe-github-publish must spawn the executor role");
-  assert.ok(verifier, "safe-github-publish must spawn the verifier role");
-  assert.deepEqual([planner.provider, planner.model], ["pprov", "pmodel"]);
-  assert.deepEqual([executor.provider, executor.model], ["exprov", "exmodel"]);
-  assert.deepEqual([verifier.provider, verifier.model], ["vprov", "vmodel"]);
-  const verifierLeak = calls.some((c) => c.agentName !== "reviewer" && (c.provider === "vprov" || c.model === "vmodel"));
-  assert.ok(!verifierLeak, "verifier override must not leak to planner/executor phases");
+  const verifier = calls.find((c) => c.agentName === "bham-verifier");
+  assert.ok(verifier, "venue-rescue must spawn the bham-verifier (role: verifier)");
+  assert.equal(verifier.provider, "vprov", "verifier-role spawn must honor verifierProvider override");
+  assert.equal(verifier.model, "vmodel", "verifier-role spawn must honor verifierModel override");
+  // Role-scoping: the verifier override must NOT leak to non-verifier phases.
+  const nonVerifierLeak = calls.some((c) => c.agentName !== "bham-verifier" && (c.provider === "vprov" || c.model === "vmodel"));
+  assert.ok(!nonVerifierLeak, "verifier override must not hijack non-verifier phases");
+  assert.match(markdown, /\*\*Routes:\*\* Verifier=vprov\/vmodel/, "Routes line must reflect verifier override");
 }
 
 async function testComposablePipeline() {
   const { calls, markdown } = await runShape("composable-pipeline", {
     task: "Plan, execute, and verify a tiny scoped fix.",
-    executorProvider: "exprov", executorModel: "exmodel",
-    verifierProvider: "vprov", verifierModel: "vmodel",
+    plannerProvider: "openai-codex", plannerModel: "gpt-5.6-sol",
+    executorProvider: "openai-codex", executorModel: "gpt-5.6-sol",
+    verifierProvider: "openai-codex", verifierModel: "gpt-5.5",
   });
   const coder = calls.find((c) => c.agentName === "coder");
   assert.ok(coder, "composable-pipeline must spawn a coder (executor)");
-  assert.equal(coder.provider, "exprov", "executor spawn must honor executorProvider override");
-  assert.equal(coder.model, "exmodel", "executor spawn must honor executorModel override");
+  assert.equal(coder.provider, "openai-codex", "executor spawn must honor executorProvider override");
+  assert.equal(coder.model, "gpt-5.6-sol", "executor spawn must honor executorModel override");
   const reviewer = calls.find((c) => c.agentName === "reviewer");
   assert.ok(reviewer, "composable-pipeline must spawn a reviewer (verifier)");
-  assert.equal(reviewer.provider, "vprov", "verifier spawn must honor verifierProvider override");
-  assert.equal(reviewer.model, "vmodel", "verifier spawn must honor verifierModel override");
-  assert.match(markdown, /Executor=exprov\/exmodel/, "Routes line must reflect executor override");
-  assert.match(markdown, /Verifier=vprov\/vmodel/, "Routes line must reflect verifier override");
+  assert.equal(reviewer.provider, "openai-codex", "verifier spawn must honor verifierProvider override");
+  assert.equal(reviewer.model, "gpt-5.5", "verifier spawn must honor verifierModel override");
+  assert.match(markdown, /Executor=openai-codex\/gpt-5\.6-sol/, "Routes line must reflect executor override");
+  assert.match(markdown, /Verifier=openai-codex\/gpt-5\.5/, "Routes line must reflect verifier override");
 }
 
 function testSharedHelperParity() {
@@ -162,11 +159,11 @@ function testDualPlanUsesSharedHelper() {
 async function run() {
   await testMultiVerifyVote();
   await testVerifyOnly();
-  await testSafeGithubPublish();
+  await testVenueRescueSynthesis();
   await testComposablePipeline();
   testSharedHelperParity();
   testDualPlanUsesSharedHelper();
-  console.log("PASS shape-route-overrides: multi-verify-vote, verify-only, safe-github-publish, composable-pipeline honor route overrides; shared helper parity");
+  console.log("PASS shape-route-overrides: multi-verify-vote, verify-only, venue-rescue-synthesis, composable-pipeline honor overrides in spawns + Routes line; shared helper parity");
 }
 
 run().catch((error) => { console.error("test-shape-route-overrides: FAIL"); console.error(error); process.exit(1); });

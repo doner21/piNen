@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Stop-PiPollingTrace.ps1 -- HARNESS ARTIFACT
     Stops the NON-ADMIN polling-based process trace listener by killing the

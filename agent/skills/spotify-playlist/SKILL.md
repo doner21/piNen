@@ -173,7 +173,7 @@ spotify_status()
 ### Cached broken tracks
 
 If a track was removed from a playlist but the Spotify desktop client cached its position,
-playback gets stuck with a 404 error on that removed track. 
+playback gets stuck with a 404 error on that removed track.
 
 **Detection:** `spotify_status` returns: `Spotify API error 404: Non existing id: 'spotify:track:XXXXX'`
 
@@ -257,7 +257,7 @@ powershell -Command "Start-Process '<AUTH_URL>'"
 ### Token validity check
 
 ```bash
-python3 -c "import sys,json,time; c=json.load(open('$HOME/.pi/agent/spotify-mcp/spotify-config.json')); 
+python3 -c "import sys,json,time; c=json.load(open('$HOME/.pi/agent/spotify-mcp/spotify-config.json'));
 print('expiresAt:', c['expiresAt'], 'now:', time.time()*1000, 'valid:', c['expiresAt'] > time.time()*1000)"
 ```
 

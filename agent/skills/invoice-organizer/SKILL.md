@@ -77,8 +77,8 @@ Organize these invoices for taxes
 
 Or more specifically:
 ```
-Read all invoices in this folder, rename them to 
-"YYYY-MM-DD Vendor - Invoice - Product.pdf" format, 
+Read all invoices in this folder, rename them to
+"YYYY-MM-DD Vendor - Invoice - Product.pdf" format,
 and organize them by vendor
 ```
 
@@ -97,13 +97,13 @@ Organize these invoices:
 When a user requests invoice organization:
 
 1. **Scan the Folder**
-   
+
    Identify all invoice files:
    ```bash
    # Find all invoice-related files
    find . -type f \( -name "*.pdf" -o -name "*.jpg" -o -name "*.png" \) -print
    ```
-   
+
    Report findings:
    - Total number of files
    - File types
@@ -111,9 +111,9 @@ When a user requests invoice organization:
    - Current organization (or lack thereof)
 
 2. **Extract Information from Each File**
-   
+
    For each invoice, extract:
-   
+
    **From PDF invoices**:
    - Use text extraction to read invoice content
    - Look for common patterns:
@@ -122,49 +122,49 @@ When a user requests invoice organization:
      - Company name (usually at top)
      - "Amount Due:", "Total:", "Amount:"
      - "Description:", "Service:", "Product:"
-   
+
    **From image receipts**:
    - Read visible text from images
    - Identify vendor name (often at top)
    - Look for date (common formats)
    - Find total amount
-   
+
    **Fallback for unclear files**:
    - Use filename clues
    - Check file creation/modification date
    - Flag for manual review if critical info missing
 
 3. **Determine Organization Strategy**
-   
+
    Ask user preference if not specified:
-   
+
    ```markdown
    I found [X] invoices from [date range].
-   
+
    How would you like them organized?
-   
+
    1. **By Vendor** (Adobe/, Amazon/, Stripe/, etc.)
    2. **By Category** (Software/, Office Supplies/, Travel/, etc.)
    3. **By Date** (2024/Q1/, 2024/Q2/, etc.)
    4. **By Tax Category** (Deductible/, Personal/, etc.)
    5. **Custom** (describe your structure)
-   
+
    Or I can use a default structure: Year/Category/Vendor
    ```
 
 4. **Create Standardized Filename**
-   
+
    For each invoice, create a filename following this pattern:
-   
+
    ```
    YYYY-MM-DD Vendor - Invoice - Description.ext
    ```
-   
+
    Examples:
    - `2024-03-15 Adobe - Invoice - Creative Cloud.pdf`
    - `2024-01-10 Amazon - Receipt - Office Supplies.pdf`
    - `2023-12-01 Stripe - Invoice - Monthly Payment Processing.pdf`
-   
+
    **Filename Best Practices**:
    - Remove special characters except hyphens
    - Capitalize vendor names properly
@@ -173,12 +173,12 @@ When a user requests invoice organization:
    - Preserve original file extension
 
 5. **Execute Organization**
-   
+
    Before moving files, show the plan:
-   
+
    ```markdown
    # Organization Plan
-   
+
    ## Proposed Structure
    ```
    Invoices/
@@ -193,43 +193,43 @@ When a user requests invoice organization:
        ├── Services/
        └── Office/
    ```
-   
+
    ## Sample Changes
-   
+
    Before: `invoice_adobe_march.pdf`
    After: `2024-03-15 Adobe - Invoice - Creative Cloud.pdf`
    Location: `Invoices/2024/Software/Adobe/`
-   
+
    Before: `IMG_2847.jpg`
    After: `2024-02-10 Staples - Receipt - Office Supplies.jpg`
    Location: `Invoices/2024/Office/Staples/`
-   
+
    Process [X] files? (yes/no)
    ```
-   
+
    After approval:
    ```bash
    # Create folder structure
    mkdir -p "Invoices/2024/Software/Adobe"
-   
+
    # Copy (don't move) to preserve originals
    cp "original.pdf" "Invoices/2024/Software/Adobe/2024-03-15 Adobe - Invoice - Creative Cloud.pdf"
-   
+
    # Or move if user prefers
    mv "original.pdf" "new/path/standardized-name.pdf"
    ```
 
 6. **Generate Summary Report**
-   
+
    Create a CSV file with all invoice details:
-   
+
    ```csv
    Date,Vendor,Invoice Number,Description,Amount,Category,File Path
    2024-03-15,Adobe,INV-12345,Creative Cloud,52.99,Software,Invoices/2024/Software/Adobe/2024-03-15 Adobe - Invoice - Creative Cloud.pdf
    2024-03-10,Amazon,123-4567890-1234567,Office Supplies,127.45,Office,Invoices/2024/Office/Amazon/2024-03-10 Amazon - Receipt - Office Supplies.pdf
    ...
    ```
-   
+
    This CSV is useful for:
    - Importing into accounting software
    - Sharing with accountants
@@ -237,16 +237,16 @@ When a user requests invoice organization:
    - Tax preparation
 
 7. **Provide Completion Summary**
-   
+
    ```markdown
    # Organization Complete! 📊
-   
+
    ## Summary
    - **Processed**: [X] invoices
    - **Date range**: [earliest] to [latest]
    - **Total amount**: $[sum] (if amounts extracted)
    - **Vendors**: [Y] unique vendors
-   
+
    ## New Structure
    ```
    Invoices/
@@ -256,21 +256,21 @@ When a user requests invoice organization:
    │   └── Office/ (10 files)
    └── 2023/ (12 files)
    ```
-   
+
    ## Files Created
    - `/Invoices/` - Organized invoices
    - `/Invoices/invoice-summary.csv` - Spreadsheet for accounting
    - `/Invoices/originals/` - Original files (if copied)
-   
+
    ## Files Needing Review
    [List any files where information couldn't be extracted completely]
-   
+
    ## Next Steps
    1. Review the `invoice-summary.csv` file
    2. Check files in "Needs Review" folder
    3. Import CSV into your accounting software
    4. Set up auto-organization for future invoices
-   
+
    Ready for tax season! 🎉
    ```
 
@@ -407,8 +407,8 @@ Invoices/
 For ongoing organization:
 
 ```
-Create a script that watches my ~/Downloads/invoices folder 
-and auto-organizes any new invoice files using our standard 
+Create a script that watches my ~/Downloads/invoices folder
+and auto-organizes any new invoice files using our standard
 naming and folder structure.
 ```
 

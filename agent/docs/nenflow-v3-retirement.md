@@ -1,42 +1,66 @@
 # NenFlow v3 Retirement — 2026-07-18
 
-NenFlow v3 and its model-driven `pev-*` loop are retired. The deterministic
-orchestration system (`/orchestrate`, provided by
-`~/.pi/pi-orchestrator-extension`) is the supported orchestration path. It owns
-intake, planning, execution, verification, retries, checkpointing, and bounded
-shape dispatch in code without depending on NenFlow.
+NenFlow v3 (model-driven PEV orchestration) is retired. The **deterministic orchestration
+system** (`/orchestrate`, provided by `~/.pi/pi-orchestrator-extension`) is now the standard
+orchestration shape. It performs intake (including intake.md), planning, execution, and
+verification deterministically in code and does not depend on any NenFlow component.
 
-## Public piNen state
+## What was disabled (all reversible, nothing deleted)
 
-The sanitized distribution does **not** ship:
+| Component | Before | After |
+|---|---|---|
+| `/nenflow_v3` prompt | `agent/prompts/nenflow_v3.md` (ran NenFlow) | Deprecation stub redirecting to `/orchestrate`; original in `agent/prompts-retired/` |
+| `/pev` prompt | `agent/prompts/pev.md` (NenFlow alias) | Deprecation stub redirecting to `/orchestrate`; original in `agent/prompts-retired/` |
+| Orchestrator skill | `agent/skills/nenflow-v3/` | Moved to `agent/skills-retired/nenflow-v3/` |
+| Role skills | `agent/skills/nenflow-pev-{intake,researcher,planner,executor,verifier}/` | Moved to `agent/skills-retired/` |
+| PEV agents | `agent/agents/pev-{researcher,planner,executor,verifier,intake-ecological}.json` | Renamed to `.json.disabled` |
+| Extension stub | `agent/extensions/nenflow-v3.ts` (already no-op) | Renamed to `.ts.disabled` |
 
-- `/nenflow_v3` or `/pev` compatibility prompts;
-- `nenflow-v3` / `nenflow-pev-*` skills;
-- `pev-*` agent profiles;
-- the retired NenFlow extension or runtime directory;
-- historical NenFlow runs, schemas, templates, or private restore artifacts.
+## Migration: global-graphify-maintenance
 
-If a user asks for NenFlow or PEV orchestration, route the task through
-`/orchestrate` instead.
+The `global-graphify-maintenance` skill previously spawned `pev-planner`, `pev-executor`,
+and `pev-verifier`. It now uses dedicated clones with identical role prompts and tools but
+no NenFlow branding or retired-skill references:
 
-## Current equivalents
+- `agent/agents/gm-planner.json`
+- `agent/agents/gm-executor.json`
+- `agent/agents/gm-verifier.json`
 
-| Retired behavior | Current path |
-|---|---|
-| planner → executor → verifier loop | `plan-execute-verify` shape |
-| multiple independent verifiers | `multi-verify-vote` |
-| ad hoc multi-phase workflow | `composable-pipeline` |
-| verification without execution | `verify-only` |
-| new reusable shape design/build | `paradigm-creator` + `shape-builder` |
-| global Graphify maintenance roles | `gm-planner`, `gm-executor`, `gm-verifier` |
+`agent/skills/global-graphify-maintenance/SKILL.md` was updated to reference the `gm-*`
+names throughout (including the `ORCHESTRATION_HEADER.json` role table). Model routing
+(DeepSeek V4 Pro/Flash) is unchanged. The two scheduler jobs that mentioned `pev-*` agents
+were already `delivered` (completed) — no pending automation targets the disabled agents.
 
-The `orch-*` specialist sidecars remain available around deterministic runs.
-The `spec-driven-ecology` skill remains a standalone intake method but does not
-invoke NenFlow.
+## What was updated (not disabled)
 
-## Operating policy
+- `agent/skills/orchestration-wrapper/SKILL.md` — Mode A now routes durable-artifact runs to
+  the deterministic `/orchestrate`; Modes B (lightweight rich run) and C unchanged.
+- `agent/orchestration/SPECIALIST_REGISTRY.json` + `README.md` — primary spine is now the
+  deterministic orchestrator; all `orch-*` sidecar agents unchanged.
+- `agent/AGENTS.md` — Orchestrator Role Integrity Policy unchanged; NenFlow retirement noted.
 
-Direct mode is the default for ordinary work. When the user explicitly asks for
-orchestration, use `/orchestrate`, coordinate its subagents, and rely on the
-shape's built-in reports and gates. Do not recreate retired role ledgers or
-other NenFlow paperwork.
+## What was deliberately left untouched
+
+- `pi-orchestrator-extension/` — the deterministic orchestration system, including its
+  `intake.md`, `intakes/`, harness, and runs-state.
+- All `orch-*` specialist sidecar agents in `agent/agents/`.
+- `agent/skills/spec-driven-ecology/` — standalone ecological intake methodology still works
+  and still produces intake artifacts (its optional "NenFlow v3 Integration Mode" is now a
+  dead path).
+- `agent/nenflow-v3/` — historical NenFlow runtime home (validator, templates, runs/).
+  Kept as an archive of past run artifacts; nothing active reads it.
+- All historical run directories (`agent/orchestrate-runs/`, `agent/orchestration-runs/`,
+  `agent/orchestration/runs/`).
+- `~/.claude/commands/nenflow*.md` — Claude Code (not Pi) slash commands; out of scope for
+  this retirement.
+
+## How to restore NenFlow v3
+
+1. Move the six skill folders from `agent/skills-retired/` back into `agent/skills/`.
+2. Remove the `.disabled` suffix from the five `pev-*.json` agents (leave
+   `pev-intake.json.disabled` — it was disabled before this retirement).
+3. Copy `agent/prompts-retired/nenflow_v3.md` and `pev.md` back over the stubs in
+   `agent/prompts/`.
+4. Rename `agent/extensions/nenflow-v3.ts.disabled` back to `.ts`.
+5. Revert the wording updates in `orchestration-wrapper/SKILL.md`,
+   `orchestration/SPECIALIST_REGISTRY.json`, `orchestration/README.md`, and `AGENTS.md`.

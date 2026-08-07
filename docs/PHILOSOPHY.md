@@ -51,7 +51,7 @@ result. The built-in shapes are common patterns:
 - **multi-verify-vote**: skepticism as methodology — multiple
   independent judges must agree
 - **composable-pipeline**: unfold a task through arbitrary phases
-- **safe-github-publish**: publishing as a safety-critical operation
+- **ssi-single-writer-exclusive-lane**: serialized writing as a safety-critical operation
 - **verify-only**: pure judgment, no execution
 
 Each shape is a sibling. They share the substrate — the safety layer

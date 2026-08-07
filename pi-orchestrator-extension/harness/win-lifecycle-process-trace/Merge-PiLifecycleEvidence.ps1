@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Merge-PiLifecycleEvidence.ps1 -- HARNESS ARTIFACT
     Offline correlation engine: joins action markers and process-creation

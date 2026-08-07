@@ -3,7 +3,7 @@
 ## Original prompt
 
 > Implement a secure Telegram ↔ Pi active-session integration under
-> `~/.pi`. Telegram should be able to message the active PiNen/Pi
+> `~\.pi`. Telegram should be able to message the active PiNen/Pi
 > TUI session view (not only a default headless instance). Telegram-origin
 > messages must appear visibly in the session as user messages. Pi assistant
 > replies for Telegram-origin prompts should be sent back to Telegram. The user

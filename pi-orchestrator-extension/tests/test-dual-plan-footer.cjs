@@ -5,7 +5,7 @@
  * The closing narrative previously hardcoded "a DeepSeek executor" / "an Opus
  * synthesis reviewer" / "a GPT verifier" regardless of resolved routes
  * (bug 2026-07-02-dual-plan-report-footer-hardcodes-deepseek-executor-narrative.md).
- * This test drives a NON-DEFAULT executor route override through fake-pi and
+ * This test drives the allowed executor fallback route through fake-pi and
  * asserts the footer contains no provider/model name contradicting the
  * resolved routes.
  */
@@ -53,8 +53,8 @@ async function testFooterMatchesResolvedRoutes() {
         task: "Apply a minimal scheduler race fix and verify it.",
         paradigm: "dual-plan-synthesis-execute-verify",
         preflight: false, cwd: tmp, maxSubagents: 8, maxRetries: 0,
-        // Non-default executor route: away from the shape's hardcoded deepseek.
-        executorProvider: "anthropic", executorModel: "claude-opus-4-8",
+        // Allowed non-default executor route: the configured GPT-5.5 fallback.
+        executorProvider: "openai-codex", executorModel: "gpt-5.5",
       },
       undefined, () => {}, { cwd: tmp },
     );
@@ -62,15 +62,14 @@ async function testFooterMatchesResolvedRoutes() {
     const footer = orchestrationUsedSection(markdown);
 
     // The footer must reflect the RESOLVED executor route ...
-    assert.match(footer, /executor \(anthropic\/claude-opus-4-8\)/,
-      "footer must name the resolved executor route");
-    // ... and must NOT contradict it with the old hardcoded model adjectives.
-    // Note: "deepseek" now legitimately appears for Plan A and the synthesis
-    // reviewer (both use deepseek/deepseek-v4-pro). Only the executor-specific
-    // narrative must not be deepseek.
-    assert.doesNotMatch(footer, /executor \(deepseek\/deepseek-v4-pro\)/i,
-      "executor route in footer must match resolved route, not deepseek");
-    assert.doesNotMatch(footer, /a DeepSeek executor/i, "old hardcoded narrative must be gone");
+    assert.match(footer, /executor \(openai-codex\/gpt-5\.5\)/,
+      "footer must name the resolved executor fallback route");
+    assert.doesNotMatch(footer, /deepseek|openrouter/i,
+      "footer must contain no forbidden route narrative");
+
+    const calls = fs.readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
+    assert.ok(!calls.some((call) => /deepseek|openrouter/i.test(`${call.provider}/${call.model}`)),
+      "footer regression must spawn no DeepSeek/OpenRouter route");
   } finally {
     delete process.env.PI_CLI_PATH;
     delete process.env.FAKE_PI_LOG;

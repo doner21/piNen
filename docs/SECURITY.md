@@ -10,9 +10,9 @@ taken to prevent secret leakage, protect user data, and ensure safe operation.
    tokens, or credentials are templates (`.example.json`). Real configs are
    gitignored and never committed.
 
-2. **Private-first publishing** — The `safe-github-publish` shape creates
-   repositories as **private** by default, requiring explicit human approval
-   to make public.
+2. **Explicit publishing** — Git publication is an explicit user action. This
+   repository carries the sanitization checklist and does not publish credentials
+   or mutate remotes implicitly.
 
 3. **No runtime state committed** — Session data, orchestration runs,
    handoffs, diagnostics, and cache files are all gitignored.
@@ -45,7 +45,7 @@ taken to prevent secret leakage, protect user data, and ensure safe operation.
 ## Secret Scanning
 
 piNen includes `.gitleaks.toml` for pre-commit secret detection. The
-`safe-github-publish` shape runs `gitleaks detect` before any push.
+publishing workflow runs `gitleaks detect` before any push.
 
 ### Running gitleaks locally
 
@@ -106,14 +106,14 @@ The Pi core patch (`agent/core-patch/`):
 If you discover a security issue in piNen, please:
 
 1. Check if the issue is in your local configuration (not the published harness)
-2. Review the sanitization contract in the `safe-github-publish` shape
+2. Review the sanitization checklist in this document
 3. Report via GitHub Issues (include minimal reproduction steps)
 
 Do NOT include API keys, tokens, or secrets in bug reports.
 
 ## Security Checklist for Publishing
 
-When publishing a repository using piNen, the `safe-github-publish` shape ensures:
+When publishing a repository using piNen, verify that:
 
 - [ ] Allowlist-only staging (no broad recursive copy)
 - [ ] Source `.git/` history is never copied
@@ -123,5 +123,5 @@ When publishing a repository using piNen, the `safe-github-publish` shape ensure
 - [ ] No binaries, media, or archives (except intentional skill resources)
 - [ ] `gitleaks detect` passes with zero findings
 - [ ] Path denylist scan passes
-- [ ] Repository is created private-first
-- [ ] Independent remote verification PASSes before any public visibility change
+- [ ] Publishing is explicitly authorized
+- [ ] Independent remote verification passes before any visibility change

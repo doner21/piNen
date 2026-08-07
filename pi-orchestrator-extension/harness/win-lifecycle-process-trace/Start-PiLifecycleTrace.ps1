@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Start-PiLifecycleTrace.ps1 — HARNESS ARTIFACT
     Starts a non-invasive WMI process-start trace listener (Win32_ProcessStartTrace)

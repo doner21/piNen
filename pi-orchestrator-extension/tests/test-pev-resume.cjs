@@ -9,7 +9,7 @@
  *   2. resume-from-partial: a run whose planner phase is already checkpointed
  *      restores it and does NOT re-spawn the planner;
  *   3. resume where the abort happened BEFORE ANY phase completed (the
- *      historical-orchestration-run edge): a detached planner survivor at phase index 0
+ *      orc-mr3x90b5-00iz edge): a detached planner survivor at phase index 0
  *      with no checkpoints is re-attached from its result file, not re-spawned.
  * Plus static wiring assertions on the inline path.
  */

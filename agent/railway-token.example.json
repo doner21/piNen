@@ -1,0 +1,8 @@
+{
+  "_comment": "EXAMPLE template — copy to railway-token.json (same folder) and fill in. The real railway-token.json is gitignored; this .example file is safe to commit.",
+  "RAILWAY_API_TOKEN": "<account-or-team-token from https://railway.com/account/tokens>",
+  "RAILWAY_TOKEN": "<optional project token from project Settings > Tokens>",
+  "RAILWAY_PROJECT_ID": "<optional project id>",
+  "RAILWAY_ENVIRONMENT_ID": "<optional environment id>",
+  "RAILWAY_SERVICE_ID": "<optional service id>"
+}

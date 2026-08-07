@@ -45,7 +45,7 @@ This skill helps you find the perfect domain name for your project by generating
 ### Basic Brainstorming
 
 ```
-I'm building a project management tool for remote teams. 
+I'm building a project management tool for remote teams.
 Suggest domain names.
 ```
 
@@ -56,14 +56,14 @@ Help me brainstorm domain names for a personal finance app
 ### Specific Preferences
 
 ```
-I need a domain name for my AI writing assistant. 
+I need a domain name for my AI writing assistant.
 Prefer short names with .ai or .io extension.
 ```
 
 ### With Keywords
 
 ```
-Suggest domain names using the words "pixel" or "studio" 
+Suggest domain names using the words "pixel" or "studio"
 for my design agency
 ```
 
@@ -107,7 +107,7 @@ Key features: Code sharing, snippets, collaboration
 
 🏆 Top Pick: snippet.dev
 - Perfect for developer audience
-- Short and memorable  
+- Short and memorable
 - .dev extension adds credibility
 - Available now!
 
@@ -152,28 +152,28 @@ Next steps:
 ### Check Similar Variations
 
 ```
-Check availability for "codebase" and similar variations 
+Check availability for "codebase" and similar variations
 across .com, .io, .dev
 ```
 
 ### Industry-Specific
 
 ```
-Suggest domain names for a sustainable fashion brand, 
+Suggest domain names for a sustainable fashion brand,
 checking .eco and .fashion TLDs
 ```
 
 ### Multilingual Options
 
 ```
-Brainstorm domain names in English and Spanish for 
+Brainstorm domain names in English and Spanish for
 a language learning app
 ```
 
 ### Competitor Analysis
 
 ```
-Show me domain patterns used by successful project 
+Show me domain patterns used by successful project
 management tools, then suggest similar available ones
 ```
 

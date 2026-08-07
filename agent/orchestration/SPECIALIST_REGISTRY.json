@@ -10,7 +10,7 @@
     "Only agents with agencyLevel=implementation may edit source/config/docs files.",
     "Verifier sidecars advise; the deterministic orchestrator owns the final PASS/FAIL verdict.",
     "Observer/witness agents record evidence, drift, and artifact health; they do not judge correctness.",
-    "Do not create a sidecar artifact by default; if the user or task explicitly requests one, ATT_SIDE_<PHASE>_<AGENT>.md is the optional naming convention."
+    "If a sidecar writes an artifact in an orchestration run, use ATT_SIDE_<PHASE>_<AGENT>.md."
   ],
   "agents": [
     {

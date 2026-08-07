@@ -6,6 +6,10 @@ Primary invariant: **the deterministic `/orchestrate` system (`pi-orchestrator-e
 
 > NenFlow v3 and its `pev-*` PEV spine were retired 2026-07-18. See `agent/docs/nenflow-v3-retirement.md`.
 
+For any run that mutates files under preservation constraints, start contracts from
+`templates/DISCOVERY_FIRST_RUN_CONTRACT.md` (predict-then-write; see `agent/AGENTS.md`
+*Discovery before mutation*).
+
 ## Phase mapping
 
 - Intake: clarify intent, requirements, non-goals, scope.
@@ -22,7 +26,7 @@ Primary invariant: **the deterministic `/orchestrate` system (`pi-orchestrator-e
 2. Never let sidecars replace canonical deterministic-run artifacts unless the user explicitly requests a different flow.
 3. Use implementation agents only for bounded file mutations.
 4. Use witness/observer agents for evidence and drift, not correctness verdicts.
-5. Do not create sidecar artifact files by default. When the user or task explicitly requests one, `ATT_SIDE_<PHASE>_<AGENT>.md` is the optional naming convention.
+5. In orchestration run directories, sidecar artifacts should be named `ATT_SIDE_<PHASE>_<AGENT>.md`.
 
 ## Simple routing presets
 

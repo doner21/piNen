@@ -47,7 +47,8 @@ durable architecture because Pi npm updates overwrite it.
 returns a clear error message about `pi.executeCommand` not being available.
 The idle poll is NOT started — no false success, no silent timeout. Check
 the canonical Pi-home diagnostics file (`<PI_HOME>/agent/agent-new-session-diagnostics.json`,
-`~/.pi/agent/agent-new-session-diagnostics.json` by default):
+`~/.pi/agent/agent-new-session-diagnostics.json` by default; on this Windows host,
+`~/.pi/agent/agent-new-session-diagnostics.json`):
 `executeCommandAvailable` will
 be `false` and `idleDetected` will be `null`.
 
@@ -186,8 +187,8 @@ Example:
 
 ```
 RESUME AFTER NEW SESSION:
-cwd: <project-directory>
-Prior task: building the agent-new-session extension and skill (NenFlow run historical orchestration run).
+cwd: ~/.pi
+Prior task: building the agent-new-session extension and skill (NenFlow run RUN_20260622-120000).
 Next steps: verify the extension loads correctly, test the deferred idle-poll pattern, and complete the SKILL.md documentation.
 Relevant files: agent/extensions/agent-new-session/index.ts, agent/skills/agent-new-session/SKILL.md
 ```

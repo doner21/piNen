@@ -1,0 +1,81 @@
+[
+  {
+    "id": "playwright-mcp",
+    "label": "Playwright MCP",
+    "status": "disconnected",
+    "tools": [
+      "browser_close",
+      "browser_resize",
+      "browser_console_messages",
+      "browser_handle_dialog",
+      "browser_evaluate",
+      "browser_file_upload",
+      "browser_fill_form",
+      "browser_press_key",
+      "browser_type",
+      "browser_navigate",
+      "browser_navigate_back",
+      "browser_network_requests",
+      "browser_run_code",
+      "browser_take_screenshot",
+      "browser_snapshot",
+      "browser_click",
+      "browser_drag",
+      "browser_hover",
+      "browser_select_option",
+      "browser_tabs",
+      "browser_wait_for"
+    ],
+    "connectedAt": 1786046284304
+  },
+  {
+    "id": "godaddy-mcp",
+    "label": "GoDaddy MCP",
+    "status": "connected",
+    "tools": [
+      "domains_suggest",
+      "domains_check_availability"
+    ],
+    "connectedAt": 1786123927054
+  },
+  {
+    "id": "railway-mcp",
+    "label": "Railway MCP",
+    "status": "disconnected",
+    "tools": [
+      "add_reference_variable",
+      "create_bucket",
+      "create_environment",
+      "create_project",
+      "create_service",
+      "create_volume",
+      "deploy",
+      "deploy_template",
+      "docs_fetch",
+      "docs_search",
+      "environment_status",
+      "generate_domain",
+      "get_logs",
+      "get_service_config",
+      "http_error_rate",
+      "http_requests",
+      "http_response_time",
+      "link_environment",
+      "link_service",
+      "list_deployments",
+      "list_projects",
+      "list_services",
+      "list_variables",
+      "remove_bucket",
+      "remove_service",
+      "remove_volume",
+      "search_templates",
+      "service_metrics",
+      "set_variables",
+      "update_service",
+      "update_volume",
+      "whoami"
+    ],
+    "connectedAt": 1786123927414
+  }
+]

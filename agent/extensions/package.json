@@ -4,9 +4,6 @@
   "private": true,
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@sinclair/typebox": "^0.34.41",
-    "imapflow": "^1.4.7",
-    "nodemailer": "^9.0.3",
-    "typebox": "^1.3.6"
+    "@sinclair/typebox": "^0.34.41"
   }
 }

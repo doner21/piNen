@@ -59,6 +59,13 @@ export interface RunStateFile {
   /** Serializable subset of NormalizedParams needed to re-dispatch the run. */
   params: Record<string, unknown>;
   phases: PhaseStateEntry[];
+  /**
+   * Optional declarative-workflow provenance. Older/native run-state files do
+   * not contain this field and continue to load unchanged. Dynamic resumes
+   * require it and use its pinned validated snapshot instead of re-reading a
+   * possibly changed source artifact.
+   */
+  dynamicWorkflow?: Record<string, unknown>;
 }
 
 export interface SurvivorManifest {
@@ -91,24 +98,18 @@ export function runsRootDir(): string {
 }
 
 export function runDirFor(runId: string): string {
-  // Resume ids are externally supplied. Validate rather than lossy-sanitize so
-  // different inputs cannot alias the same persisted run and dot segments can
-  // never resolve to the runs root or its parent.
-  const candidateId = String(runId);
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(candidateId)) {
-    throw new Error(
-      `RUN_ID_INVALID: run id must be 1-128 characters, start with an alphanumeric character, ` +
-        `and contain only letters, digits, dot, underscore, or hyphen.`,
-    );
+  // Fail closed instead of sanitizing: replacement aliases (and especially
+  // the formerly accepted "." / "..") can select a different directory.
+  if (
+    typeof runId !== "string" ||
+    runId.length < 1 ||
+    runId.length > 128 ||
+    !/^[a-zA-Z0-9](?:[a-zA-Z0-9._-]*[a-zA-Z0-9_-])?$/.test(runId) ||
+    /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(runId)
+  ) {
+    throw new Error("Invalid orchestration run id: expected a portable 1-128 character identifier beginning with a letter or digit and not ending in a dot.");
   }
-
-  const root = path.resolve(runsRootDir());
-  const candidate = path.resolve(root, candidateId);
-  const relative = path.relative(root, candidate);
-  if (!relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-    throw new Error("RUN_ID_INVALID: resolved run directory must be a child of the runs root.");
-  }
-  return candidate;
+  return path.join(runsRootDir(), runId);
 }
 
 function phaseFileName(index: number, name: string): string {
@@ -152,6 +153,7 @@ export class RunStateStore {
     task: string,
     params: Record<string, unknown>,
     phaseNames: string[],
+    dynamicWorkflow?: Record<string, unknown>,
   ): RunStateStore {
     const runDir = runDirFor(runId);
     mkdirSync(runDir, { recursive: true });
@@ -162,6 +164,7 @@ export class RunStateStore {
       createdAt: new Date().toISOString(),
       params,
       phases: phaseNames.map((name, index) => ({ index, name, status: "pending" as PhaseStatus })),
+      ...(dynamicWorkflow ? { dynamicWorkflow } : {}),
     };
     const store = new RunStateStore(runDir, state);
     store.persist();
@@ -178,7 +181,13 @@ export class RunStateStore {
           `Known runs: ${listKnownRuns().slice(0, 10).join(", ") || "(none)"}.`,
       );
     }
-    const state = JSON.parse(readFileSync(stateFile, "utf8")) as RunStateFile;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(stateFile, "utf8"));
+    } catch (error) {
+      throw new Error(`Run state ${stateFile} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const state = validateLoadedRunState(parsed, runId, stateFile);
     const checkpoints = new Map<number, SubagentResult>();
     const survivors = new Map<number, SurvivorManifest>();
     const terminalStates = new Map<number, TerminalNoRetryState>();
@@ -276,6 +285,51 @@ export class RunStateStore {
     mkdirSync(this.runDir, { recursive: true });
     writeFileSync(path.join(this.runDir, "state.json"), JSON.stringify(this.state, null, 2), "utf8");
   }
+}
+
+function validateLoadedRunState(value: unknown, expectedRunId: string, stateFile: string): RunStateFile {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`Run state ${stateFile} must be a JSON object.`);
+  }
+  const state = value as Partial<RunStateFile>;
+  if (state.runId !== expectedRunId) {
+    throw new Error(`Run state id mismatch: requested ${JSON.stringify(expectedRunId)}, stored ${JSON.stringify(state.runId)}.`);
+  }
+  if (typeof state.paradigm !== "string" || !state.paradigm.trim() || typeof state.task !== "string" || typeof state.createdAt !== "string") {
+    throw new Error(`Run state ${stateFile} is missing required string metadata.`);
+  }
+  if (!state.params || typeof state.params !== "object" || Array.isArray(state.params)) {
+    throw new Error(`Run state ${stateFile} has invalid params metadata.`);
+  }
+  if (!Array.isArray(state.phases) || state.phases.length > 10_000) {
+    throw new Error(`Run state ${stateFile} has an invalid or excessive phase manifest.`);
+  }
+  const indices = new Set<number>();
+  const names = new Set<string>();
+  const statuses = new Set<PhaseStatus>(["done", "detached", "pending", "ambiguous-completion"]);
+  for (const [position, phase] of state.phases.entries()) {
+    if (
+      !phase ||
+      typeof phase !== "object" ||
+      !Number.isInteger(phase.index) ||
+      phase.index < 0 ||
+      typeof phase.name !== "string" ||
+      !phase.name ||
+      phase.name.length > 512 ||
+      !statuses.has(phase.status)
+    ) {
+      throw new Error(`Run state ${stateFile} has an invalid phase entry at position ${position}.`);
+    }
+    if (indices.has(phase.index) || names.has(phase.name)) {
+      throw new Error(`Run state ${stateFile} has duplicate phase indices or names.`);
+    }
+    indices.add(phase.index);
+    names.add(phase.name);
+  }
+  if (state.dynamicWorkflow !== undefined && (!state.dynamicWorkflow || typeof state.dynamicWorkflow !== "object" || Array.isArray(state.dynamicWorkflow))) {
+    throw new Error(`Run state ${stateFile} has invalid dynamic workflow provenance.`);
+  }
+  return state as RunStateFile;
 }
 
 export function listKnownRuns(): string[] {

@@ -1,22 +1,5 @@
 #!/usr/bin/env node
-/**
- * WAVE3 ITEM C regression — composable-pipeline malformed anthropic model id.
- * ==========================================================================
- * Bug: composed middle phases (synthesize/critique/hypothesize) constructed
- * model ids by string-munging a human label ("Claude Sonnet 4.5" →
- * "claude-sonnet-4.5", dot preserved) which 404s; and those phases were
- * unreachable by the executor/planner/verifier override params so the malformed
- * default aborted the whole run.
- *
- * These tests drive composable-pipeline's shape.run directly (so we can inject
- * an inferredModelRouting.runtimeRoles hint) and assert via the fake-pi spawn
- * log that:
- *   1. a dotted anthropic runtime-role id is spawned as a DASHED id (never a dot);
- *   2. with NO runtime-role hint, an explicit executor override reaches the
- *      composed phase (inheritance);
- *   3. a non-anthropic dotted id (gpt-5.5) passes through UNMODIFIED (no
- *      over-normalization).
- */
+/** Role-routing regressions for composable-pipeline. */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -33,8 +16,19 @@ Module._initPaths();
 const createJiti = require(path.join(PI_NODE_MODULES, "jiti", "lib", "jiti.cjs"));
 function makeJiti() { return createJiti(__filename, { interopDefault: true, moduleCache: false }); }
 
-const COMPOSABLE_PATH = path.join(PROJECT_ROOT, "src", "shapes", "composable-pipeline.ts");
+const SHAPE_PATH = path.join(PROJECT_ROOT, "src", "shapes", "composable-pipeline.ts");
 const ALIASES_PATH = path.join(PROJECT_ROOT, "src", "model-aliases.ts");
+
+function loadOrchestrateTool() {
+  const mod = makeJiti()(path.join(PROJECT_ROOT, "src", "index.ts"));
+  let tool;
+  (mod.default ?? mod)({
+    registerTool(def) { if (def.name === "orchestrate") tool = def; },
+    registerCommand() {},
+  });
+  assert.ok(tool);
+  return tool;
+}
 
 function baseParams(tmp, extra) {
   return {
@@ -42,15 +36,14 @@ function baseParams(tmp, extra) {
     cwd: tmp, maxSubagents: 12, allowLocalModel: false,
     executorAgent: "coder", verifierAgent: "reviewer", plannerAgent: "planner",
     concurrency: 1, plannerCount: 1, verifierCount: 1,
-    hardGates: "advisory", preflight: false,
+    maxRetries: 0, hardGates: "advisory", preflight: false,
     orchestrationControls: { runtimeRoles: [], rawMatches: [] },
     ...extra,
   };
 }
 
-/** Drive composable-pipeline's shape.run directly with an injected routing hint. */
-async function driveComposable(inferredModelRouting, extraParams) {
-  const shape = makeJiti()(COMPOSABLE_PATH).composablePipelineShape;
+async function driveComposable(inferredModelRouting = {}, extraParams = {}) {
+  const shape = makeJiti()(SHAPE_PATH).composablePipelineShape;
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cp-modelid-"));
   const logPath = path.join(tmp, "log.jsonl");
   process.env.PI_CLI_PATH = path.join(__dirname, "fake-pi.cjs");
@@ -58,12 +51,15 @@ async function driveComposable(inferredModelRouting, extraParams) {
   try {
     const result = await shape.run({
       params: baseParams(tmp, extraParams),
-      agents: new Map(),
+      agents: new Map([
+        ["coder", { name: "coder", provider: "deepseek", model: "deepseek-v4-pro" }],
+        ["planner", { name: "planner", provider: "openrouter", model: "profile/model" }],
+      ]),
       onUpdate: () => {},
       inferredModelRouting,
     });
     const calls = fs.existsSync(logPath)
-      ? fs.readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l))
+      ? fs.readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse)
       : [];
     return { result, calls };
   } finally {
@@ -73,111 +69,124 @@ async function driveComposable(inferredModelRouting, extraParams) {
   }
 }
 
-// ── Pure unit checks on the normalizer (fast, hermetic) ─────────────────────
-
-function testNormalizerUnit() {
-  const { normalizeAnthropicModelId, resolveComposedPhaseModel } = makeJiti()(ALIASES_PATH);
-  // Dotted anthropic id → dashed.
-  assert.deepEqual(
-    normalizeAnthropicModelId({ provider: "anthropic", model: "claude-sonnet-4.5" }),
-    { provider: "anthropic", model: "claude-sonnet-4-5" },
-    "dotted anthropic id must become dashed",
-  );
-  // Non-anthropic dotted id → UNCHANGED (gpt-5.5 must never be corrupted).
-  assert.deepEqual(
-    normalizeAnthropicModelId({ provider: "openai-codex", model: "gpt-5.5" }),
-    { provider: "openai-codex", model: "gpt-5.5" },
-    "gpt-5.5 must pass through unmodified",
-  );
-  // deepseek dotted-free id → unchanged; undefined (inherit) → undefined.
-  assert.deepEqual(
-    normalizeAnthropicModelId({ provider: "deepseek", model: "deepseek-v4-flash" }),
-    { provider: "deepseek", model: "deepseek-v4-flash" },
-  );
-  assert.equal(normalizeAnthropicModelId(undefined), undefined, "inherit route stays inherit");
-  // resolveComposedPhaseModel: runtime-role wins and is normalized.
-  assert.deepEqual(
-    resolveComposedPhaseModel({ runtimeRole: { provider: "anthropic", model: "claude-sonnet-4.5" } }),
-    { provider: "anthropic", model: "claude-sonnet-4-5" },
-  );
-  // No runtime-role → inherit executor route first, then planner.
-  assert.deepEqual(
-    resolveComposedPhaseModel({ executorRoute: { provider: "exprov", model: "exmodel" }, plannerRoute: { provider: "plprov", model: "plmodel" } }),
-    { provider: "exprov", model: "exmodel" },
-    "executor route inherited before planner",
-  );
-  assert.deepEqual(
-    resolveComposedPhaseModel({ plannerRoute: { provider: "plprov", model: "plmodel" } }),
-    { provider: "plprov", model: "plmodel" },
-    "planner route inherited when no executor route",
-  );
-  assert.equal(
-    resolveComposedPhaseModel({}),
-    undefined,
-    "no routes → inherit (undefined)",
-  );
-}
-
-// ── End-to-end via fake-pi spawn log ────────────────────────────────────────
-
-async function testDottedAnthropicRuntimeRoleBecomesDashed() {
-  const { calls } = await driveComposable({
-    runtimeRoles: { synthesizer: { provider: "anthropic", model: "claude-sonnet-4.5" } },
-  });
-  const synth = calls.find((c) => c.agentName === "coder");
-  assert.ok(synth, "synthesize phase must spawn the executor agent (coder)");
-  assert.equal(synth.provider, "anthropic", "synthesizer spawn keeps the anthropic provider");
-  assert.equal(synth.model, "claude-sonnet-4-5", "dotted anthropic id must be spawned as the dashed id");
-  for (const c of calls) {
-    assert.doesNotMatch(String(c.model || ""), /claude-sonnet-4\.5/, "NO spawn may carry the dotted model id");
+async function driveTool(extraParams) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-cp-tool-route-"));
+  const logPath = path.join(tmp, "log.jsonl");
+  process.env.PI_CLI_PATH = path.join(__dirname, "fake-pi.cjs");
+  process.env.FAKE_PI_LOG = logPath;
+  try {
+    const result = await loadOrchestrateTool().execute(
+      "composable-route-test",
+      {
+        task: "Only synthesize the fixture understanding.",
+        paradigm: "composable-pipeline",
+        cwd: tmp,
+        maxSubagents: 8,
+        preflight: true,
+        ...extraParams,
+      },
+      undefined,
+      () => {},
+      { cwd: tmp },
+    );
+    const calls = fs.existsSync(logPath)
+      ? fs.readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse)
+      : [];
+    return { result, calls };
+  } finally {
+    delete process.env.PI_CLI_PATH;
+    delete process.env.FAKE_PI_LOG;
+    fs.rmSync(tmp, { recursive: true, force: true });
   }
 }
 
-async function testExplicitExecutorOverrideReachesComposedPhase() {
-  // No runtime-role hint → the composed phase must INHERIT the explicit executor route.
-  const { calls } = await driveComposable({}, { executorProvider: "exprov", executorModel: "exmodel" });
-  const synth = calls.find((c) => c.agentName === "coder");
-  assert.ok(synth, "synthesize phase must spawn the executor agent (coder)");
-  assert.equal(synth.provider, "exprov", "composed phase must inherit the explicit executor provider");
-  assert.equal(synth.model, "exmodel", "composed phase must inherit the explicit executor model");
+function testNormalizerUnit() {
+  const { normalizeAnthropicModelId, resolveComposedPhaseModel } = makeJiti()(ALIASES_PATH);
+  assert.deepEqual(
+    normalizeAnthropicModelId({ provider: "anthropic", model: "claude-sonnet-4.5" }),
+    { provider: "anthropic", model: "claude-sonnet-4-5" },
+  );
+  assert.deepEqual(
+    normalizeAnthropicModelId({ provider: "openai-codex", model: "gpt-5.5" }),
+    { provider: "openai-codex", model: "gpt-5.5" },
+  );
+  assert.deepEqual(
+    resolveComposedPhaseModel({ executorRoute: { provider: "p", model: "m" } }),
+    { provider: "p", model: "m" },
+  );
 }
 
-async function testGpt55PassesThroughUnmodified() {
-  const { calls } = await driveComposable({
-    runtimeRoles: { synthesizer: { provider: "openai-codex", model: "gpt-5.5" } },
+async function testRuntimeAndProfileHintsCannotHijackComposedSeat() {
+  const { result, calls } = await driveComposable({
+    runtimeRoles: { synthesizer: { provider: "deepseek", model: "deepseek-v4-pro" } },
   });
-  const synth = calls.find((c) => c.agentName === "coder");
-  assert.ok(synth, "synthesize phase must spawn the executor agent (coder)");
-  assert.equal(synth.provider, "openai-codex", "gpt-5.5 provider preserved");
-  assert.equal(synth.model, "gpt-5.5", "gpt-5.5 must NOT be over-normalized (dot preserved)");
+  const synth = calls.find((call) => call.composablePhase === "synthesize");
+  assert.ok(synth, "synthesize phase must spawn");
+  assert.deepEqual([synth.provider, synth.model], ["openai-codex", "gpt-5.6-sol"]);
+  assert.deepEqual(result.details.selectedRoutes.planner,
+    { provider: "openai-codex", model: "gpt-5.6-sol" });
+  assert.equal(result.details.routingEvidence.length, 1, "every work seat must have route evidence");
+  assert.ok(calls.every((call) => !/deepseek|openrouter/i.test(`${call.provider}/${call.model}`)),
+    "no forbidden route may spawn");
 }
 
-async function testPlannerDefaultRoutePlaceholderInheritsExplicitExecutorRoute() {
+async function testExplicitAllowedPlannerRouteReachesComposedSeat() {
+  const { calls } = await driveComposable({}, {
+    plannerProvider: "openai-codex", plannerModel: "gpt-5.6-sol",
+  });
+  const synth = calls.find((call) => call.composablePhase === "synthesize");
+  assert.deepEqual([synth.provider, synth.model], ["openai-codex", "gpt-5.6-sol"]);
+}
+
+async function testForbiddenExplicitRoutesFailBeforeSpawn() {
+  for (const route of [
+    { plannerProvider: "deepseek", plannerModel: "deepseek-v4-pro" },
+    { plannerProvider: "openrouter", plannerModel: "vendor/model" },
+  ]) {
+    await assert.rejects(
+      () => driveComposable({}, route),
+      (error) => error?.code === "FORBIDDEN_MODEL_ROUTE",
+    );
+  }
+}
+
+async function testTopLevelForbiddenRouteMakesZeroSpawns() {
+  const { result, calls } = await driveTool({
+    plannerProvider: "deepseek",
+    plannerModel: "deepseek-v4-pro",
+  });
+  assert.equal(calls.length, 0,
+    "generic preflight must not ping a forbidden profile/route before shape validation");
+  assert.equal(result.details.status, "fail");
+  assert.match(result.content[0].text, /FORBIDDEN_MODEL_ROUTE/);
+}
+
+async function testPlannerRoutePlaceholdersCannotOverrideExecutor() {
   process.env.FAKE_PI_COMPOSABLE_PLAN_DEFAULT_ROUTE = "1";
   try {
     const { calls } = await driveComposable({}, {
       task: "Plan and execute a tiny validation task.",
-      executorProvider: "deepseek",
-      executorModel: "deepseek-v4-pro",
+      executorProvider: "openai-codex", executorModel: "gpt-5.6-sol",
     });
-    const executor = calls.find((c) => c.agentName === "coder");
-    assert.ok(executor, "execute phase must spawn the executor agent (coder)");
-    assert.equal(executor.provider, "deepseek", "planner provider=default must inherit the explicit executor provider");
-    assert.equal(executor.model, "deepseek-v4-pro", "planner model=default must inherit the explicit executor model");
-    assert.ok(calls.every((c) => c.provider !== "default"), "no child may receive literal provider=default");
-    assert.ok(calls.every((c) => c.model !== "default"), "no child may receive literal model=default");
+    const executor = calls.find((call) => call.composablePhase === "execute");
+    assert.ok(executor);
+    assert.deepEqual([executor.provider, executor.model], ["openai-codex", "gpt-5.6-sol"]);
+    assert.ok(calls.every((call) => call.provider !== "default" && call.model !== "default"));
   } finally {
     delete process.env.FAKE_PI_COMPOSABLE_PLAN_DEFAULT_ROUTE;
   }
 }
 
-async function run() {
+(async () => {
   testNormalizerUnit();
-  await testDottedAnthropicRuntimeRoleBecomesDashed();
-  await testExplicitExecutorOverrideReachesComposedPhase();
-  await testGpt55PassesThroughUnmodified();
-  await testPlannerDefaultRoutePlaceholderInheritsExplicitExecutorRoute();
-  console.log("PASS composable-pipeline-model-id: normalizer unit, composed-phase inheritance, gpt-5.5 preservation, and planner default-route placeholders inherit explicit executor routing");
-}
-
-run().catch((error) => { console.error("test-composable-pipeline-model-id: FAIL"); console.error(error); process.exit(1); });
+  await testRuntimeAndProfileHintsCannotHijackComposedSeat();
+  await testExplicitAllowedPlannerRouteReachesComposedSeat();
+  await testForbiddenExplicitRoutesFailBeforeSpawn();
+  await testTopLevelForbiddenRouteMakesZeroSpawns();
+  await testPlannerRoutePlaceholdersCannotOverrideExecutor();
+  console.log("PASS composable-pipeline-model-id: role-safe defaults/overrides, profile-hint isolation, gpt-5.5 preservation, forbidden-route rejection, and planner placeholder isolation");
+})().catch((error) => {
+  console.error("test-composable-pipeline-model-id: FAIL");
+  console.error(error);
+  process.exit(1);
+});

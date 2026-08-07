@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Stop-PiLifecycleTrace.ps1 -- HARNESS ARTIFACT
     Stops the WMI process-start trace listener, unregisters all subscriptions,

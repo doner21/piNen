@@ -6,7 +6,7 @@ import { writeDiagnostics as writeCanonicalDiagnostics } from "./diagnostics.ts"
  * Agent-operated "new session" bridge — phase-machine + session_shutdown
  * confirmation edition (v3, lifecycle-race-fix).
  *
- * Fixes false `agent_new_session` failure diagnostics (historical orchestration run):
+ * Fixes false `agent_new_session` failure diagnostics (RUN_20260627-164912):
  * - session_shutdown:new is authoritative. Once confirmed, later
  *   hard-timeout/rejection must NOT overwrite final diagnostics to failure.
  * - Dual-timeout pattern eliminated: single cancellable timeout handle.
@@ -650,7 +650,8 @@ export default function agentNewSession(pi: ExtensionAPI): void {
 				"filesystem state (such as agent_scheduler schedules) survives.",
 			"The scheduled continuation's FIRST action must be to READ " +
 				"the canonical Pi-home diagnostics file `<PI_HOME>/agent/agent-new-session-diagnostics.json` " +
-				"(`~/.pi/agent/agent-new-session-diagnostics.json` by default) " +
+				"(`~/.pi/agent/agent-new-session-diagnostics.json` by default; " +
+				"`~/.pi/agent/agent-new-session-diagnostics.json` on this Windows host) " +
 				"and check `newSessionConfirmed` / " +
 				"`newSessionSilentlyFailed` / `executeCommandRejected` / `phase`. If " +
 				"phase is 'done' and newSessionConfirmed is true, the switch succeeded. " +

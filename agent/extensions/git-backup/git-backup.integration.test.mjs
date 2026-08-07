@@ -4,14 +4,8 @@ import { randomBytes } from "node:crypto";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createRequire } from "node:module";
+import { createJiti } from "jiti";
 
-const require = createRequire(import.meta.url);
-const npmGlobalRoot = (process.platform === "win32"
-  ? execFileSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", "npm root -g"], { encoding: "utf8", windowsHide: true })
-  : execFileSync("npm", ["root", "-g"], { encoding: "utf8" })
-).trim();
-const { createJiti } = require(join(npmGlobalRoot, "@earendil-works", "pi-coding-agent", "node_modules", "jiti", "lib", "jiti.cjs"));
 const jiti = createJiti(import.meta.url, { interopDefault: true });
 const { DEFAULT_CONFIG, configForRepository, normalizeConfig, pathMatchesDeny, runGitBackup } = await jiti.import("./core.ts");
 

@@ -22,7 +22,7 @@ import {
   type SubagentResult,
 } from "../substrate";
 import { RunStateStore, collectSurvivorResult } from "../run-state";
-import { resolveRouteWithFallback } from "../routes";
+import { resolveRouteWithFallback, type ResolvedRoute } from "../routes";
 
 import type {
   OrchestrationShape,
@@ -33,38 +33,51 @@ import type {
 
 // ── Shape-owned constants ─────────────────────────────────────────────────
 
-const PLAN_A_ROUTE = { provider: "deepseek", model: "deepseek-v4-pro" } as const;
-const PLAN_B_ROUTE = { provider: "openai-codex", model: "gpt-5.5" } as const;
-const SYNTHESIS_ROUTE = { provider: "deepseek", model: "deepseek-v4-pro" } as const;
-const EXECUTOR_ROUTE = { provider: "deepseek", model: "deepseek-v4-pro" } as const;
-const VERIFIER_ROUTE = { provider: "openai-codex", model: "gpt-5.5" } as const;
-
-/** Exact routes used by dual-plan discovery before any executor/verifier loop. */
-export const DUAL_PLAN_DISCOVERY_PREFLIGHT_ROUTES = [
-  { role: "dual-plan-a", ...PLAN_A_ROUTE },
-  { role: "dual-plan-b", ...PLAN_B_ROUTE },
-  { role: "dual-plan-synthesis", ...SYNTHESIS_ROUTE },
-] as const;
+const DEFAULT_PLANNER_ROUTE = { provider: "openai-codex", model: "gpt-5.6-sol" } as const;
+const DEFAULT_EXECUTOR_ROUTE = { provider: "openai-codex", model: "gpt-5.6-sol" } as const;
+const DEFAULT_VERIFIER_ROUTE = { provider: "openai-codex", model: "gpt-5.5" } as const;
 
 const PLANNER_CONCURRENCY = 2;
 
+type DualPlanRoutes = {
+  planA: ResolvedRoute;
+  planB: ResolvedRoute;
+  synthesis: ResolvedRoute;
+  executor: ResolvedRoute;
+  verifier: ResolvedRoute;
+};
+
 /**
- * Resolve executor/verifier routes, honoring explicit params overrides
- * (executorModel/executorProvider, verifierModel/verifierProvider).
- * BUG FIX (2026-07-02): these overrides were previously accepted by the tool
- * schema and pinged by preflight but silently IGNORED by this shape, which
- * always spawned its hardcoded route constants — a silent route replacement.
+ * Resolve every shape-owned seat from normalized role controls. Plan A, Plan B,
+ * and synthesis are all planner-class work, so one planner override/preflight
+ * route covers all three seats. Executor and verifier use their corresponding
+ * role routes. Defaults are explicit and role-safe; agent profiles and the
+ * conversational model are deliberately not consulted here.
+ *
+ * Preflight fallback is supported by resolving at shape-dispatch time: the
+ * shared preflight layer mutates a role's normalized params only after a
+ * configured fallback succeeds, and this function consumes that final route.
  */
-function resolveRoutes(params: NormalizedParams): {
-  executor: { provider: string; model: string };
-  verifier: { provider: string; model: string };
-} {
-  // Delegates to the shared helper (src/routes.ts) with semantics byte-identical
-  // to this shape's original production behavior. The `resolveRoutes` name is
-  // retained as a thin wrapper (static tests + the silent-route-override fix).
+function resolveRoutes(params: NormalizedParams): DualPlanRoutes {
+  const planner = resolveRouteWithFallback(
+    params.plannerModel,
+    params.plannerProvider,
+    DEFAULT_PLANNER_ROUTE,
+  );
   return {
-    executor: resolveRouteWithFallback(params.executorModel, params.executorProvider, EXECUTOR_ROUTE),
-    verifier: resolveRouteWithFallback(params.verifierModel, params.verifierProvider, VERIFIER_ROUTE),
+    planA: { ...planner },
+    planB: { ...planner },
+    synthesis: { ...planner },
+    executor: resolveRouteWithFallback(
+      params.executorModel,
+      params.executorProvider,
+      DEFAULT_EXECUTOR_ROUTE,
+    ),
+    verifier: resolveRouteWithFallback(
+      params.verifierModel,
+      params.verifierProvider,
+      DEFAULT_VERIFIER_ROUTE,
+    ),
   };
 }
 const DEFAULT_MAX_RETRIES = 2;
@@ -89,7 +102,7 @@ export const dualPlanSynthesisExecuteVerifyShape: OrchestrationShape = {
 
 interface PlannerOutput {
   label: "Plan A" | "Plan B";
-  route: typeof PLAN_A_ROUTE | typeof PLAN_B_ROUTE;
+  route: ResolvedRoute;
   result: SubagentResult;
 }
 
@@ -179,6 +192,19 @@ async function runDualPlanSynthesisExecuteVerify(
   const maxAttempts = clampIterations(maxRetries + 1);
   const routes = resolveRoutes(params);
 
+  // All five shape seats map to one of the three normalized role routes that
+  // the shared preflight checks before shape dispatch. Keep this mapping
+  // visible so preflight coverage is auditable even when several seats share a
+  // deduplicated provider/model ping.
+  emit(
+    `Resolved dual-plan seats (preflight roles): ` +
+      `Plan A=planner:${formatRoute(routes.planA)}, ` +
+      `Plan B=planner:${formatRoute(routes.planB)}, ` +
+      `synthesis=planner:${formatRoute(routes.synthesis)}, ` +
+      `executor=executor:${formatRoute(routes.executor)}, ` +
+      `verifier=verifier:${formatRoute(routes.verifier)}.`,
+  );
+
   // Normalize the predicted write set ONCE here so every consumer — both
   // planner prompts, the synthesis prompt, and discovery-only details —
   // sees the identical mechanically frozen array.
@@ -249,12 +275,21 @@ async function runDualPlanSynthesisExecuteVerify(
   if (restoredPlanA && restoredPlanB) {
     emit("Phase 1: both planner outputs restored from checkpoints (resume).");
     plannerOutputs = [
-      { label: "Plan A", route: PLAN_A_ROUTE, result: restoredPlanA },
-      { label: "Plan B", route: PLAN_B_ROUTE, result: restoredPlanB },
+      { label: "Plan A", route: routeFromResult(restoredPlanA, routes.planA), result: restoredPlanA },
+      { label: "Plan B", route: routeFromResult(restoredPlanB, routes.planB), result: restoredPlanB },
     ];
   } else {
-    emit("Phase 1: spawning two independent planners with distinct routes.");
-    plannerOutputs = await runPlannerPhase(params, effectiveAgents, spawnGuard, signal, emit, inheritedModel, predictedWriteSet);
+    emit("Phase 1: spawning two isolated planners concurrently on the resolved planner role route.");
+    plannerOutputs = await runPlannerPhase(
+      params,
+      effectiveAgents,
+      spawnGuard,
+      signal,
+      emit,
+      inheritedModel,
+      predictedWriteSet,
+      routes,
+    );
     checkpointStage(0, plannerOutputs[0].result);
     checkpointStage(1, plannerOutputs[1].result);
   }
@@ -278,11 +313,11 @@ async function runDualPlanSynthesisExecuteVerify(
       params,
       effectiveAgents,
       params.verifierAgent,
-      buildSynthesisPrompt(params.task, plannerOutputs, predictedWriteSet),
+      buildSynthesisPrompt(params.task, plannerOutputs, predictedWriteSet, routes.synthesis),
       signal,
       emit,
       inheritedModel,
-      SYNTHESIS_ROUTE,
+      routes.synthesis,
     );
     checkpointStage(2, synthesis);
   }
@@ -293,8 +328,22 @@ async function runDualPlanSynthesisExecuteVerify(
   if (params.discoveryOnly) {
     checkDiscoveryReadOnly("synthesis", synthesis);
     emit("Discovery-only mode: synthesis complete. Returning predicted write set without spawning executor/verifier.");
-    const markdown = buildDiscoveryOnlyMarkdown(params, spawnGuard, plannerOutputs, synthesis, predictedWriteSet);
-    const details = buildDiscoveryOnlyDetails(params, spawnGuard, plannerOutputs, synthesis, predictedWriteSet);
+    const markdown = buildDiscoveryOnlyMarkdown(
+      params,
+      spawnGuard,
+      plannerOutputs,
+      synthesis,
+      predictedWriteSet,
+      routes,
+    );
+    const details = buildDiscoveryOnlyDetails(
+      params,
+      spawnGuard,
+      plannerOutputs,
+      synthesis,
+      predictedWriteSet,
+      routes,
+    );
     return { markdown, details };
   }
 
@@ -322,7 +371,7 @@ async function runDualPlanSynthesisExecuteVerify(
           emit,
           inheritedModel,
           routes.executor,
-          { ...survivalFor(executorIndex), phaseMutates: true },
+          survivalFor(executorIndex),
         );
       } catch (error) {
         detachGuard(executorIndex, error);
@@ -371,8 +420,8 @@ async function runDualPlanSynthesisExecuteVerify(
 
   const finalAttempt = attempts[attempts.length - 1];
   const status: "pass" | "fail" = finalAttempt?.verdict.status === "pass" ? "pass" : "fail";
-  const details = buildDetails(status, params, spawnGuard, plannerOutputs, synthesis, attempts, maxRetries);
-  const markdown = buildFinalMarkdown(status, params, spawnGuard, plannerOutputs, synthesis, attempts, maxRetries);
+  const details = buildDetails(status, params, spawnGuard, plannerOutputs, synthesis, attempts, maxRetries, routes);
+  const markdown = buildFinalMarkdown(status, params, spawnGuard, plannerOutputs, synthesis, attempts, maxRetries, routes);
   return { markdown, details };
 }
 
@@ -386,17 +435,18 @@ async function runPlannerPhase(
   emit: (text: string) => void,
   inheritedModel: { provider?: string; model?: string } | undefined,
   predictedWriteSet: string[],
+  routes: DualPlanRoutes,
 ): Promise<PlannerOutput[]> {
-  const plannerJobs: Array<{ label: "Plan A" | "Plan B"; route: typeof PLAN_A_ROUTE | typeof PLAN_B_ROUTE; prompt: string }> = [
+  const plannerJobs: Array<{ label: "Plan A" | "Plan B"; route: ResolvedRoute; prompt: string }> = [
     {
       label: "Plan A",
-      route: PLAN_A_ROUTE,
-      prompt: buildPlannerPrompt("Plan A", PLAN_A_ROUTE, params.task, predictedWriteSet),
+      route: routes.planA,
+      prompt: buildPlannerPrompt("Plan A", routes.planA, params.task, predictedWriteSet),
     },
     {
       label: "Plan B",
-      route: PLAN_B_ROUTE,
-      prompt: buildPlannerPrompt("Plan B", PLAN_B_ROUTE, params.task, predictedWriteSet),
+      route: routes.planB,
+      prompt: buildPlannerPrompt("Plan B", routes.planB, params.task, predictedWriteSet),
     },
   ];
 
@@ -444,9 +494,14 @@ Return concise markdown with:
 Do not assume the other planner's answer.`;
 }
 
-function buildSynthesisPrompt(task: string, plannerOutputs: PlannerOutput[], predictedWriteSet: string[]): string {
+function buildSynthesisPrompt(
+  task: string,
+  plannerOutputs: PlannerOutput[],
+  predictedWriteSet: string[],
+  route: ResolvedRoute,
+): string {
   return `You are the synthesis reviewer in a dual-plan-synthesis-execute-verify orchestration.
-You should be running as provider=${SYNTHESIS_ROUTE.provider}, model=${SYNTHESIS_ROUTE.model}.
+You should be running as provider=${route.provider}, model=${route.model}.
 
 Original task:
 ${task}
@@ -641,7 +696,7 @@ async function spawnChecked(
   onProgress: ((text: string) => void) | undefined,
   inheritedModel: { provider?: string; model?: string } | undefined,
   modelOverride: { model?: string; provider?: string } | undefined,
-  extraOptions?: Pick<SpawnSubagentOptions, "abortSurvival" | "phaseMutates"> | Record<string, never>,
+  extraOptions?: Pick<SpawnSubagentOptions, "abortSurvival"> | Record<string, never>,
 ): Promise<SubagentResult> {
   const spawned = spawnGuard.reserve();
   onProgress?.(`Spawning subagent ${agentName} (${spawned}/${spawnGuard.cap}) in ${params.cwd}`);
@@ -664,6 +719,67 @@ function resolveMaxRetries(params: NormalizedParams): number {
 
 // ── Result builders ────────────────────────────────────────────────────────
 
+function formatRoute(route: ResolvedRoute): string {
+  return `${route.provider}/${route.model}`;
+}
+
+function routeFromResult(result: SubagentResult, fallback: ResolvedRoute): ResolvedRoute {
+  return {
+    provider: result.provider ?? fallback.provider,
+    model: result.model ?? fallback.model,
+  };
+}
+
+function buildRouteResolution(params: NormalizedParams, routes: DualPlanRoutes): Array<Record<string, string>> {
+  return [
+    { seat: "Plan A", role: "planner", agentName: params.plannerAgent, ...routes.planA },
+    { seat: "Plan B", role: "planner", agentName: params.plannerAgent, ...routes.planB },
+    { seat: "synthesis", role: "planner", agentName: params.verifierAgent, ...routes.synthesis },
+    { seat: "executor", role: "executor", agentName: params.executorAgent, ...routes.executor },
+    { seat: "verifier", role: "verifier", agentName: params.verifierAgent, ...routes.verifier },
+  ];
+}
+
+function buildRoutingEvidence(
+  params: NormalizedParams,
+  plannerOutputs: PlannerOutput[],
+  synthesis: SubagentResult,
+  attempts: ExecutionAttempt[],
+  routes: DualPlanRoutes,
+): Array<Record<string, string | number>> {
+  const evidence: Array<Record<string, string | number>> = plannerOutputs.map((output) => ({
+    seat: output.label,
+    role: "planner",
+    agentName: params.plannerAgent,
+    ...routeFromResult(output.result, output.route),
+    exitCode: output.result.exitCode ?? -1,
+  }));
+  evidence.push({
+    seat: "synthesis",
+    role: "planner",
+    agentName: params.verifierAgent,
+    ...routeFromResult(synthesis, routes.synthesis),
+    exitCode: synthesis.exitCode ?? -1,
+  });
+  for (const attempt of attempts) {
+    evidence.push({
+      seat: `executor-${attempt.attempt}`,
+      role: "executor",
+      agentName: params.executorAgent,
+      ...routeFromResult(attempt.executor, routes.executor),
+      exitCode: attempt.executor.exitCode ?? -1,
+    });
+    evidence.push({
+      seat: `verifier-${attempt.attempt}`,
+      role: "verifier",
+      agentName: params.verifierAgent,
+      ...routeFromResult(attempt.verifier, routes.verifier),
+      exitCode: attempt.verifier.exitCode ?? -1,
+    });
+  }
+  return evidence;
+}
+
 function buildDetails(
   status: "pass" | "fail",
   params: NormalizedParams,
@@ -672,6 +788,7 @@ function buildDetails(
   synthesis: SubagentResult,
   attempts: ExecutionAttempt[],
   maxRetries: number,
+  routes: DualPlanRoutes,
 ): Record<string, unknown> {
   return {
     status,
@@ -680,13 +797,9 @@ function buildDetails(
     attempts: attempts.length,
     spawnedCount: spawnGuard.spawned,
     spawnedCap: spawnGuard.cap,
-    routes: {
-      planA: PLAN_A_ROUTE,
-      planB: PLAN_B_ROUTE,
-      synthesis: SYNTHESIS_ROUTE,
-      executor: resolveRoutes(params).executor,
-      verifier: resolveRoutes(params).verifier,
-    },
+    routes,
+    routeResolution: buildRouteResolution(params, routes),
+    routingEvidence: buildRoutingEvidence(params, plannerOutputs, synthesis, attempts, routes),
     plannerOutputs: plannerOutputs.map((output) => ({
       label: output.label,
       provider: output.route.provider,
@@ -696,12 +809,15 @@ function buildDetails(
       text: truncateWithNotice(output.result.text, MAX_DETAIL_TEXT_CHARS, `${output.label} output`),
     })),
     synthesis: {
+      ...routeFromResult(synthesis, routes.synthesis),
       exitCode: synthesis.exitCode,
       durationMs: synthesis.durationMs,
       text: truncateWithNotice(synthesis.text, MAX_DETAIL_TEXT_CHARS, "synthesis output"),
     },
     executionAttempts: attempts.map((attempt) => ({
       attempt: attempt.attempt,
+      executorRoute: routeFromResult(attempt.executor, routes.executor),
+      verifierRoute: routeFromResult(attempt.verifier, routes.verifier),
       executorExitCode: attempt.executor.exitCode,
       verifierExitCode: attempt.verifier.exitCode,
       verdict: attempt.verdict.status,
@@ -723,13 +839,15 @@ function buildFinalMarkdown(
   synthesis: SubagentResult,
   attempts: ExecutionAttempt[],
   maxRetries: number,
+  routes: DualPlanRoutes,
 ): string {
   const lines = [
     `# Dual-Plan-Synthesis-Execute-Verify Orchestration: ${status.toUpperCase()}`,
     "",
     `**Task:** ${params.task}`,
     "**Paradigm:** dual-plan-synthesis-execute-verify",
-    `**Routes:** Plan A=${PLAN_A_ROUTE.provider}/${PLAN_A_ROUTE.model}; Plan B=${PLAN_B_ROUTE.provider}/${PLAN_B_ROUTE.model}; Synthesis=${SYNTHESIS_ROUTE.provider}/${SYNTHESIS_ROUTE.model}; Executor=${resolveRoutes(params).executor.provider}/${resolveRoutes(params).executor.model}; Verifier=${resolveRoutes(params).verifier.provider}/${resolveRoutes(params).verifier.model}`,
+    `**Routes:** Plan A=${formatRoute(routes.planA)}; Plan B=${formatRoute(routes.planB)}; Synthesis=${formatRoute(routes.synthesis)}; Executor=${formatRoute(routes.executor)}; Verifier=${formatRoute(routes.verifier)}`,
+    "**Preflight role coverage:** Plan A=planner; Plan B=planner; Synthesis=planner; Executor=executor; Verifier=verifier.",
     `**Retry policy:** up to ${maxRetries} executor retry slot(s); stop on verifier PASS or retry exhaustion.`,
     `**Subagents spawned:** ${spawnGuard.spawned}/${spawnGuard.cap}`,
     "",
@@ -761,18 +879,24 @@ function buildFinalMarkdown(
     );
   }
 
-  // BUG FIX (2026-07-02): build the closing narrative from the SAME resolved
-  // routes used for the Routes header — never hardcoded model adjectives — so
-  // the footer can never contradict the routes actually spawned
-  // (2026-07-02-dual-plan-report-footer-hardcodes-deepseek-executor-narrative.md).
-  const narrativeRoutes = resolveRoutes(params);
+  // Build the closing narrative from observed result metadata where available;
+  // restored checkpoints therefore remain truthful rather than being relabelled
+  // with a later process/session default.
+  const synthesisRoute = routeFromResult(synthesis, routes.synthesis);
+  const finalAttempt = attempts[attempts.length - 1];
+  const executorRoute = finalAttempt
+    ? routeFromResult(finalAttempt.executor, routes.executor)
+    : routes.executor;
+  const verifierRoute = finalAttempt
+    ? routeFromResult(finalAttempt.verifier, routes.verifier)
+    : routes.verifier;
   lines.push(
     "## Orchestration Used",
-    `Two independent routed planners ran concurrently ` +
-      `(${PLAN_A_ROUTE.provider}/${PLAN_A_ROUTE.model} and ${PLAN_B_ROUTE.provider}/${PLAN_B_ROUTE.model}), ` +
-      `the synthesis reviewer (${SYNTHESIS_ROUTE.provider}/${SYNTHESIS_ROUTE.model}) produced the authoritative plan, ` +
-      `the executor (${narrativeRoutes.executor.provider}/${narrativeRoutes.executor.model}) implemented it, ` +
-      `and the verifier (${narrativeRoutes.verifier.provider}/${narrativeRoutes.verifier.model}) gated completion ` +
+    `Two isolated routed planners ran concurrently ` +
+      `(${formatRoute(plannerOutputs[0]?.route ?? routes.planA)} and ${formatRoute(plannerOutputs[1]?.route ?? routes.planB)}), ` +
+      `the synthesis reviewer (${formatRoute(synthesisRoute)}) produced the authoritative plan, ` +
+      `the executor (${formatRoute(executorRoute)}) implemented it, ` +
+      `and the verifier (${formatRoute(verifierRoute)}) gated completion ` +
       `with direct evidence and bounded retry feedback. Orchestrator Role Integrity: the requested shape was ` +
       `preserved; execution was routed through the executor subagent.`,
   );
@@ -805,6 +929,7 @@ function buildDiscoveryOnlyMarkdown(
   plannerOutputs: PlannerOutput[],
   synthesis: SubagentResult,
   writeSet: string[],
+  routes: DualPlanRoutes,
 ): string {
   const lines = [
     "# Discovery-only manifest",
@@ -812,6 +937,8 @@ function buildDiscoveryOnlyMarkdown(
     `**Task:** ${params.task}`,
     "**Paradigm:** dual-plan-synthesis-execute-verify",
     `**Mode:** discovery-only (no executor/verifier spawned)`,
+    `**Routes:** Plan A=${formatRoute(routes.planA)}; Plan B=${formatRoute(routes.planB)}; Synthesis=${formatRoute(routes.synthesis)}`,
+    "**Preflight role coverage:** Plan A=planner; Plan B=planner; Synthesis=planner.",
     `**Subagents spawned:** ${spawnGuard.spawned}/${spawnGuard.cap}`,
     "",
     "## Predicted write set",
@@ -835,12 +962,16 @@ function buildDiscoveryOnlyDetails(
   plannerOutputs: PlannerOutput[],
   synthesis: SubagentResult,
   writeSet: string[],
+  routes: DualPlanRoutes,
 ): Record<string, unknown> {
   return {
     status: "discovery-only",
     mode: "discovery-only",
     paradigm: "dual-plan-synthesis-execute-verify",
     predictedWriteSet: writeSet,
+    routes,
+    routeResolution: buildRouteResolution(params, routes),
+    routingEvidence: buildRoutingEvidence(params, plannerOutputs, synthesis, [], routes),
     spawnedCount: spawnGuard.spawned,
     spawnedCap: spawnGuard.cap,
     plannerOutputs: plannerOutputs.map((output) => ({
@@ -852,6 +983,7 @@ function buildDiscoveryOnlyDetails(
       text: truncateWithNotice(output.result.text, MAX_DETAIL_TEXT_CHARS, `${output.label} output`),
     })),
     synthesis: {
+      ...routeFromResult(synthesis, routes.synthesis),
       exitCode: synthesis.exitCode,
       durationMs: synthesis.durationMs,
       text: truncateWithNotice(synthesis.text, MAX_DETAIL_TEXT_CHARS, "synthesis output"),

@@ -1,6 +1,6 @@
 ---
 name: spec-driven-ecology
-description: 15-phase ecological spec-driven development intake methodology. Treats a user prompt as an opening perturbation in a development ecology and guides from raw prompt to planning-ready spec through invariants, constraints mapping, affordance analysis, attractor/failure-mode analysis, perturbation tests, and explicit handoff contracts. Use when users request ecological intake, spec-driven development intake, deep spec work, /spec_driven_ecology, or rigorous specification before implementation. Works standalone or as an intake artifact for deterministic /orchestrate runs.
+description: 15-phase ecological spec-driven development intake methodology. Treats a user prompt as an opening perturbation in a development ecology and guides from raw prompt to planning-ready spec through invariants, constraints mapping, affordance analysis, attractor/failure-mode analysis, perturbation tests, and explicit handoff contracts. This skill should be used when users request ecological intake, spec-driven development intake, deep spec work, /spec_driven_ecology, or when the task requires rigorous specification before any implementation. Works standalone and as an alternative NenFlow v3 intake mode.
 ---
 
 # Spec-Driven Ecological Intake
@@ -83,15 +83,15 @@ The current Pi agent acts as the Intake Agent. It guides the human from raw prom
 
 ### Planner
 
-Converts the approved intake spec into a staged plan. Must not violate invariants or invent missing context.
+Converts the approved intake spec into a staged plan. Must not violate invariants or invent missing context. In NenFlow v3 mode, this maps to the `pev-planner` subagent.
 
 ### Executor
 
-Implements only approved tasks from the plan. Must produce evidence of completion.
+Implements only approved tasks from the plan. Must produce evidence of completion. In NenFlow v3 mode, this maps to the `pev-executor` subagent.
 
 ### Verifier
 
-Tests the implementation against success criteria, invariants, and falsifiers. Must distinguish verified claims from unverified claims. The Observer role from the ecological methodology is folded into the Verifier — the Verifier watches for drift, overbuild, brittle reasoning, missing evidence, and attractor collapse alongside standard verification duties.
+Tests the implementation against success criteria, invariants, and falsifiers. Must distinguish verified claims from unverified claims. The Observer role from the ecological methodology is folded into the Verifier — the Verifier watches for drift, overbuild, brittle reasoning, missing evidence, and attractor collapse alongside standard verification duties. In NenFlow v3 mode, this maps to the `pev-verifier` subagent.
 
 ---
 
@@ -972,7 +972,7 @@ Invoke this skill standalone by typing `/spec_driven_ecology` or saying "use eco
 
 ### Standalone Behavior
 
-When invoked standalone:
+When invoked standalone (outside NenFlow v3):
 
 1. **Begin Phase 0 immediately.** Record the user's raw prompt verbatim. Identify the appropriate intake depth (Minimal/Standard/Deep) with a brief rationale.
 2. **Start the conversation loop.** Use the Conversation Protocol (Reflect → Separate → Ask Material Questions → Offer Provisional Structure → Let Human Correct → Synthesize).
@@ -991,17 +991,52 @@ The standalone intake produces:
 
 ---
 
-## Deterministic Orchestrator Handoff
+## NenFlow v3 Integration Mode (RETIRED)
 
-When the user wants the approved ecological specification executed through
-orchestration, pass the final intake artifact to `/orchestrate`. Keep the
-invariants, success criteria, falsifiers, human gates, and handoff contracts
-verbatim in the task or referenced spec file. The deterministic orchestrator
-selects planner/executor/verifier roles; this skill does not spawn retired
-`pev-*` agents or recreate historical orchestration paperwork.
+> **NenFlow v3 was retired 2026-07-18** (see `agent/docs/nenflow-v3-retirement.md`). This
+> integration mode is inactive: do not spawn `pev-intake-ecological` (disabled). Use this
+> skill in **standalone mode** — it still produces full intake artifacts (ATT_0_INTAKE.md
+> etc.) in the current session — or feed its intake spec into the deterministic
+> `/orchestrate` system. The section below is kept for historical reference only.
 
-If it is unclear whether the user wants specification only or implementation,
-ask that material scope question before execution.
+### Triggering Ecological Mode in NenFlow
+
+Within NenFlow v3, ecological intake mode is triggered when the user's prompt contains keywords like: "ecological", "spec-driven ecology", "ecological intake", "deep spec", "/spec_driven_ecology", or when the user explicitly asks for the 15-phase ecological process.
+
+### Orchestrator Behavior in Ecological Mode
+
+When ecological mode is detected:
+
+1. The Orchestrator does **NOT** perform INTAKE itself.
+2. The Orchestrator spawns the `pev-intake-ecological` subagent.
+3. The subagent receives: raw prompt, run id, RUN_CONFIG.json path, context_handoff_threshold_percent, exact ATT_0_INTAKE.md output path, and exact continuation path.
+4. The subagent uses this `spec-driven-ecology` skill to guide the ecological intake conversation.
+5. The subagent produces ATT_0_INTAKE.md in NenFlow-compatible format with the standard frontmatter schema plus enriched ecological sections.
+
+### ATT_0_INTAKE.md Format
+
+The ecological ATT_0_INTAKE.md includes the standard NenFlow INTAKE sections (Task Summary, Task Type, User Intent, Goal Attractor, Constraints, Invariants, Success Criteria, Ambiguities, Routing Decision) plus ecological supplements:
+
+- Epistemic Map (Known/Inferred/Assumed/Unknown)
+- Affordance Landscape
+- Attractors and Failure Modes
+- Perturbation Tests
+- Representative Environment
+- Falsifiers
+- Human Gates
+
+These supplements are additive — the Planner, Executor, and Verifier consume the same format without changes. The ecological sections enrich the specification without breaking compatibility.
+
+### After Ecological Intake
+
+After `pev-intake-ecological` produces ATT_0_INTAKE.md, the Orchestrator:
+1. Reads and validates the produced INTAKE
+2. Continues to RESEARCH (optional) or PLAN normally
+3. Routes D-E (continuation, retry) operate as usual
+
+### Ambiguity Handling
+
+If it is unclear whether the user wants ecological intake mode, the Orchestrator explicitly asks rather than auto-detecting from ambiguous prompts.
 
 ---
 

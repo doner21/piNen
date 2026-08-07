@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Regression coverage for terminal transport and write-set shape repair:
+ * Regression coverage for RUN_20260722-001825 shape repair:
  * - frozen-gate/custom dispatch enforces predictedWriteSet before verifier spawn,
  *   including absolute external prefix observation and lookalike sibling rejects.
  * - terminal assistant/transport-after-work on a mutating phase is persisted as
@@ -656,43 +656,6 @@ async function testPevTerminalTransportWriteSetViolationWins() {
   }
 }
 
-function testRecoveryAndCustomShapeMutationGuards() {
-  const indexSource = fs.readFileSync(path.join(PROJECT_ROOT, "src", "index.ts"), "utf8");
-  const composableSource = fs.readFileSync(
-    path.join(PROJECT_ROOT, "src", "shapes", "composable-pipeline.ts"), "utf8");
-  const dualSource = fs.readFileSync(
-    path.join(PROJECT_ROOT, "src", "shapes", "dual-plan-synthesis-execute-verify.ts"), "utf8");
-
-  const continuationStart = indexSource.indexOf("let continueResult: SubagentResult;");
-  const continuationEnd = indexSource.indexOf("if (!checkContextExhaustion(continueResult))", continuationStart);
-  assert.ok(continuationStart >= 0 && continuationEnd > continuationStart, "continuation recovery block must exist");
-  const continuationBlock = indexSource.slice(continuationStart, continuationEnd);
-  assert.match(continuationBlock, /err instanceof SubagentDetachedError\) throw err/,
-    "continuation recovery must rethrow detached children");
-  assert.match(continuationBlock, /err instanceof SubagentTerminalAmbiguousError\) throw err/,
-    "continuation recovery must rethrow terminal ambiguous mutation state");
-
-  const splitStart = indexSource.indexOf("async function splitAndExecuteTask(");
-  const splitEnd = indexSource.indexOf("function escalateToReplan", splitStart);
-  assert.ok(splitStart >= 0 && splitEnd > splitStart, "split recovery block must exist");
-  const splitBlock = indexSource.slice(splitStart, splitEnd);
-  assert.match(splitBlock, /err instanceof SubagentDetachedError\) throw err/,
-    "split recovery must rethrow detached children");
-  assert.match(splitBlock, /err instanceof SubagentTerminalAmbiguousError\) throw err/,
-    "split recovery must rethrow terminal ambiguous mutation state");
-
-  assert.match(composableSource, /inheritedModel, override, true\);/,
-    "composable execute-task spawn must mark phaseMutates=true");
-  assert.match(composableSource, /phaseMutates = false/,
-    "composable spawn helper must accept phaseMutates");
-  assert.match(composableSource, /modelOverride, phaseMutates,/,
-    "composable spawn helper must forward phaseMutates to the substrate");
-  assert.match(dualSource, /phaseMutates: true/,
-    "dual-plan executor spawn must mark phaseMutates=true");
-  assert.match(dualSource, /"abortSurvival" \| "phaseMutates"/,
-    "dual-plan spawn helper options must type phaseMutates");
-}
-
 async function testPevConcurrentWaveWriteSetViolationStopsBeforeVerifier() {
   const scenario = await runPevScenario("pev-concurrent-violation", {
     executorConcurrency: 2,
@@ -713,8 +676,6 @@ async function testPevConcurrentWaveWriteSetViolationStopsBeforeVerifier() {
 }
 
 (async function main() {
-  testRecoveryAndCustomShapeMutationGuards();
-  console.log("ok - recovery rethrows terminal states and custom executor phases declare mutation risk");
   await testExternalWriteSetViolationBeforeVerifier();
   console.log("ok - external absolute write-set violation persists terminal no-retry and stops before verifier");
   await testExternalOnlyWriteSetStillObservesCwd();

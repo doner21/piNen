@@ -24,14 +24,16 @@ By default, the extension prefers the currently running Pi CLI script when avail
 ## Install
 
 ```bash
-pi install ~/.pi/pi-orchestrator-extension
+pi install <PI_CONFIG>/pi-orchestrator-extension
 ```
 
-If Pi is already running, reload resources after installing:
+If Pi is already running, reload resources after installing or changing the extension's own TypeScript:
 
 ```text
 /reload
 ```
+
+This install-time reload is not part of the ordinary workflow lifecycle. Once this extension version is active, adding or changing a declarative workflow JSON artifact is discovered on the next `orchestrate` invocation in the same Pi session.
 
 ## Command usage
 
@@ -56,16 +58,86 @@ Supported command flags:
 - `--verifier-model M`, `--verifier-provider P` — per-run model override for the verifier.
 - `--cwd PATH` — child subprocess working directory.
 - `--allow-local-model` / `--no-allow-local-model` — local model guard override.
-- `--paradigm NAME` — orchestration shape: `plan-execute-verify` (default), `multi-verify-vote`, `composable-pipeline`, `dual-plan-synthesis-execute-verify`, `verify-only`, `paradigm-creator`, `shape-builder`, `win-console-spawn-root-cause`, `win-lifecycle-process-trace`, `frozen-gate-fix-loop`, `evidence-audit`, `independent-replication`, `safe-github-publish`.
+- `--paradigm NAME` — select a built-in/native shape or a safe kebab-case declarative workflow discovered at invocation time. Built-ins include `plan-execute-verify` (default), `multi-verify-vote`, `composable-pipeline`, `dual-plan-synthesis-execute-verify`, `verify-only`, `paradigm-creator`, `shape-builder`, `win-console-spawn-root-cause`, `win-lifecycle-process-trace`, `frozen-gate-fix-loop`, `evidence-audit`, `independent-replication`, and `ssi-single-writer-exclusive-lane`.
 - `--hard-gates MODE` — judgment-layer gate mode: `strict` | `advisory` (default) | `off`. See "Judgment layer" below.
-- `--write-set PATHS` — comma-separated repo-relative paths, prefixes, simple globs, or absolute external paths. Deterministic enforcement is supported by `plan-execute-verify` and `frozen-gate-fix-loop`; dual-plan accepts it only as proposed scope with `--discovery-only`. Unsupported shapes fail closed.
-- `--discovery-only` — read-only planning supported by `plan-execute-verify` and `dual-plan-synthesis-execute-verify`; returns a plan plus predicted write set without spawning executors or verifiers. Unsupported shapes fail closed.
 - `--preflight` / `--no-preflight` — toggle the 1-token provider health pings run before any subagent spawn (default on).
 - `--planner-fallback-model M`, `--planner-fallback-provider P` (and the `executor`/`verifier` variants) — per-role fallback route applied when the primary route fails pre-flight (graceful degradation).
 
 If no task is provided, `/orchestrate` prompts for one. While running, it now surfaces visible progress in the Pi window: status/footer text, a live widget, durable `orchestrate-progress` messages, and child JSON-mode events such as subagent launches, assistant starts/finishes, and tool-call starts. When complete, it notifies a summary, sends a durable visible `orchestrate-result` message, places the final markdown report in the editor when UI is available, and includes a `Progress evidence` section in the report.
 
 If `--max-subagents` is omitted, the extension auto-raises the ceiling after planning when the discovered plan size and retry budget require more than the default. Example: 6 executor tasks with `--max-retries 2` needs `3 * (1 planner + 6 executors + 1 verifier) = 24` subprocesses, so the default ceiling auto-raises from 12 to 24. If `--max-subagents` is provided explicitly, that number is honored and auto-raise is disabled.
+
+## Declarative workflows: dynamic and reload-free
+
+Ordinary reusable workflows are versioned JSON data, not extension modules. The resolver checks trusted roots on **every invocation**, so a workflow written by `shape-builder` (or by another trusted editor) can immediately run in the same Pi process:
+
+```text
+/orchestrate --paradigm my-review-loop "review this change"
+```
+
+Artifacts use the filename `<safe-kebab-name>.workflow.json` and live in one of these roots:
+
+| Scope | Default root | Precedence |
+|---|---|---|
+| Project | `<cwd>/.pi/orchestrator-workflows/` | First |
+| User | `~/.pi/orchestrator-workflows/` | Fallback |
+
+`PI_ORCHESTRATOR_PROJECT_WORKFLOWS_ROOT` and `PI_ORCHESTRATOR_USER_WORKFLOWS_ROOT` override these roots (primarily for tests and controlled deployments). A present project artifact wins over the same user workflow name; if that project artifact is invalid, resolution fails closed rather than falling back. Declarative workflows may not shadow any built-in/native shape.
+
+### Schema version 1
+
+Unknown fields are rejected. A minimal artifact is:
+
+```json
+{
+  "schemaVersion": 1,
+  "name": "my-review-loop",
+  "description": "Review, then verify a change.",
+  "phases": [
+    {
+      "id": "review",
+      "role": "executor",
+      "agentName": "coder",
+      "prompt": "Review the requested change and report concrete findings.",
+      "expectedOutput": "Findings with file and line evidence.",
+      "dependsOn": [],
+      "route": { "role": "executor" }
+    },
+    {
+      "id": "verify",
+      "role": "verifier",
+      "agentName": "reviewer",
+      "prompt": "Independently verify the dependency output.",
+      "expectedOutput": "A supported pass/fail verdict.",
+      "dependsOn": ["review"],
+      "route": { "role": "verifier" }
+    }
+  ],
+  "maxSubagents": 2,
+  "maxConcurrency": 2,
+  "maxIterations": 1,
+  "continueOnFailure": false,
+  "terminationCondition": "Stop after one finite pass.",
+  "evidenceModel": "Cited phase outputs.",
+  "failureBehavior": "Fail on a non-zero phase exit.",
+  "userFacingExplanation": "A bounded review and independent verification workflow."
+}
+```
+
+A phase `route.role` is `inherit`, `planner`, `executor`, or `verifier`; optional `provider` and `model` select an explicit bounded route. Dependencies must form an acyclic graph. The coordinator can only validate/schedule the graph and spawn isolated subagents through the existing substrate: workflow JSON cannot import TypeScript, execute coordinator shell commands, access coordinator filesystem APIs, call the network, or recursively orchestrate.
+
+### Trust, bounds, and reproducibility
+
+Both the requested workflow name and phase IDs must be safe lowercase kebab-case. The loader canonicalizes real paths and rejects path traversal plus symlink/junction escapes outside the selected trusted root. It accepts regular files only and enforces these hard limits before spawning:
+
+- artifact size: 256 KiB; workflow name: 64 characters
+- phases: 1–32; iterations: 1–10; total workflow spawn ceiling: 64
+- concurrency: 1–16; prompt: 16,000 characters; expected output: 4,000 characters
+- description: 2,000 characters; final report: 20,000 characters; retained phase output: 4,000 characters
+
+`shape-builder` validates the artifact, rediscovers it through the same invocation-time resolver, and runs a deterministic graph canary with **zero subagent spawns**. A real workflow run stores its canonical source path, scope, schema version, source-byte SHA-256, validated-snapshot SHA-256, and the exact fully validated IR snapshot in run state and results. Resume uses only that pinned snapshot; it never silently switches to a source artifact changed after the run began, and fails closed if the pinned snapshot is absent or inconsistent. Older native run-state files remain valid.
+
+The default user root and normal project roots are not part of Pi's globally installed npm package or its `dist` files. Ordinary `pi` self-updates therefore cannot overwrite these user/project-owned workflow artifacts (keep the project root in a user-owned project, as intended). No Pi core, global `dist`, private loader, or static import/registry edit is involved.
 
 ## Judgment layer: effect-based verdicts (2026-06-12 hardening)
 
@@ -91,17 +163,6 @@ reply-text shape heuristics.
   reused (their prior outputs are routed to re-verification, never
   regenerated) as long as their artifacts still exist on disk. The planner is
   told which tasks are already complete and must not re-create them.
-- **Predict-then-write scope**: for `plan-execute-verify` and
-  `frozen-gate-fix-loop`, `predictedWriteSet`/`--write-set` constrains execution
-  to approved relative or absolute paths. Out-of-contract plans fail before
-  execution and observed out-of-scope mutations fail before verifier spawn.
-  `discoveryOnly`/`--discovery-only` is supported by PEV and dual-plan; it uses
-  read-only planning and returns the proposed scope without project mutations.
-  Other control/shape combinations fail closed instead of being ignored.
-- **Terminal ambiguous mutation handling**: if a mutating child loses its final
-  result stream or exits with an unrecovered assistant/transport error, the run
-  persists a no-retry terminal state rather than blindly spawning a duplicate
-  executor against potentially changed files.
 - **Pre-flight + structured failures (F5)**: before spawning any subagent, a
   1-token health ping runs for each routed provider/model pair. Every ping has
   a 20-second wall-clock timeout and the complete primary/fallback preflight
@@ -141,21 +202,11 @@ provider/model.`) and the deterministic routing check are unchanged and remain
 byte-compatible in the report. Pre-flight pings do not count against
 `maxSubagents` and never emit attestation-shaped lines.
 
-## Safe GitHub publishing
-
-`safe-github-publish` is the publishing-specific shape:
-
-```text
-/orchestrate --paradigm safe-github-publish "Publish this project as my-repo"
-```
-
-It requires a sanitization contract, builds a clean staging tree without source Git history, runs gitleaks and path-deny checks, creates the target private-first, pushes through an executor, and independently verifies the remote. The visible orchestrator never performs the main publishing work directly.
-
 ## Per-run model routing and natural-language controls
 
 The `orchestrate` tool accepts optional `plannerModel`/`plannerProvider`, `executorModel`/`executorProvider`, and `verifierModel`/`verifierProvider` parameters so the caller can select each role route. On the command line, use `--planner-model`, `--planner-provider`, etc. Explicit overrides take precedence. Omitted fields resolve from the named agent profile in `~/.pi/agent/agents/`, then from `~/.pi/agent/settings.json` (`defaultProvider`/`defaultModel`); they no longer inherit the conversational model. The selected planner/executor/verifier routes are emitted before preflight begins.
 
-Because this package is loaded as a Pi extension, applying source changes to an already-running Pi or embedded host may require a **full process restart**. A source update does not itself reload or restart active processes.
+Because this package is loaded as a Pi extension, applying changes to the extension's own TypeScript or built-in/native shape registry in an already-running Pi or embedded SSI harness may require a **full Pi/SSI process restart**. Creating or editing an ordinary declarative workflow artifact does **not**: invocation-time resolution makes it visible in the current session.
 
 The intake also preserves pure natural-language orchestration controls inside the task text, including max agents/subagents, executor concurrency/parallelism, retry/attempt loop limits, researcher counts, distinct perspectives, and runtime-role model routing. Explicit natural-language model routing is treated as essential orchestrator configuration, not executor work.
 
@@ -223,7 +274,7 @@ This shape produces runbook/harness materials and a verification contract. It do
 /orchestrate --paradigm paradigm-creator "Propose a bounded red-team / blue-team / judge paradigm for migration audits"
 ```
 
-The result is a proposal report, not an applied mutation. After a human or future explicit apply mode writes the proposed files and tests pass, the parent Pi session must schedule continuation, trigger a runtime reload, stop, read reload diagnostics first, and verify the new paradigm appears in runtime discovery before using it.
+The result is a proposal report, not an applied mutation. `paradigm-creator` proposes native extension code, so after an explicit apply step writes that code and tests pass, the parent Pi session must reload/restart and verify native runtime discovery before use. For an ordinary data-only workflow, use `shape-builder` instead; it writes declarative JSON and requires no reload.
 
 ## `shape-builder` example
 
@@ -231,35 +282,49 @@ The result is a proposal report, not an applied mutation. After a human or futur
 /orchestrate --paradigm shape-builder "SHAPE_BUILDER_SPEC_JSON\n{...spec json...}"
 ```
 
-The shape-builder is a deterministic meta-constructor for creating new orchestration shapes with full lifecycle gating.
+The shape-builder is a deterministic meta-constructor with two explicit artifact modes.
 
-### Lifecycle states
+### Ordinary mode (default): declarative workflow
 
-A generated shape progresses through: `proposed` → `implementation_reported` → `implemented_verified` → (parent reload) → `reloaded_discovered` → `canary_passed`.
+Omit `artifactKind`, or set `"artifactKind": "declarative-workflow"`. `scope` defaults to `"user"`; set it to `"project"` to publish under the current `cwd`. The builder compiles the normal `ShapeBuilderSpec` to one durable `.workflow.json` artifact. It does not generate TypeScript, a per-workflow test module, or static registry/docs imports. Builder JSON is strict: unknown top-level/phase fields and type coercion are rejected; names must already be safe lowercase kebab-case; phase identifiers must remain unique after normalization; and all numeric/text limits are checked before publication.
 
-- **proposed**: Spec parsed, validated, lifecycle JSON written. No files written yet.
-- **implementation_reported**: Generated files written, local checks passed. Not yet verified.
-- **implemented_verified**: Independent verifier confirmed implementation. `reloadRequired: true`.
-- **reloaded_discovered**: Post-reload; active runtime confirms shape is registered.
-- **canary_passed**: Active runtime canary succeeded. `usable: true`.
+Lifecycle: `proposed` → `implementation_reported` → `declarative_verified` → `runtime_discovered` → `canary_passed`. Publication is atomic within the trusted root and refuses differing existing files, symlinks, non-regular entries, hidden user/project precedence conflicts, and native/declarative name collisions. Validation, invocation-time rediscovery, and the deterministic zero-spawn canary happen in the same run. Success returns:
 
-### Return contract
+- `implemented_verified: true`, `usable: true`, `reloadRequired: false`
+- `lifecycleStatus: "canary_passed"`, `nextRequiredGate: "none"`
+- source path, scope, schema version, content hash, and canary evidence
 
-Successful pre-reload response includes:
-- `implemented_verified: true`, `usable: false`, `reloadRequired: true`
-- `nextRequiredGate: "agent_reload"`
-- `continuationTemplate` beginning `RESUME AFTER PI RELOAD:`
+The workflow is immediately runnable with `--paradigm <targetName>` in the current Pi session.
 
-The shape itself never reloads, schedules, or marks a shape usable before post-reload canary.
+### Explicit native mode: extension/substrate code
 
-### Reload handoff
+Set `"artifactKind": "native-shape"` only when the requested capability genuinely requires executable extension/substrate code that declarative phases cannot express. Native mode retains the historical code generation, static sibling/safety checks, independent verifier, anchored registry/docs/test edits, and lifecycle:
 
-After verification reports `implemented_verified`:
-1. Visible ORCHESTRATOR schedules continuation, calls `agent_reload_runtime`, and stops.
-2. Resumed ORCHESTRATOR reads `agent-reload-diagnostics.json` first.
-3. Active runtime discovery with intentionally-unknown paradigm — confirm the generated name appears.
-4. Active runtime canary with `paradigm:<name>` and `task: "SHAPE_CANARY:<name>"`.
-5. Only after canary passes, mark the shape `usable: true`.
+`proposed` → `implementation_reported` → `implemented_verified` → (parent reload) → `reloaded_discovered` → `canary_passed`.
+
+A successful pre-reload native response remains `usable: false`, `reloadRequired: true`, and `nextRequiredGate: "agent_reload"`, with a `RESUME AFTER PI RELOAD:` continuation template. The shape itself never invokes reload, `pi.executeCommand`, a private loader, a scheduler, or recursive orchestration.
+
+## `ssi-single-writer-exclusive-lane` — usable deterministic shape
+
+Lifecycle: **`canary_passed`, usable, production-proven**. Use this shape for integrated SSI DAW work in a shared dirty checkout where exactly one logical writer must own source mutation and CMake/Ninja/native-host/Electron/Playwright/WASAPI gates must run one at a time behind a cross-process machine lock.
+
+It runs three parallel read-only diagnoses, one synthesis, one allowlisted non-DeepSeek writer, two parallel read-only source reviews, one exclusive serialized machine lane, at most one same-writer repair and full retest, then a PASS-gated finalizer with independent local/remote Git verification. It is not appropriate for small docs-only or isolated edits, and optional concurrent-rebuild stress must not be promoted into ordinary SSI acceptance without an explicit scope decision.
+
+```json
+{
+  "task": "<authoritative SSI task with exact serial gates and cleanup requirements>",
+  "paradigm": "ssi-single-writer-exclusive-lane",
+  "cwd": "<project-root>",
+  "executorModel": "gpt-5.6-sol",
+  "executorProvider": "openai-codex",
+  "maxSubagents": 11,
+  "maxRetries": 0
+}
+```
+
+Canonical lifecycle and operational history: [`shape-builder-lifecycle/ssi-single-writer-exclusive-lane.json`](shape-builder-lifecycle/ssi-single-writer-exclusive-lane.json) and [`ssi-single-writer-exclusive-lane-OPERATIONS.md`](shape-builder-lifecycle/ssi-single-writer-exclusive-lane-OPERATIONS.md).
+
+Existing Pi processes may retain a stale local-package registry after `/reload`; if the paradigm is reported unknown, fully restart Pi and run `SHAPE_CANARY:ssi-single-writer-exclusive-lane` before product work.
 
 ## Tool usage example
 
@@ -280,7 +345,7 @@ Ask Pi to use the tool, or call it from the model with parameters like:
   "concurrency": 2,
   "maxRetries": 2,
   "maxSubagents": 12,
-  "cwd": "/path/to/my-project",
+  "cwd": "<project-root>",
   "allowLocalModel": false
 }
 ```
@@ -296,9 +361,9 @@ Explicit paradigm-creator call:
 }
 ```
 
-## Orchestration mode
+## Orchestrator Role Integrity
 
-Use this extension when the user explicitly requests orchestration. The current agent coordinates the selected planner/executor/verifier subprocesses and reports the observed result; it must not quietly perform the main task directly while claiming the run was delegated. Use the shape's built-in reports and gates without adding role ledgers, receipts, or other policy paperwork. On failure, repair the specific product or orchestration defect and re-run while there is material progress. See `agent/AGENTS.md` for the canonical public policy.
+When an orchestration paradigm runs, the visible/current agent remains the ORCHESTRATOR and must not execute the main task directly. Every run must produce an *Orchestrator Role Integrity Ledger*. On orchestration failure, repair the requested shape/tool — do not switch shapes or execute the main task directly. Provider/model fallback is allowed; shape substitution is forbidden. See `PARADIGMS.md` and `agent/AGENTS.md` for the canonical policy.
 
 ## Agent profiles
 
@@ -319,8 +384,10 @@ If profiles are absent, conservative default `planner`, `coder`, and `reviewer` 
 
 The parent extension owns all orchestration state: attempt counter, spawned count, plan, executor outputs, verifier result, failure reasons, and final result. Subagents are isolated Pi processes and do not share a mutable blackboard.
 
-## Shape-Builder Generated Shapes
+## Native Shape-Builder Generated Shapes
 
 <!-- shape-builder:generated-shapes:start -->
+- `venue-rescue-synthesis`: venue-rescue-synthesis runs cheap text research and a vision-based brand audit, then a specialist financial narrative, then a strong synthesis-and-critique that fuses everything into a rescue strategy with wild and practical options, then a design phase that builds a stylish interactive investor site, then an independent verification.
 - `m66-explicit-routing-proof`: Build-time generated M6.6 proof shape for explicit route, context-isolation, executor-control, and two-verifier dispatch acceptance.
+- [`ssi-single-writer-exclusive-lane`](shape-builder-lifecycle/ssi-single-writer-exclusive-lane-OPERATIONS.md) (**usable — canary passed; production-proven 2026-07-29**): Runs parallel read-only SSI diagnosis, one synthesized plan, one logical non-DeepSeek source writer, parallel source review, and a single serialized build/native/Electron/WASAPI lane with one bounded feedback pass before verified commit/push and a listening card.
 <!-- shape-builder:generated-shapes:end -->

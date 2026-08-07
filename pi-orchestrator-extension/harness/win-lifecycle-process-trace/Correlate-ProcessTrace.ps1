@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Correlate-ProcessTrace.ps1 — HARNESS ARTIFACT
     Joins action markers and process-creation events, assigns each event to

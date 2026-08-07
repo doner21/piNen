@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Write-TraceMarker.ps1 — HARNESS ARTIFACT
     Appends a timestamped action marker record to markers.jsonl.
