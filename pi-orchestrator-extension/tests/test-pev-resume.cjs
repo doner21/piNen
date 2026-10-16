@@ -56,7 +56,13 @@ async function execPev(tool, params, tmp, logPath) {
   process.env.PI_CLI_PATH = path.join(__dirname, "fake-pi.cjs");
   process.env.FAKE_PI_LOG = logPath;
   try {
-    const result = await tool.execute("test-pev-resume", params, undefined, () => {}, { cwd: tmp });
+    const result = await tool.execute(
+      "test-pev-resume",
+      { supervision: "off", ...params },
+      undefined,
+      () => {},
+      { cwd: tmp },
+    );
     const calls = fs.existsSync(logPath)
       ? fs.readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l))
       : [];

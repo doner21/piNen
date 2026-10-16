@@ -44,7 +44,7 @@ async function runShape(paradigm, extraParams) {
     const tool = loadOrchestrateTool();
     const result = await tool.execute(
       `test-${paradigm}`,
-      { paradigm, preflight: false, cwd: tmp, maxSubagents: 12, ...extraParams },
+      { paradigm, supervision: "off", preflight: false, cwd: tmp, maxSubagents: 12, ...extraParams },
       undefined, () => {}, { cwd: tmp },
     );
     const calls = fs.existsSync(logPath)

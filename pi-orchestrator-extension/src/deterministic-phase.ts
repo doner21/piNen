@@ -237,7 +237,7 @@ export function checkpointPayload(output: DeterministicPhaseOutput): Determinist
     exitCode: output.ok ? 0 : 1,
     durationMs: 0,
     events: 0,
-    toolCalls: { total: 0, byTool: {} },
+    toolCalls: { total: 0, mutating: 0, byTool: {} },
     deterministic: true,
     op: output.op,
     inputs: output.inputs,

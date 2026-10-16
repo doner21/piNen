@@ -74,6 +74,8 @@ function testCommittedShapeStaticRules() {
   assert.doesNotMatch(source, /openrouter/i, "shape source must contain no OpenRouter route or narrative");
   assert.doesNotMatch(source, /from\s+["']\.\//, "shape must not import sibling shapes");
   assert.doesNotMatch(source, /while\s*\(\s*true\s*\)/, "shape must not contain unbounded loops");
+  assert.doesNotMatch(source, /empty — no contract-granted writes/,
+    "omitted scope must never be represented by the canonical empty-authority language");
 }
 
 function assertNoForbiddenRoutes(calls, label) {
@@ -95,6 +97,7 @@ async function testRunUsesRoleDefaultsAndPasses() {
       {
         task: "Fixture task: apply a minimal scheduler race fix and verify it.",
         paradigm: "dual-plan-synthesis-execute-verify",
+        supervision: "off",
         preflight: false,
         cwd: tempDir,
         maxSubagents: 8,
@@ -111,6 +114,12 @@ async function testRunUsesRoleDefaultsAndPasses() {
 
     const calls = fs.readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
     assert.equal(calls.length, 5, "two planners, one synthesis reviewer, one coder, one verifier");
+    assert.equal(calls.filter((call) => call.agentName === "coder").length, 1,
+      "an implementation run with omitted scope must reach the executor");
+    for (const call of calls) {
+      assert.equal(call.predictedWriteSetBlock, null,
+        `omitted scope must inject no predicted-write-set authority block into ${call.agentName}`);
+    }
     const routedCalls = calls.map((call) => [call.agentName, call.provider, call.model]);
     assert.deepEqual(
       routedCalls.slice(0, 2).sort((a, b) => `${a[1]}/${a[2]}`.localeCompare(`${b[1]}/${b[2]}`)),
@@ -163,6 +172,7 @@ async function testExplicitRoleRouteOverrides() {
       {
         task: "Fixture task: honor all explicit role routes.",
         paradigm: "dual-plan-synthesis-execute-verify",
+        supervision: "off",
         preflight: false,
         cwd: tempDir,
         maxSubagents: 8,
@@ -210,17 +220,15 @@ async function testDiscoveryOnly() {
       {
         task: "Fixture task: apply a minimal scheduler race fix and verify it.",
         paradigm: "dual-plan-synthesis-execute-verify",
+        supervision: "off",
         preflight: false,
         cwd: tempDir,
         maxSubagents: 8,
         maxRetries: 1,
         discoveryOnly: true,
-        predictedWriteSet: [
-          "C:/absolute/path/allowed-only.txt",
-          "relative/prefix/",
-          "C:/absolute-prefix/",
-          "fixture-out.txt",
-        ],
+        predictedWriteSet:
+          "C:/absolute/path/allowed-only.txt, relative/prefix/\n" +
+          "C:/absolute-prefix/, fixture-out.txt",
       },
       undefined,
       () => {},
@@ -315,8 +323,8 @@ async function testDiscoveryOnly() {
   }
 }
 
-async function testDiscoveryOnlyEmpty() {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-dual-plan-discovery-empty-"));
+async function testDiscoveryOnlyWithoutCallerScope() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-dual-plan-discovery-unscoped-"));
   const logPath = path.join(tempDir, "fake-pi-log.jsonl");
   process.env.PI_CLI_PATH = path.join(__dirname, "fake-pi.cjs");
   process.env.FAKE_PI_LOG = logPath;
@@ -324,16 +332,16 @@ async function testDiscoveryOnlyEmpty() {
   try {
     const tool = loadOrchestrateTool();
     const result = await tool.execute(
-      "test-dual-plan-discovery-only-empty",
+      "test-dual-plan-discovery-only-unscoped",
       {
-        task: "Fixture task: empty write set coverage.",
+        task: "Fixture task: omitted caller write-set coverage.",
         paradigm: "dual-plan-synthesis-execute-verify",
+        supervision: "off",
         preflight: false,
         cwd: tempDir,
         maxSubagents: 8,
         maxRetries: 1,
         discoveryOnly: true,
-        predictedWriteSet: [],
       },
       undefined,
       () => {},
@@ -343,35 +351,30 @@ async function testDiscoveryOnlyEmpty() {
     assert.equal(result.details?.status, "discovery-only");
     assert.equal(result.details?.mode, "discovery-only");
     assert.deepEqual(result.details?.predictedWriteSet, [],
-      "empty predictedWriteSet must be an empty array in details");
+      "discovery details may present no predicted files as an empty manifest list");
 
     const markdown = result.content?.[0]?.text || "";
     assert.match(markdown, /# Discovery-only manifest/);
     assert.match(markdown, /empty.*no files predicted/i,
       "manifest must indicate empty write set");
 
-    const expectedEmptyBlock =
-      "BEGIN_PREDICTED_WRITE_SET\n(empty — no contract-granted writes)\nEND_PREDICTED_WRITE_SET";
-
     const calls = fs.readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
-    assert.equal(calls.length, 3, "discovery-only empty: exactly 3 spawns");
+    assert.equal(calls.length, 3, "unscoped discovery-only: exactly 3 spawns");
 
-    // All three spawns receive the empty block.
     for (const call of calls) {
-      assert.ok(call.predictedWriteSetBlock, `${call.agentName} must have predictedWriteSetBlock`);
-      assert.equal(call.predictedWriteSetBlock, expectedEmptyBlock,
-        `${call.agentName} predictedWriteSetBlock must be the canonical empty block`);
+      assert.equal(call.predictedWriteSetBlock, null,
+        `${call.agentName} must receive no authority block when caller scope is omitted`);
     }
 
     const coderCalls = calls.filter((call) => call.agentName === "coder");
-    assert.equal(coderCalls.length, 0, "discovery-only empty: no coder");
+    assert.equal(coderCalls.length, 0, "unscoped discovery-only: no coder");
 
     // ── Read-only tool assertions ───────────────────────────────────
     for (const call of calls) {
       assert.equal(call.tools, "read,grep,find,ls",
-        `discovery-only empty spawn for ${call.agentName} must have read-only tools`);
+        `unscoped discovery-only spawn for ${call.agentName} must have read-only tools`);
       assert.equal(call.noTools, false,
-        `discovery-only empty spawn for ${call.agentName} must NOT have --no-tools`);
+        `unscoped discovery-only spawn for ${call.agentName} must NOT have --no-tools`);
     }
   } finally {
     delete process.env.PI_CLI_PATH;
@@ -394,6 +397,7 @@ async function testDiscoveryOnlyMutationDetected() {
       {
         task: "Fixture task: apply a minimal scheduler race fix and verify it.",
         paradigm: "dual-plan-synthesis-execute-verify",
+        supervision: "off",
         preflight: false,
         cwd: tempDir,
         maxSubagents: 8,
@@ -437,6 +441,44 @@ async function testDiscoveryOnlyMutationDetected() {
   }
 }
 
+async function testForbiddenRoutesRejectBeforeSpawn() {
+  for (const override of [
+    { executorProvider: "openrouter", executorModel: "some-model" },
+    { plannerProvider: "vendor", plannerModel: "deepseek-v4-pro" },
+  ]) {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-dual-plan-forbidden-route-"));
+    const logPath = path.join(tempDir, "fake-pi-log.jsonl");
+    process.env.PI_CLI_PATH = path.join(__dirname, "fake-pi.cjs");
+    process.env.FAKE_PI_LOG = logPath;
+    try {
+      const result = await loadOrchestrateTool().execute(
+        "test-dual-plan-forbidden-route",
+        {
+          task: "Fixture task: reject an unauthorized native-shape route.",
+          paradigm: "dual-plan-synthesis-execute-verify",
+        supervision: "off",
+          preflight: false,
+          cwd: tempDir,
+          maxSubagents: 8,
+          maxRetries: 0,
+          ...override,
+        },
+        undefined,
+        () => {},
+        { cwd: tempDir },
+      );
+      assert.equal(result.details?.status, "fail");
+      assert.match(result.details?.abortReason ?? "", /FORBIDDEN_DUAL_PLAN_ROUTE/);
+      assert.equal(fs.existsSync(logPath) ? fs.readFileSync(logPath, "utf8").trim() : "", "",
+        "forbidden dual-plan routes must reject before preflight/work spawn");
+    } finally {
+      delete process.env.PI_CLI_PATH;
+      delete process.env.FAKE_PI_LOG;
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  }
+}
+
 async function testPreflightExecutorFallbackAndSeatCoverage() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-dual-plan-preflight-fallback-"));
   const logPath = path.join(tempDir, "fake-pi-log.jsonl");
@@ -451,6 +493,7 @@ async function testPreflightExecutorFallbackAndSeatCoverage() {
       {
         task: "Fixture task: preflight every dual-plan role and use the executor fallback.",
         paradigm: "dual-plan-synthesis-execute-verify",
+        supervision: "off",
         preflight: true,
         cwd: tempDir,
         maxSubagents: 8,
@@ -459,8 +502,8 @@ async function testPreflightExecutorFallbackAndSeatCoverage() {
         plannerModel: "gpt-5.6-sol",
         executorProvider: "badprov",
         executorModel: "bad-primary",
-        executorFallbackProvider: "openai-codex",
-        executorFallbackModel: "gpt-5.5",
+        // No explicit fallback: the native shape contract supplies the safe
+        // openai-codex/gpt-5.5 executor fallback before shared preflight.
         verifierProvider: "openai-codex",
         verifierModel: "gpt-5.5",
       },
@@ -488,6 +531,48 @@ async function testPreflightExecutorFallbackAndSeatCoverage() {
   }
 }
 
+async function testSafeDefaultsArePreflighted() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-dual-plan-default-preflight-"));
+  const logPath = path.join(tempDir, "fake-pi-log.jsonl");
+  process.env.PI_CLI_PATH = path.join(__dirname, "fake-pi.cjs");
+  process.env.FAKE_PI_LOG = logPath;
+  process.env.ORCHESTRATE_PREFLIGHT_TIMEOUT_MS = "300";
+  process.env.ORCHESTRATE_PREFLIGHT_TOTAL_TIMEOUT_MS = "1500";
+  try {
+    const result = await loadOrchestrateTool().execute(
+      "test-dual-plan-default-preflight",
+      {
+        task: "Fixture task: prove native safe defaults are the preflighted work routes.",
+        paradigm: "dual-plan-synthesis-execute-verify",
+        supervision: "off",
+        preflight: true,
+        cwd: tempDir,
+        maxSubagents: 8,
+        maxRetries: 0,
+      },
+      undefined,
+      () => {},
+      { cwd: tempDir },
+    );
+    assert.equal(result.details?.shapeDetails?.status ?? result.details?.status, "pass");
+    const calls = fs.readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
+    const preflightRoutes = calls
+      .filter((call) => call.agentName === "preflight")
+      .map((call) => `${call.provider}/${call.model}`)
+      .sort();
+    assert.deepEqual(preflightRoutes, [
+      "openai-codex/gpt-5.5",
+      "openai-codex/gpt-5.6-sol",
+    ], "shared preflight must ping the exact deduplicated native routes, not profile/Pi defaults");
+    const workCalls = calls.filter((call) => call.agentName !== "preflight");
+    assert.equal(workCalls.length, 5);
+    assertNoForbiddenRoutes(calls, "default preflight run");
+  } finally {
+    for (const key of ["PI_CLI_PATH", "FAKE_PI_LOG", "ORCHESTRATE_PREFLIGHT_TIMEOUT_MS", "ORCHESTRATE_PREFLIGHT_TOTAL_TIMEOUT_MS"]) delete process.env[key];
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
 async function testResumePreservesObservedSafeRoutes() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-dual-plan-resume-routes-"));
   const logPath = path.join(tempDir, "fake-pi-log.jsonl");
@@ -498,6 +583,7 @@ async function testResumePreservesObservedSafeRoutes() {
     maxSubagents: 8,
     maxRetries: 0,
     preflight: false,
+    supervision: "off",
     plannerProvider: "openai-codex",
     plannerModel: "gpt-5.6-sol",
     executorProvider: "openai-codex",
@@ -566,11 +652,13 @@ async function run() {
   await testRunUsesRoleDefaultsAndPasses();
   await testExplicitRoleRouteOverrides();
   await testDiscoveryOnly();
-  await testDiscoveryOnlyEmpty();
+  await testDiscoveryOnlyWithoutCallerScope();
   await testDiscoveryOnlyMutationDetected();
+  await testForbiddenRoutesRejectBeforeSpawn();
   await testPreflightExecutorFallbackAndSeatCoverage();
+  await testSafeDefaultsArePreflighted();
   await testResumePreservesObservedSafeRoutes();
-  console.log("PASS dual-plan-synthesis-execute-verify: registry, static rules, role defaults, role overrides, evidence, discovery-only, mutation-detected, resume routes");
+  console.log("PASS dual-plan-synthesis-execute-verify: registry, static rules, preflighted safe defaults/fallback, forbidden-route rejection, role overrides, evidence, discovery-only, mutation-detected, resume routes");
 }
 
 run().catch((error) => {

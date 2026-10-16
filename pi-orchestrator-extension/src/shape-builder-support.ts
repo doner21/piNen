@@ -476,6 +476,7 @@ import {
   type SubagentResult,
 } from "../substrate";
 import { formatRouteLabel, resolveShapePhaseRoute } from "../routes";
+import { GENERIC_EXECUTOR_SHAPE_EXECUTION } from "../supervision";
 
 import type {
   OrchestrationShape,
@@ -489,6 +490,7 @@ const MAX_FINAL_CHARS = 20_000;
 export const ${exportName}: OrchestrationShape = {
   name: ${JSON.stringify(name)},
   description: ${JSON.stringify(spec.purpose)},
+  execution: GENERIC_EXECUTOR_SHAPE_EXECUTION,
   run: run${toPascal(name)},
 };
 
@@ -657,6 +659,8 @@ function loadShapeModule() {
 function testCommittedShapeStaticRules() {
   const source = fs.readFileSync(path.join(PROJECT_ROOT, "src", "shapes", "${kebab}.ts"), "utf8");
   assert.match(source, /name:\\s*"${kebab}"/);
+  assert.match(source, /execution:\\s*GENERIC_EXECUTOR_SHAPE_EXECUTION/,
+    "generated executor-bearing shape must advertise host-owned supervision");
   assert.match(source, /SpawnGuard/);
   assert.match(source, /spawnSubagent/);
   assert.doesNotMatch(source, /from\\s+["']\\.\\//, "shape must not import sibling shapes");
@@ -725,6 +729,10 @@ export function staticCheckGeneratedShape(source: string): string[] {
   }
   if (!/new SpawnGuard\(/.test(source)) errors.push("Generated shape must use SpawnGuard.");
   if (!/spawnSubagent\(/.test(source)) errors.push("Generated shape must use spawnSubagent.");
+  if (!/import\s*\{\s*GENERIC_EXECUTOR_SHAPE_EXECUTION\s*\}\s*from\s*["']\.\.\/supervision["']/.test(source) ||
+      !/execution:\s*GENERIC_EXECUTOR_SHAPE_EXECUTION/.test(source)) {
+    errors.push("Generated executor-bearing shape must declare the shared generic supervision capability.");
+  }
   if (!/SHAPE_CANARY:/.test(source)) errors.push("Generated shape must include a deterministic SHAPE_CANARY branch.");
   if (!/canary:\s*true/.test(source)) errors.push("Generated shape canary response must include canary: true.");
   if (/from\s+["']\.\//.test(source)) errors.push("Generated shape must not import sibling shapes.");
@@ -1194,7 +1202,7 @@ export function parseVerifierJson(
 export function buildContinuationTemplate(targetName: string): string {
   return [
     "RESUME AFTER PI RELOAD:",
-    "1. Read reload diagnostics at ~/.pi/agent/agent-reload-diagnostics.json.",
+    "1. Read reload diagnostics at C:/Users/you/.pi/agent/agent-reload-diagnostics.json.",
     "2. Continue only if diagnostics confirm reload success and do not show a rejected command or silent failure.",
     `3. Verify runtime discovery lists "${targetName}" before using it.`,
     `4. If discovery succeeds, run the downstream task with --paradigm ${targetName}; otherwise ask for a manual reload and stop.`,

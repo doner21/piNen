@@ -5,6 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const Module = require("node:module");
 
+require("./fixtures/legacy-offline.cjs")();
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const PI_NODE_MODULES = path.join(
   os.homedir(),
@@ -256,7 +257,7 @@ function testLifecycleHelpers() {
 
 function testShapeRendering() {
   const mod = loadSupportModule();
-
+  
   const spec = {
     schemaVersion: 1,
     action: "build",
@@ -276,6 +277,7 @@ function testShapeRendering() {
 
   const source = mod.renderShapeSource(spec);
   assert.match(source, /export const testRenderShapeShape:\s*OrchestrationShape/);
+  assert.match(source, /execution:\s*GENERIC_EXECUTOR_SHAPE_EXECUTION/);
   assert.match(source, /SHAPE_CANARY:test-render-shape/);
   assert.match(source, /canary:\s*true/);
   assert.match(source, /spawnedCount:\s*0/);
@@ -296,6 +298,15 @@ function testShapeRendering() {
   // Static checks
   const errors = mod.staticCheckGeneratedShape(source);
   assert.deepEqual(errors, [], `Generated source should pass static checks: ${errors.join("; ")}`);
+
+  // Static check must fail closed when a future generated shape omits its capability.
+  const noExecutionCapability = source
+    .replace('import { GENERIC_EXECUTOR_SHAPE_EXECUTION } from "../supervision";\n', "")
+    .replace("  execution: GENERIC_EXECUTOR_SHAPE_EXECUTION,\n", "");
+  assert.ok(
+    mod.staticCheckGeneratedShape(noExecutionCapability).some((e) => /supervision capability/.test(e)),
+    "future generated executor shapes must not silently omit supervision classification",
+  );
 
   // Static check should catch missing canary
   const noCanary = source.replace(/SHAPE_CANARY:test-render-shape/g, "NO_CANARY_HERE");
@@ -638,6 +649,7 @@ async function testTempRootBuildWithFakePi() {
       {
         task: specJson,
         paradigm: "shape-builder",
+        supervision: "off",
         preflight: false,
         cwd: extRoot,
         maxSubagents: 5,
@@ -694,7 +706,7 @@ async function testTempRootBuildWithFakePi() {
     const originalArtifact = fs.readFileSync(artifactPath, "utf8");
     const differingResult = await tool.execute(
       "test-shape-builder-collision",
-      { task: JSON.stringify({ ...JSON.parse(specJson), purpose: "Different content." }), paradigm: "shape-builder", preflight: false, cwd: extRoot },
+      { task: JSON.stringify({ ...JSON.parse(specJson), purpose: "Different content." }), paradigm: "shape-builder", supervision: "off", preflight: false, cwd: extRoot },
       undefined,
       () => {},
       { cwd: extRoot },
@@ -711,7 +723,7 @@ async function testTempRootBuildWithFakePi() {
     };
     const projectResult = await tool.execute(
       "test-shape-builder-project-scope",
-      { task: JSON.stringify(projectSpec), paradigm: "shape-builder", preflight: false, cwd: extRoot, maxSubagents: 5 },
+      { task: JSON.stringify(projectSpec), paradigm: "shape-builder", supervision: "off", preflight: false, cwd: extRoot, maxSubagents: 5 },
       undefined,
       () => {},
       { cwd: extRoot },
@@ -724,7 +736,7 @@ async function testTempRootBuildWithFakePi() {
     // has deterministic precedence.
     const hiddenUserResult = await tool.execute(
       "test-shape-builder-project-precedence",
-      { task: JSON.stringify({ ...projectSpec, scope: "user" }), paradigm: "shape-builder", preflight: false, cwd: extRoot },
+      { task: JSON.stringify({ ...projectSpec, scope: "user" }), paradigm: "shape-builder", supervision: "off", preflight: false, cwd: extRoot },
       undefined,
       () => {},
       { cwd: extRoot },
@@ -748,7 +760,7 @@ async function testTempRootBuildWithFakePi() {
     if (symlinkCreated) {
       const symlinkResult = await tool.execute(
         "test-shape-builder-symlink-collision",
-        { task: JSON.stringify({ ...JSON.parse(specJson), targetName: "symlink-build-test" }), paradigm: "shape-builder", preflight: false, cwd: extRoot },
+        { task: JSON.stringify({ ...JSON.parse(specJson), targetName: "symlink-build-test" }), paradigm: "shape-builder", supervision: "off", preflight: false, cwd: extRoot },
         undefined,
         () => {},
         { cwd: extRoot },
@@ -809,7 +821,7 @@ async function testVerifierFailFixture() {
     fs.writeFileSync(path.join(process.env.PI_ORCHESTRATOR_USER_WORKFLOWS_ROOT, "native-collision-test.workflow.json"), "{}\n");
     const collisionResult = await tool.execute(
       "test-shape-builder-native-collision",
-      { task: JSON.stringify({ ...spec, targetName: "native-collision-test" }), paradigm: "shape-builder", preflight: false, cwd: extRoot, maxSubagents: 5 },
+      { task: JSON.stringify({ ...spec, targetName: "native-collision-test" }), paradigm: "shape-builder", supervision: "off", preflight: false, cwd: extRoot, maxSubagents: 5 },
       undefined,
       () => {},
       { cwd: extRoot },
@@ -821,7 +833,7 @@ async function testVerifierFailFixture() {
     // Explicit native mode retains its historical verifier and reload gate.
     const nativeSuccess = await tool.execute(
       "test-shape-builder-native-success",
-      { task: JSON.stringify(spec), paradigm: "shape-builder", preflight: false, cwd: extRoot, maxSubagents: 5 },
+      { task: JSON.stringify(spec), paradigm: "shape-builder", supervision: "off", preflight: false, cwd: extRoot, maxSubagents: 5 },
       undefined,
       () => {},
       { cwd: extRoot },
@@ -841,6 +853,7 @@ async function testVerifierFailFixture() {
       {
         task: specJson,
         paradigm: "shape-builder",
+        supervision: "off",
         preflight: false,
         cwd: extRoot,
         maxSubagents: 5,

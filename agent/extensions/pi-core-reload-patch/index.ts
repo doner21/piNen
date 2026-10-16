@@ -108,28 +108,18 @@ function sharedBridgeNote(patchType: PatchType): string {
 
 	const lines = [
 		"",
-		"The `pi.executeCommand` core patch is shared between:",
-		"  • `agent_reload_runtime`  — automatic Pi reload (repair via `/pi-core-reload-patch`)",
-		"  • `agent_new_session`     — automatic Pi new-session (repair via `/pi-core-new-session-patch`)",
-		"",
+		"The legacy `pi.executeCommand` compatibility patch is shared by both command sets.",
 		`You invoked the ${invokedCommands}; they run the same underlying ` +
-			"`agent/core-patch/reapply-pi-core-patch.mjs` runner as the other command set.",
+			"`agent/core-patch/reapply-pi-core-patch.mjs` runner.",
 		"",
-		"**Design invariants:** user-invoked only — no silent auto-patching, no startup/background",
-		"patching, no live reload from patcher or slash commands, no `pi.sendUserMessage('/command')`",
-		"as a command bridge (that path does not dispatch commands — see UPSTREAM_REQUEST.md §2).",
+		"Pi 0.84.3+ launches `dist/bundle/cli.js`, so edits limited to `dist/core/*` do not",
+		"alter the active CLI runtime. The automatic reload and new-session tools therefore",
+		"use Pi 0.84.2+'s supported `pi.sendUserMessage(..., { expandPromptTemplates: true })`",
+		"command-dispatch path after a stable-idle poll; they no longer require the private patch.",
+		"",
+		"A successful `apply` automatically reloads extensions so the durable public bridge is active.",
+		"The patcher remains user-invoked, idempotent, backup-first, and safe-failing on source drift.",
 	];
-
-	if (patchType === "new-session") {
-		lines.push(
-			"",
-			"After a successful apply, the running Pi process still has the OLD (unpatched) code.",
-			"To load the patched core, the user must manually run:",
-			"    /reload",
-			"  (or /agent-reload-runtime, or restart Pi).",
-			"Only then can `agent_new_session` work.",
-		);
-	}
 	return lines.join("\n");
 }
 
@@ -137,7 +127,7 @@ function formatOutput(action: PatchAction, result: PatcherResult, patchType: Pat
 	const parts = [result.stdout.trimEnd(), result.stderr.trimEnd()].filter(Boolean);
 	const body = parts.join("\n\n[stderr]\n");
 	const suffix = action === "apply"
-		? "\n\nAfter a successful apply, manually run `/reload` or restart Pi to load the patched core."
+		? "\n\nAfter a successful apply, this slash command reloads extensions automatically."
 		: "";
 
 	return [
@@ -184,6 +174,17 @@ async function runAndDisplay(
 			? "info"
 			: "warning";
 		ctx.ui.notify(exitSummary(action, result, patchType), level);
+
+		if (action === "apply" && result.code === 0) {
+			ctx.ui.notify(
+				"Reloading extensions to activate the public command-dispatch bridge...",
+				"info",
+			);
+			// Terminal action: after this resolves, pi/ctx from this extension instance
+			// are stale. Do not perform any further work in this handler.
+			await ctx.reload();
+			return;
+		}
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		const customType = patchType === "new-session"

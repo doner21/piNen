@@ -51,7 +51,7 @@ async function executeWithFakePi(task, options = {}) {
     const tool = loadOrchestrateTool();
     const result = await tool.execute(
       options.toolCallId || "test-natural-language-controls",
-      { task, cwd: PROJECT_ROOT, ...(options.params || {}) },
+      { task, cwd: PROJECT_ROOT, supervision: "off", ...(options.params || {}) },
       undefined,
       () => {},
       { cwd: PROJECT_ROOT },

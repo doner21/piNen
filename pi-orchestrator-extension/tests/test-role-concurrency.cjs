@@ -50,6 +50,7 @@ async function runWithFakePi() {
       {
         task: "Tiny role-concurrency demo: use two planners, four executors, and three verifiers on independent analysis-only items. Test should run on DeepSeek V4 Flash.",
         cwd: PROJECT_ROOT,
+        supervision: "off",
         maxRetries: 0,
         maxSubagents: 20,
         plannerProvider: "deepseek",

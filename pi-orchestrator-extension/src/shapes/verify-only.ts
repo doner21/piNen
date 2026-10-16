@@ -10,8 +10,13 @@
  *   legitimately text-only, so no text-shape or effect gates apply.
  * - Supports multi-model vote ("3 verifiers" in the task text) reusing the
  *   majority-vote machinery pattern from multi-verify-vote.
- * - Verifiers are granted read/bash/grep tools (cloned profile) so they can
- *   independently gather evidence and cite file:line sources.
+ * - Verifiers receive the inspection allowlist PLUS bash so they can run tests
+ *   and commands themselves. Read-only is enforced by EFFECTS, not by tool
+ *   removal: the shape snapshots the cwd before each verifier and fails the
+ *   run with VERIFY_ONLY_MUTATION if any file was created, modified, or
+ *   deleted (guard-decisions, 2026-09-03). The shape keeps its read-only
+ *   execution classification because a verified zero-effect run is the
+ *   contract, and any effect is a FAIL rather than a silent mutation.
  *
  * ONE-LINE RULE: Shapes are siblings — they stand on the substrate, never
  * build on each other.
@@ -24,9 +29,19 @@ import {
   formatRoutedModel,
   truncateWithNotice,
   throwIfAborted,
+  READ_ONLY_EVIDENCE_TOOLS,
   type AgentProfile,
   type SubagentResult,
 } from "../substrate";
+
+import { READ_ONLY_SHAPE_EXECUTION } from "../supervision";
+import { createRoleRecoveryRequest, runRoleWithRecovery, observeRoleReadOnlyLaunch, type RoleRecoveryEvidence } from "../role-recovery";
+import { HostPublicationObservation, withHostPublicationObservation } from "../host-publications";
+import {
+  captureContentSignatureSnapshot,
+  diffContentSignatureSnapshots,
+  type ContentSignatureChange,
+} from "../write-set";
 
 import type {
   OrchestrationShape,
@@ -45,7 +60,10 @@ interface CheckVerdict {
   citations: string[];
 }
 
+import { mergeCommandTimes, formatCommandTimes, summarizeCommandTimes, type CommandTimes } from "../command-times";
+
 interface VerifierRun {
+  commandTimes?: CommandTimes;
   verifierIndex: number;
   agentName: string;
   provider?: string;
@@ -55,7 +73,14 @@ interface VerifierRun {
   checks: CheckVerdict[];
   raw: string;
   durationMs: number;
+  roleRecovery?: RoleRecoveryEvidence;
+  /** Byte-level cwd effects observed across this verifier's run; any entry forces FAIL. */
+  mutations: ContentSignatureChange[];
 }
+
+/** Tools a verify-only verifier may use: evidence inspection plus a shell for tests/commands. */
+export const VERIFY_ONLY_TOOLS = Object.freeze([...READ_ONLY_EVIDENCE_TOOLS, "bash"] as const);
+
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -74,6 +99,7 @@ export const verifyOnlyShape: OrchestrationShape = {
     "verifier(s) only (no planner, no executors); output is per-check verdicts with " +
     "citations. Supports multi-verifier majority vote. Exempt from implementation-task " +
     "heuristics — verification output is legitimately text-only.",
+  execution: READ_ONLY_SHAPE_EXECUTION,
   run: runVerifyOnly,
 };
 
@@ -91,54 +117,77 @@ async function runVerifyOnly(
     `Verify-only: spawning ${verifierCount} verifier(s); no planner or executor subagents will be spawned.`,
   );
 
-  // Clone the verifier profile and grant evidence-gathering tools so the
-  // verifier can independently read files / run commands for citations.
+  // Clone the verifier profile with the evidence tools plus bash. Read-only
+  // is proven by the before/after content snapshot around each spawn, not by
+  // stripping the shell.
   const verifierAgents = buildVerifierAgents(agents, params.verifierAgent);
 
   const override = toModelOverride(params.verifierModel, params.verifierProvider);
   const items = Array.from({ length: verifierCount }, (_, i) => i + 1);
 
   throwIfAborted(signal);
-  const runs = await runBoundedPool(
+  // Explicit batch ownership connects overlapping verifiers without admitting
+  // publications from unrelated runs sharing the same workspace.
+  const batchPublications = new HostPublicationObservation(params.cwd);
+  const runs = await withHostPublicationObservation(batchPublications, () => runBoundedPool(
     items,
     Math.min(MAX_VERIFIER_CONCURRENCY, verifierCount),
     signal,
     async (index, _i, workerSignal) => {
-      const spawned = spawnGuard.reserve();
-      emit(`Spawning subagent ${params.verifierAgent} (${spawned}/${spawnGuard.cap}) in ${params.cwd}`);
-      const startedAt = Date.now();
-      const result: SubagentResult = await spawnSubagent(
-        params.verifierAgent,
-        buildVerifyOnlyPrompt(index, verifierCount, params),
-        {
-          agents: verifierAgents,
-          cwd: params.cwd,
-          allowLocalModel: params.allowLocalModel,
-          signal: workerSignal,
-          inheritedModel,
-          onProgress: emit,
-          modelOverride: override,
-        },
-      );
-      const parsed = parseVerifyOnlyResult(result.text);
-      emit(
-        `Verifier ${index}/${verifierCount}: ${parsed.overall.toUpperCase()} ` +
-          `(${parsed.checks.length} check verdict(s), ${parsed.reasons.join("; ") || "no reasons"}).`,
-      );
-      const run: VerifierRun = {
-        verifierIndex: index,
-        agentName: result.agentName,
-        overall: parsed.overall,
-        reasons: parsed.reasons,
-        checks: parsed.checks,
-        raw: result.text,
-        durationMs: Date.now() - startedAt,
-      };
-      if (result.provider) run.provider = result.provider;
-      if (result.model) run.model = result.model;
-      return run;
+      const hostPublications = new HostPublicationObservation(params.cwd);
+      return withHostPublicationObservation(hostPublications, async () => {
+        const startedAt = Date.now();
+        const before = captureContentSignatureSnapshot(params.cwd);
+        const request = createRoleRecoveryRequest({ role: "verifier", prompt: buildVerifyOnlyPrompt(index, verifierCount, params), verifyOnly: true });
+        // The full recovery interval also remains read-only. Individual launch
+        // gates retain failed/restored mutations; this gate protects the chain.
+        const result: SubagentResult = await observeRoleReadOnlyLaunch(params.cwd, params.externalEvidenceRoots ?? [], () => runRoleWithRecovery(request, {
+          // No planner callback exists in a verifier-only shape. Scope chaining
+          // cannot silently introduce another role or writer.
+          launch: (prompt, stage) => {
+            const spawned = spawnGuard.reserve();
+            emit(`Spawning subagent ${params.verifierAgent} (${spawned}/${spawnGuard.cap}) in ${params.cwd}`);
+            return observeRoleReadOnlyLaunch(params.cwd, params.externalEvidenceRoots ?? [], () => spawnSubagent(params.verifierAgent, prompt, {
+              agents: verifierAgents, cwd: params.cwd, allowLocalModel: params.allowLocalModel,
+              signal: workerSignal, inheritedModel, onProgress: emit, modelOverride: override,
+              verifier: true, recoverableRole: "verifier", workerExecutionConstraints: params.workerExecutionConstraints,
+              commandTimingContext: { role: "verifier", stage },
+            }), true);
+          },
+          canLaunch: () => spawnGuard.wouldFit(1), signal: workerSignal, onProgress: emit,
+        }), true);
+        const after = captureContentSignatureSnapshot(params.cwd);
+        const admitted = hostPublications.admittedPaths(before, after);
+        const mutations = diffContentSignatureSnapshots(before, after).filter(change => !admitted.has(change.path));
+        const parsed = parseVerifyOnlyResult(result.text);
+        if (mutations.length) {
+          const listed = mutations.slice(0, 20).map((change) => `${change.kind}:${change.path}`).join(", ");
+          parsed.overall = "fail";
+          parsed.reasons.unshift(`VERIFY_ONLY_MUTATION: ${listed}${mutations.length > 20 ? ` (+${mutations.length - 20} more)` : ""}`);
+          emit(`Verifier ${index}/${verifierCount} mutated the workspace during a verify-only run: ${listed}. Forcing FAIL.`);
+        }
+        emit(
+          `Verifier ${index}/${verifierCount}: ${parsed.overall.toUpperCase()} ` +
+            `(${parsed.checks.length} check verdict(s), ${parsed.reasons.join("; ") || "no reasons"}).`,
+        );
+        const run: VerifierRun = {
+          verifierIndex: index,
+          agentName: result.agentName,
+          overall: parsed.overall,
+          reasons: parsed.reasons,
+          checks: parsed.checks,
+          raw: result.text,
+          durationMs: Date.now() - startedAt,
+          ...(result.roleRecovery ? { roleRecovery: result.roleRecovery } : {}),
+          commandTimes: result.commandTimes,
+          mutations,
+        };
+        if (result.provider) run.provider = result.provider;
+        if (result.model) run.model = result.model;
+        return run;
+      });
     },
-  );
+  ));
 
   const passes = runs.filter((r) => r.overall === "pass").length;
   const fails = runs.length - passes;
@@ -146,8 +195,8 @@ async function runVerifyOnly(
   emit(`Verify-only majority: ${passes} PASS, ${fails} FAIL → ${status.toUpperCase()}.`);
 
   const aggregated = aggregateChecks(runs);
-  const markdown = buildFinalResult(status, params, spawnGuard, runs, aggregated, passes, fails);
-  const details = buildDetails(status, params, spawnGuard, runs, aggregated, passes, fails);
+  const markdown = buildFinalResult(status, params, spawnGuard, runs, aggregated, passes, fails) + "\n\n" + formatCommandTimes(mergeCommandTimes(...runs.map(run => run.commandTimes)));
+  const details = { ...buildDetails(status, params, spawnGuard, runs, aggregated, passes, fails), commandTimes: mergeCommandTimes(...runs.map(run => run.commandTimes)), commandTimingSummary: summarizeCommandTimes(mergeCommandTimes(...runs.map(run => run.commandTimes))) };
   return { markdown, details };
 }
 
@@ -168,17 +217,17 @@ EVIDENCE CHECKLIST (verbatim from the caller — treat each enumerable item as a
 ${params.task}
 
 Instructions:
-- Gather evidence yourself using read/bash/grep tools when paths or commands are given.
-- For EVERY check, cite concrete evidence (file:line references, command output snippets).
-- Do NOT modify any files. Do NOT run mutating commands.
+- Gather evidence yourself with read, grep, find, ls, and bash. You MAY run tests, typechecks, and read-only commands (for example npm test, git diff, git status) and must cite their real output.
+- For EVERY check, cite concrete evidence (for example, file:line references, command output, or directory/search findings).
+- You must NOT create, modify, or delete any file in the workspace. The host snapshots the workspace before and after your run; any file mutation fails this verification regardless of your verdict. Build/test output directories that the host excludes (dist, out, build, coverage, node_modules) are tolerated; product and test sources are not.
 
 Return JSON exactly and only in this shape:
-{"overall":"pass"|"fail","reasons":["..."],"checks":[{"id":"check-1","description":"...","status":"pass"|"fail","citations":["path/to/file:42","command output: ..."]}]}
+{"overall":"pass"|"fail","reasons":["..."],"checks":[{"id":"check-1","description":"...","status":"pass"|"fail","citations":["path/to/file:42","grep finding: ..."]}]}
 
 Use overall "pass" only if every check passes. Each check verdict MUST include at least one citation.`;
 }
 
-// ── Verifier agent profile (with evidence-gathering tools) ────────────────
+// ── Verifier agent profile (evidence tools + shell; read-only by effects) ──
 
 function buildVerifierAgents(
   agents: Map<string, AgentProfile>,
@@ -186,11 +235,11 @@ function buildVerifierAgents(
 ): Map<string, AgentProfile> {
   const cloned = new Map(agents);
   const profile = agents.get(verifierAgent) ?? { name: verifierAgent };
-  const tools = new Set((profile.tools ?? []).map((t) => String(t).trim()).filter(Boolean));
-  tools.add("read");
-  tools.add("bash");
-  tools.add("grep");
-  cloned.set(verifierAgent, { ...profile, name: verifierAgent, tools: [...tools] });
+  cloned.set(verifierAgent, {
+    ...profile,
+    name: verifierAgent,
+    tools: [...VERIFY_ONLY_TOOLS],
+  });
   return cloned;
 }
 
@@ -300,6 +349,9 @@ function buildFinalResult(
       `### Verifier ${run.verifierIndex}: ${run.overall.toUpperCase()} (${run.agentName}${run.provider || run.model ? `, ${formatRoutedModel(run.provider, run.model)}` : ""}, ${run.durationMs}ms)`,
       run.reasons.length ? run.reasons.map((r) => `- ${r}`).join("\n") : "- No reasons provided.",
     );
+    if (run.mutations.length) {
+      lines.push(`- workspace mutations (${run.mutations.length}): ${run.mutations.slice(0, 20).map((change) => `${change.kind}:${change.path}`).join(", ")}`);
+    }
   }
 
   return truncateWithNotice(lines.join("\n"), MAX_FINAL_CHARS, "final verify-only report");
@@ -327,6 +379,7 @@ function buildDetails(
     verifierRuns: runs.map((run) => ({
       ...run,
       raw: truncateWithNotice(run.raw, MAX_DETAIL_CHARS, "verifier raw output"),
+      ...(run.roleRecovery ? { roleRecovery: run.roleRecovery } : {}),
       reasons: run.reasons.map((r) => truncateWithNotice(r, MAX_DETAIL_CHARS, "verifier reason")),
     })),
   };

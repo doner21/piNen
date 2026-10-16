@@ -19,6 +19,8 @@ import {
   type AgentProfile,
 } from "../substrate";
 
+import { GENERIC_MUTATING_SHAPE_EXECUTION } from "../supervision";
+
 import type {
   OrchestrationShape,
   OrchestrationShapeContext,
@@ -82,6 +84,7 @@ export const shapeBuilderShape: OrchestrationShape = {
     "workflows that are usable in the current session without reload; explicit " +
     "artifactKind=native-shape builds retain code-generation and reload gates. " +
     "Must be selected explicitly via --paradigm shape-builder.",
+  execution: GENERIC_MUTATING_SHAPE_EXECUTION,
   run: runShapeBuilder,
 };
 
@@ -234,9 +237,9 @@ async function runShapeBuilder(
 
   // ── Step 8: Run local deterministic checks ──────────────────────────────
   emit("Shape-builder: running local deterministic checks...");
-
+  
   const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
-
+  
   // Run generated test
   const testCmd = `node tests/test-${targetName}.cjs`;
   let testResult;
@@ -250,9 +253,9 @@ async function runShapeBuilder(
   } catch (err) {
     testResult = { status: 1, stdout: "", stderr: String(err) };
   }
-
+  
   const testPassed = testResult.status === 0;
-
+  
   // Run npm test
   let npmResult;
   try {
@@ -268,7 +271,7 @@ async function runShapeBuilder(
   } catch (err) {
     npmResult = { status: 1, stdout: "", stderr: String(err) };
   }
-
+  
   const npmPassed = npmResult.status === 0;
 
   // ── Step 9: Transition to implementation_reported ────────────────────────
@@ -284,12 +287,12 @@ async function runShapeBuilder(
   };
 
   if (!testPassed || !npmPassed) {
-    const failLifecycle = recordLifecycleFailure(lifecycle, "implementation_report",
-      `Local checks failed: generatedTest=${testPassed}, npmTest=${npmPassed}`,
+    const failLifecycle = recordLifecycleFailure(lifecycle, "implementation_report", 
+      `Local checks failed: generatedTest=${testPassed}, npmTest=${npmPassed}`, 
       implReport);
     await writeLifecycleState(failLifecycle);
-    return failDetails("implementation_reported",
-      `Local checks failed: generatedTest=${testPassed}, npmTest=${npmPassed}`,
+    return failDetails("implementation_reported", 
+      `Local checks failed: generatedTest=${testPassed}, npmTest=${npmPassed}`, 
       spawnGuard, targetName, statePath, implReport);
   }
 
@@ -299,7 +302,7 @@ async function runShapeBuilder(
   if (!reportedResult.success) {
     return failResult("proposed", `Lifecycle transition failed: ${reportedResult.error}`, spawnGuard);
   }
-
+  
   const reportedState = {
     ...reportedResult.state,
     implementationReport: implReport,
@@ -383,7 +386,7 @@ async function runShapeBuilder(
       `Lifecycle transition to implemented_verified failed: ${verifiedResult.error}`,
       spawnGuard);
   }
-
+  
   const verifiedState = {
     ...verifiedResult.state,
     verification,
@@ -511,7 +514,8 @@ async function runDeclarativeShapeBuilder(
     }
 
     const canary = runDynamicWorkflowCanary(discovered);
-    if (canary.details.status !== "pass" || canary.details.canary !== true || canary.details.spawnedCount !== 0) {
+    const canaryDetails = canary.details as Record<string, unknown>;
+    if (canaryDetails.status !== "pass" || canaryDetails.canary !== true || canaryDetails.spawnedCount !== 0) {
       throw new Error("Deterministic zero-spawn canary did not return PASS.");
     }
 
@@ -569,7 +573,7 @@ async function runDeclarativeShapeBuilder(
         sourcePath: discovered.provenance.sourcePath,
         scope: discovered.provenance.scope,
       },
-      canary: canary.details,
+      canary: canaryDetails,
     };
     await writeLifecycleState(lifecycle);
 

@@ -19,6 +19,8 @@ import {
 import { RunStateStore, collectSurvivorResult } from "../run-state";
 import { canonicalShapeRole, formatRouteLabel, resolveShapePhaseRoute } from "../routes";
 
+import { GENERIC_EXECUTOR_SHAPE_EXECUTION } from "../supervision";
+
 import type {
   OrchestrationShape,
   OrchestrationShapeContext,
@@ -60,6 +62,7 @@ const MAX_FINAL_CHARS = 20_000;
 export const preregisteredConcurrencySpikeShape: OrchestrationShape = {
   name: "preregistered-concurrency-spike",
   description: "Reusable falsifier-first concurrency/real-time spike loop. Validates a concurrency or real-time spike strictly against an EXTERNALLY pre-registered, sha256-content-hash-frozen gate authored before any results exist. The shape refuses to PASS if the pre-registration artifact was tampered with after freeze, if the pass/fail thresholds were tuned post-hoc, or if measured raw evidence misses the pre-registered thresholds. Encodes pre-registration discipline as first-class phases rather than trusting any single agent narrative.",
+  execution: GENERIC_EXECUTOR_SHAPE_EXECUTION,
   run: runPreregisteredConcurrencySpike,
 };
 

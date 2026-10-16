@@ -1,5 +1,42 @@
 # telegram-pi runtime directory
 
+## Topics mode upgrade (2026-10-01)
+
+With `TELEGRAM_PI_MODE=topics` or an approved non-secret `deployment.json` beside this file, `daemon.mjs` delegates to `forum-router.mjs`, the single bot owner. It does not spawn, time-limit or kill any Pi process. Sessions use authenticated local IPC, never poll, and keep their own forum topic across parent-session rotation. The token is always environment-only. A deployment pins its private group, allowlist, expected bot username and absolute runtime directory; inherited legacy group/allowlist variables cannot override approved IDs. Without deployment, isolated environment-only setup still works. State is separate (`routes.json`, `router-endpoint.json`, `router-control.json`, `session-settings.json`) in the selected runtime directory; capability files must remain local and private.
+
+Deployment mode is selected by both future Pi windows and the existing daemon entry point without a Task Scheduler or global environment change. Invalid profiles fail closed, never silently start legacy polling. Automatic session logon remains opt-in (`/telegram enable`); otherwise use `/telegram logon [label]`. Already-loaded owner windows are not hot-upgraded. Normal deployed startup refuses a living legacy ownership claim. The approved initial migration observes the old loop's actual drained return through a temporary localhost diagnostic connection, resumes it and closes that listener, then pins a fresh router claim to keep cached legacy pollers quiet. It does not close/restart Pi or modify scheduler behaviour.
+
+Use `/telegram logon [label]` / `logoff`. `enable` / `disable` controls opt-in future automatic logon. General `/sessions` and topic `/where` are router commands. Stop the router with `/telegram daemon stop`: authenticated local operator IPC drains work and confirms completion before permitting replacement. The operator capability differs from the session capability; normal session RPC cannot stop the router. No process kills or session deadlines are used. Do not infer shutdown from Windows console closure. Boot-task changes are deferred until owner approval. Do not run the legacy poller at the same time for this bot.
+
+See `C:/Users/you/telegramupgrade/README.md` for setup, phone testing and installation status. **Installing source does not activate topics mode or update already-running windows. No real cutover or running-session reload/restart without separate owner approval while P7 is paused.**
+
+## Document attachments
+
+The bridge supports `send_document` and `/telegram send-document "<file>" [--caption "..."]` in topics and legacy modes. Non-empty regular local files up to 10MB are supported; network shares, symlinks and obvious credentials are refused. Plaintext captions are limited to 1024 characters. Credential scanning is best-effort; do not upload secrets or disguised credential exports.
+
+Successful sends return `message_id`, basename and byte size. Do not automatically retry unconfirmed uploads. Topics mode uses the authenticated router and permits only the session's own live binding. It checks document capability before reading the file, so installing source requires an orderly shared-router restart and a session extension reload. Older sessions keep working for text/photos and need their own authorized reload to gain document tools.
+
+Offline regressions from this staged candidate: `node --test tests/documents.test.cjs tests/reload.test.cjs tests/inbound.test.cjs`. Tests use read-only staged dependencies and newly owned canonical external Temp directories, not candidate scratch, live credentials or Telegram polling.
+
+## Receiving pictures and documents
+
+The existing bot owner downloads attachments; no new poller is introduced. Topics mode requires an allowlisted non-bot sender in the pinned private group, a live bound topic, queue space, and an adapter advertising `receive_attachments`. Old adapters refuse attachments before downloading; old routers remain text-compatible but do not receive attachments. Both router and adapter must load this upgrade through a separately owner-approved transition; **nothing here activates or reloads live installations**. Legacy attachment reception additionally requires the exact explicitly paired chat/topic and the current session ownership claim.
+
+- One non-empty attachment per update, maximum **10MiB (10,485,760 bytes)** in metadata and the actual streamed response. Missing/invalid size, oversized variants, mismatched size, unsafe filename/MIME, redirects, unsafe `getFile` paths, unsupported content and recognizable credentials are refused. Unauthorized users/groups are silently ignored (no fetch and no routing information); authorized unbound/offline/unsupported sessions receive a static refusal.
+- Pictures: JPEG, PNG, WebP, including images sent as documents. Captions (up to 1024 characters) are quoted untrusted data. A model advertising image input receives genuine Pi `ImageContent` with base64 bytes and MIME, not a pathname/placeholder. Without image capability, reception is refused. Image validation is basic signature/container/dimension validation, not a complete image decoder.
+- Documents: PDF, Word `.doc`/`.docx`, RTF, UTF-8 text/Markdown/CSV/JSON, with matching MIME/extension and basic content checks. Code/executable formats, arbitrary archives, SVG/HTML and macro-enabled Word extensions are unsupported. No archive is expanded, document parser launched, code executed, slash command dispatched, or prompt template expanded by reception.
+- Documents are stored byte-exactly under the receiving runtime's `attachments/<session-and-lease-hash>/attachment-<random>.<extension>`, with generated names, exclusive creation, canonical ancestor/link checks and private mode flags. Only that receiving session receives the inspection path; runtime-root paths are redacted from mirrored replies. Ordinary router/state JSON contains offsets/ticket metadata, never raw attachment bytes. Pi's own image conversation history can persist structured image data.
+- **Storage is not parsing.** No PDF/Word parser is bundled or automatically run. The model can read text using its tools; binary PDFs/Word need an available safe parser and scans/encryption may be unreadable. Word/container validation is not malware certification. Secret scanning is best-effort, including UTF-16; compressed/encrypted/obfuscated secrets may evade it. Do not upload secrets. The bridge is not an OS sandbox: same-account processes retain their existing file permissions.
+- Duplicate updates, offline delivery, disconnects and rotation never replay attachments into a new session. Refused/uncertain updates are consumed; resend explicitly after reconnecting if appropriate. Session-owned files remain for later inspection; there is no automatic deletion timer. Owner cleanup is a separate decision.
+
+### Future owner-only live testcard (not performed by this build)
+
+After separate approval for activation, use only a purpose-started isolated Pi session and a separate test bot/private group. Log on its own topic with an image-capable model. Send a small recognizable photo with a caption and ask what is visible; verify the model describes the actual picture and caption. Send a harmless small PDF/Word/text document and ask for inspection; verify a session-local path, exact size, and honest parser limitations rather than a fabricated summary. Send the same types in an unbound topic/from a nonallowlisted user and verify no delivery. Send an unsupported/over-10MiB attachment and verify a clear refusal. Log off, send an attachment, then log on/rotate: verify no replay. Finally explicitly send text, a photo and a document outbound and confirm prior behavior. Do not use secrets, real owner files, uploaded executable code, or live owner sessions for this test.
+
+## Legacy-mode reference
+
+The remainder describes the unchanged legacy branch only; do not use its fallback-process/force-stop instructions in topics mode.
+
 Runtime support files for the Telegram ↔ Pi active-session integration.
 The extension itself lives at `../extensions/telegram-pi/index.ts`. This
 directory holds the headless fallback daemon, Windows Task Scheduler scripts,
@@ -28,12 +65,13 @@ config examples, and runtime state/logs.
 ## Security model
 
 - **Token source of truth is the `TELEGRAM_BOT_TOKEN` environment variable.**
-  Set it as a user env var so the TUI session, the daemon, and the Task
-  Scheduler task (which runs as your user at logon) all see it:
+  Enter it privately into the approved local launch console, without echoing it:
   ```powershell
-  setx TELEGRAM_BOT_TOKEN "<your token>"
+  $secret = Read-Host 'Bot token (hidden)' -AsSecureString
+  $env:TELEGRAM_BOT_TOKEN = [System.Net.NetworkCredential]::new('', $secret).Password
+  Remove-Variable secret
   ```
-  Then open a new shell / log off and back on so the env var is picked up.
+  Start only newly approved processes from that console. Never put the token in `setx` or other CLI arguments, chat, config or task XML; do not restart an active owner Pi session.
 - The optional `secret.token` file is a fallback only, written 0600 by
   `/telegram setup`, and is never printed, logged, returned by `status`/tool
   results, or passed as a process argument.
@@ -159,6 +197,6 @@ Summary: create a bot via @BotFather, set `TELEGRAM_BOT_TOKEN`, message the
 bot in a private chat, `/telegram setup` or `/telegram pair`, `/telegram
 start`, send a text prompt from Telegram, confirm it appears as a labelled
 user message in the TUI and the assistant reply is mirrored back as
-plaintext. Send a photo to confirm it is ignored (not errored). Close the
+plaintext. After separate owner approval, send a small harmless photo with a caption to verify structured model image delivery (image-capable model required); see the future owner-only testcard above. Close the
 TUI and confirm the daemon fallback keeps Telegram working; reopen the TUI
 and confirm the daemon yields.

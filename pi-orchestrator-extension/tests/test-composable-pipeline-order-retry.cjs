@@ -170,6 +170,8 @@ async function testContradictoryAndMissingExecuteFailClosed() {
   for (const task of [
     "Implement the fixture with plan and verify. No execute.",
     "IMPLEMENT the fixture with plan and verify — NO EXECUTION!",
+    "Fix the fixture with plan and verify. NO—EXECUTION!",
+    "Build the fixture with plan and verify. No: execute.",
     "Repair the fixture with plan and verify; no-executor phase.",
     "Create the fixture with plan and verify: do not execute.",
     "Modify the fixture with plan and verify; execution is prohibited.",

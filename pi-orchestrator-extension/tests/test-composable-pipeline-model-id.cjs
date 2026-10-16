@@ -80,6 +80,7 @@ async function driveTool(extraParams) {
       {
         task: "Only synthesize the fixture understanding.",
         paradigm: "composable-pipeline",
+        supervision: "off",
         cwd: tmp,
         maxSubagents: 8,
         preflight: true,

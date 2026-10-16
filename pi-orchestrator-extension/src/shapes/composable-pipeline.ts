@@ -26,6 +26,8 @@ import {
   type SubagentResult,
 } from "../substrate";
 
+import { GENERIC_EXECUTOR_SHAPE_EXECUTION } from "../supervision";
+
 import type {
   OrchestrationShape,
   OrchestrationShapeContext,
@@ -370,6 +372,7 @@ export const composablePipelineShape: OrchestrationShape = {
   description:
     "Dynamic pipeline composition via natural language. Supports research, hypothesize, critique, " +
     "synthesize, plan, execute, and verify phases with configurable cardinality per phase.",
+  execution: GENERIC_EXECUTOR_SHAPE_EXECUTION,
   run: runComposablePipeline,
 };
 
@@ -696,7 +699,7 @@ async function runVerifyPhase(
     index: i + 1,
     agentName: params.verifierAgent,
     prompt: buildVerifierPrompt(i + 1, count, params.task, plan, executorOutputs,
-      hypotheses, critiques, syntheses, inferredModelRouting, artifactDir),
+      hypotheses, critiques, syntheses, inferredModelRouting, artifactDir, params.cwd),
   }));
 
   let votes: VerifierVote[];
@@ -708,6 +711,7 @@ async function runVerifyPhase(
         const result = await spawnChecked(
           spawnGuard, params, agents, verifier.agentName, verifier.prompt, ws, emit,
           inheritedModel, route, "verifier", "verify", verifier.index, routingEvidence,
+          false, artifactDir,
         );
         const parsed = parseVerifierResult(result.text);
         emit(`Verifier ${verifier.index}/${count}: ${parsed.status.toUpperCase()} (${parsed.reasons.join("; ") || "no reasons"}).`);
@@ -836,7 +840,7 @@ function buildVerifierPrompt(
   verifierIndex: number, totalVerifiers: number,
   originalTask: string, plan: Plan | null, executorOutputs: ExecutorOutput[],
   hypotheses: Hypothesis[], critiques: Critique[], syntheses: Synthesis[],
-  inferred: InferredModelRouting, artifactDir: string,
+  inferred: InferredModelRouting, artifactDir: string, projectRoot: string,
 ): string {
   void inferred;
   const planJson = plan
@@ -852,7 +856,7 @@ function buildVerifierPrompt(
     MAX_PHASE_CHARS * 4,
     "executor outputs",
   );
-  return `You are verifier ${verifierIndex} of ${totalVerifiers} in a composable orchestration.\nJudge whether executor outputs satisfy the original task via majority vote.\n\nOriginal task:\n${originalTask}\n\nPlan:\n${planJson}\n\nExecutor outputs:\n${outputsJson}\n\nVERIFIER ARTIFACT POLICY:\n- Return the verdict inline; never write the verdict/report into the project or arbitrary system-temp paths.\n- If a command absolutely requires temporary output, use only this run-owned directory: ${artifactDir}\n- Do not modify product/project files. The orchestrator removes the run-owned directory in a finally block.\n\nReturn JSON: {"status":"pass"|"fail","reasons":["..."]}\n\nVote independently. Use "pass" only if all outputs clearly satisfy the task. Be strict.`;
+  return `You are verifier ${verifierIndex} of ${totalVerifiers} in a composable orchestration.\nJudge whether executor outputs satisfy the original task via majority vote.\n\nOriginal task:\n${originalTask}\n\nPlan:\n${planJson}\n\nExecutor outputs:\n${outputsJson}\n\nVERIFIER ARTIFACT POLICY:\n- Your process working directory is an isolated run-owned directory, not the project.\n- Project root (READ-ONLY): ${projectRoot}\n- Return the verdict inline; never write the verdict/report into the project or arbitrary system-temp paths.\n- If a command absolutely requires temporary output, use only this run-owned directory: ${artifactDir}\n- Do not modify product/project files. The orchestrator removes the run-owned directory in a finally block.\n\nReturn JSON: {"status":"pass"|"fail","reasons":["..."]}\n\nVote independently. Use "pass" only if all outputs clearly satisfy the task. Be strict.`;
 }
 
 // ── Natural language pipeline parser ───────────────────────────────────────
@@ -1101,17 +1105,18 @@ function hasExplicitSkipExecute(task: string): boolean {
     "",
   );
   const executeNoun = "(?:execute|execution|executors?|implementation|implementing|build(?:ing)?)";
+  const separator = "[\\s,:;_\\/()!—–-]+";
   return new RegExp(
-    `\\b(?:skip|omit)(?:[\\s,:;_\\-]+)(?:the[\\s,:;_\\-]+)?${executeNoun}(?:[\\s_-]+phase)?\\b`,
+    `\\b(?:skip|omit)${separator}(?:the${separator})?${executeNoun}(?:${separator}phase)?\\b`,
     "i",
   ).test(scan) || new RegExp(
-    `\\bwithout(?:[\\s,:;_\\-]+)(?:(?:an?|the)[\\s,:;_\\-]+)?${executeNoun}(?:[\\s_-]+phase)?\\b`,
+    `\\bwithout${separator}(?:(?:an?|the)${separator})?${executeNoun}(?:${separator}phase)?\\b`,
     "i",
   ).test(scan) || new RegExp(
-    `\\bno(?:[\\s,:;_\\-]+)(?:(?:llm|agent|subagent)[\\s,:;_\\-]+)?${executeNoun}(?:[\\s_-]+phase)?\\b`,
+    `\\bno${separator}(?:(?:llm|agent|subagent)${separator})?${executeNoun}(?:${separator}phase)?\\b`,
     "i",
   ).test(scan) || new RegExp(
-    `\\b(?:(?:do|must|should)\\s+not|never)[\\s,:;_\\-]+(?:${executeNoun}|implement|build)\\b`,
+    `\\b(?:(?:do|must|should)\\s+not|never)${separator}(?:${executeNoun}|implement|build)\\b`,
     "i",
   ).test(scan) || /\b(?:execution|execute\s+phase)\s+(?:is\s+)?(?:forbidden|prohibited|disallowed)\b/i.test(scan);
 }
@@ -1313,11 +1318,12 @@ async function spawnChecked(
   phaseIndex: number,
   routingEvidence: RoutingEvidence[],
   phaseMutates = false,
+  spawnCwd = params.cwd,
 ): Promise<SubagentResult> {
   const spawned = spawnGuard.reserve();
-  onProgress?.(`Spawning ${agentName} (${spawned}/${spawnGuard.cap}) in ${params.cwd}`);
+  onProgress?.(`Spawning ${agentName} (${spawned}/${spawnGuard.cap}) in ${spawnCwd}`);
   const result = await spawnSubagent(agentName, task, {
-    agents, cwd: params.cwd, allowLocalModel: params.allowLocalModel,
+    agents, cwd: spawnCwd, allowLocalModel: params.allowLocalModel,
     signal, inheritedModel, onProgress, modelOverride, phaseMutates,
   });
   routingEvidence.push({

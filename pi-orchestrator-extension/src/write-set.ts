@@ -27,7 +27,7 @@ export interface WriteSetEvaluation {
   unobservableTasks: string[];
 }
 
-interface FileSignature {
+export interface FileSignature {
   size: number;
   mtimeMs: number;
   sha256: string;
@@ -50,6 +50,23 @@ export interface WriteSetObservationEvaluation extends WriteSetEvaluation {
   unobservableScopes: string[];
 }
 
+export interface ExternalEvidenceSnapshot {
+  /** Canonical absolute roots whose contents are evidence-only authority. */
+  roots: string[];
+  /** Absolute file signatures. Evidence roots are never mutation grants. */
+  files: Record<string, FileSignature>;
+  /** Roots that could not be exhaustively observed, including symlink contents. */
+  unobservableRoots: string[];
+}
+
+export interface ExternalEvidenceRootValidationInput {
+  cwd: string;
+  worktreeRoot: string;
+  worktreeRealRoot: string;
+  roots: string[];
+  protectedRoots?: string[];
+}
+
 interface CwdObservation {
   statusLines: string[];
   files: Record<string, FileSignature>;
@@ -59,6 +76,25 @@ export function normalizeWriteSetEntry(entry: string): string {
   let normalized = String(entry ?? "").trim().replace(/\\/g, "/");
   while (normalized.startsWith("./")) normalized = normalized.slice(2);
   return normalized.replace(/\/{2,}/g, "/");
+}
+
+const WINDOWS_RESERVED_DEVICE_BASENAME = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
+
+/**
+ * Windows resolves these basenames as devices even when an extension is
+ * present. Ignore any path containing such a segment before touching the
+ * filesystem or treating it as an orchestration effect. Other hosts retain
+ * ordinary files with the same spelling.
+ */
+export function isWindowsReservedDevicePath(
+  entry: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  if (platform !== "win32") return false;
+  return normalizeWriteSetEntry(entry)
+    .split("/")
+    .filter(Boolean)
+    .some((segment) => WINDOWS_RESERVED_DEVICE_BASENAME.test(segment));
 }
 
 /**
@@ -71,7 +107,9 @@ export function parseWriteSetInput(raw: unknown): string[] | undefined {
   const items = Array.isArray(raw)
     ? raw.map((item) => String(item))
     : String(raw).split(/[\n,]/);
-  const normalized = items.map(normalizeWriteSetEntry).filter(Boolean);
+  const normalized = items
+    .map(normalizeWriteSetEntry)
+    .filter((entry) => Boolean(entry) && !isWindowsReservedDevicePath(entry));
   return normalized.length ? [...new Set(normalized)] : undefined;
 }
 
@@ -95,6 +133,94 @@ function normalizeAbsoluteFsPath(entry: string): string {
 function pathInsideOrEqual(childAbs: string, parentAbs: string): boolean {
   const rel = path.relative(toNativePath(parentAbs), toNativePath(childAbs));
   return rel === "" || (!!rel && !rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+function comparableAbsolute(entry: string): string {
+  const normalized = normalizeAbsoluteFsPath(entry);
+  return process.platform === "win32" || /^[a-zA-Z]:\//.test(normalized)
+    ? normalized.toLowerCase()
+    : normalized;
+}
+
+function hasParentTraversal(entry: string): boolean {
+  return normalizeWriteSetEntry(entry).split("/").includes("..");
+}
+
+/**
+ * Validate and canonicalize explicit external evidence roots. These roots are
+ * read/evaluation authority only. They are deliberately separate from the
+ * predicted write set and can never authorize an external mutation.
+ */
+export function canonicalizeExternalEvidenceRoots(input: ExternalEvidenceRootValidationInput): string[] {
+  if (input.roots.length === 0) return [];
+  const cwd = normalizeAbsoluteFsPath(input.cwd);
+  const worktreeRoot = normalizeAbsoluteFsPath(input.worktreeRoot);
+  const worktreeRealRoot = normalizeAbsoluteFsPath(input.worktreeRealRoot);
+  if (comparableAbsolute(worktreeRoot) !== comparableAbsolute(worktreeRealRoot)) {
+    throw new Error("External evidence roots require a valid canonical worktree binding.");
+  }
+  const protectedRoots = (input.protectedRoots ?? []).map(normalizeAbsoluteFsPath);
+  const canonical: string[] = [];
+  for (const raw of input.roots) {
+    const candidate = normalizeWriteSetEntry(raw);
+    if (!candidate) throw new Error("External evidence root must be nonempty.");
+    if (!isAbsoluteEntry(candidate)) throw new Error(`External evidence root must be absolute: ${candidate}`);
+    if (hasParentTraversal(candidate)) throw new Error(`External evidence root contains forbidden parent traversal: ${candidate}`);
+    if (/[*?\[\]]/.test(candidate)) throw new Error(`External evidence root cannot contain a glob: ${candidate}`);
+    const lexical = normalizeAbsoluteFsPath(candidate.replace(/\/$/, ""));
+    let stat: fs.Stats;
+    let real: string;
+    try {
+      stat = fs.lstatSync(toNativePath(lexical));
+      if (stat.isSymbolicLink()) throw new Error("root is a symlink or junction");
+      if (!stat.isDirectory()) throw new Error("root is not a directory");
+      real = normalizeWriteSetEntry(fs.realpathSync.native(toNativePath(lexical)));
+    } catch (error) {
+      throw new Error(`External evidence root is not a canonical readable directory: ${candidate} (${error instanceof Error ? error.message : String(error)})`);
+    }
+    if (comparableAbsolute(lexical) !== comparableAbsolute(real)) {
+      throw new Error(`External evidence root uses a symlink, junction, or non-canonical alias: ${candidate}`);
+    }
+    if (pathInsideOrEqual(comparableAbsolute(lexical), comparableAbsolute(worktreeRoot)) ||
+        pathInsideOrEqual(comparableAbsolute(cwd), comparableAbsolute(lexical))) {
+      throw new Error(`External evidence root must be outside the frozen worktree: ${candidate}`);
+    }
+    if (protectedRoots.some((root) =>
+      pathInsideOrEqual(comparableAbsolute(lexical), comparableAbsolute(root)) ||
+      pathInsideOrEqual(comparableAbsolute(root), comparableAbsolute(lexical)))) {
+      throw new Error(`External evidence root overlaps a protected path: ${candidate}`);
+    }
+    if (!canonical.some((root) => comparableAbsolute(root) === comparableAbsolute(real))) canonical.push(real);
+  }
+  return canonical.sort((left, right) => left.localeCompare(right));
+}
+
+/** Resolve an existing evidence file and prove its canonical identity remains under a declared root. */
+export function resolveDeclaredExternalEvidencePath(candidate: string, roots: string[]): string {
+  const normalized = normalizeWriteSetEntry(candidate);
+  if (!isAbsoluteEntry(normalized)) throw new Error("External evidence path must be absolute.");
+  if (hasParentTraversal(normalized)) throw new Error("External evidence path contains forbidden parent traversal.");
+  const lexical = normalizeAbsoluteFsPath(normalized);
+  let stat: fs.Stats;
+  let real: string;
+  try {
+    stat = fs.lstatSync(toNativePath(lexical));
+    if (stat.isSymbolicLink()) throw new Error("evidence path is a symlink");
+    real = normalizeWriteSetEntry(fs.realpathSync.native(toNativePath(lexical)));
+  } catch (error) {
+    throw new Error(`External evidence path is not canonically readable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!stat.isFile() && !stat.isDirectory()) throw new Error("External evidence path is not a regular file or directory.");
+  const declared = roots.some((root) => pathInsideOrEqual(comparableAbsolute(real), comparableAbsolute(root)));
+  if (!declared) throw new Error(`External evidence path is not beneath a declared external evidence root: ${candidate}`);
+  // A lexical path beneath a root that resolves through an internal symlink is
+  // an escape even when its final target happens to be beneath another root.
+  if (!roots.some((root) =>
+    pathInsideOrEqual(comparableAbsolute(lexical), comparableAbsolute(root)) &&
+    pathInsideOrEqual(comparableAbsolute(real), comparableAbsolute(root)))) {
+    throw new Error(`External evidence path escapes its declared root through a symlink or junction: ${candidate}`);
+  }
+  return real;
 }
 
 function relativeVariantForCwd(entry: string, cwd: string): string | undefined {
@@ -138,7 +264,7 @@ function entryToMatcher(entry: string): (file: string) => boolean {
 
 export function fileMatchesWriteSet(file: string, allowed: string[], cwd?: string): boolean {
   const normalizedFile = normalizeWriteSetEntry(file).toLowerCase();
-  if (!normalizedFile) return true;
+  if (!normalizedFile || isWindowsReservedDevicePath(normalizedFile)) return true;
   return allowed.some((entry) => allowedEntryVariants(entry, cwd).some((variant) => entryToMatcher(variant)(normalizedFile)));
 }
 
@@ -162,7 +288,7 @@ export function evaluateWriteSet(
     }
     for (const file of output.changedFiles ?? []) {
       const normalized = normalizeWriteSetEntry(file);
-      if (!normalized) continue;
+      if (!normalized || isWindowsReservedDevicePath(normalized)) continue;
       if (!observed.includes(normalized)) observed.push(normalized);
       if (!fileMatchesWriteSet(normalized, allowed, cwd) && !violations.includes(normalized)) {
         violations.push(normalized);
@@ -181,7 +307,7 @@ export function planEntriesOutsideContract(planSet: string[], contractSet: strin
   const contractNormalized = contractSet.map((entry) => normalizeWriteSetEntry(entry).toLowerCase());
   return planSet
     .map(normalizeWriteSetEntry)
-    .filter(Boolean)
+    .filter((entry) => Boolean(entry) && !isWindowsReservedDevicePath(entry))
     .filter((entry) => {
       if (fileMatchesWriteSet(entry, contractSet)) return false;
       // A plan entry that is textually identical to a contract entry (e.g. a
@@ -191,8 +317,8 @@ export function planEntriesOutsideContract(planSet: string[], contractSet: strin
     });
 }
 
-/** Snapshot cwd (always, via git) plus absolute external observation roots. */
-export function captureWriteSetSnapshot(cwd: string, allowed: string[]): WriteSetSnapshot {
+/** Snapshot cwd (always, via git) plus absolute write/evidence observation roots. */
+export function captureWriteSetSnapshot(cwd: string, allowed: string[], evidenceRoots: string[] = []): WriteSetSnapshot {
   const cwdAbs = normalizeAbsoluteFsPath(cwd);
   const cwdObservation = captureCwdObservation(cwdAbs);
   const unobservableScopes: string[] = [];
@@ -201,14 +327,16 @@ export function captureWriteSetSnapshot(cwd: string, allowed: string[]): WriteSe
   }
 
   const externalFiles: Record<string, FileSignature> = {};
-  for (const root of externalObservationRoots(cwdAbs, allowed)) {
+  const canonicalEvidenceRoots = evidenceRoots.map(normalizeAbsoluteFsPath);
+  const evidenceRootKeys = new Set(canonicalEvidenceRoots.map(comparableAbsolute));
+  for (const root of [...new Set([...externalObservationRoots(cwdAbs, allowed), ...canonicalEvidenceRoots])]) {
     try {
       const stat = fs.statSync(toNativePath(root));
       if (!stat.isDirectory()) {
         unobservableScopes.push(root);
         continue;
       }
-      for (const [file, signature] of Object.entries(scanFileSignatures(root))) {
+      for (const [file, signature] of Object.entries(scanFileSignatures(root, evidenceRootKeys.has(comparableAbsolute(root))))) {
         externalFiles[file] = signature;
       }
     } catch {
@@ -229,7 +357,7 @@ export function diffWriteSetSnapshots(before: WriteSetSnapshot, after: WriteSetS
   const changed: string[] = [];
   const add = (file: string) => {
     const normalized = normalizeWriteSetEntry(file);
-    if (normalized && !changed.includes(normalized)) changed.push(normalized);
+    if (normalized && !isWindowsReservedDevicePath(normalized) && !changed.includes(normalized)) changed.push(normalized);
   };
 
   for (const file of diffCwdObservation(before.cwdStatus, before.cwdFiles, after.cwdStatus, after.cwdFiles)) add(file);
@@ -254,11 +382,43 @@ export function evaluateWriteSetObservation(
   return { observed, violations, unobservableTasks: [], unobservableScopes };
 }
 
+/** Capture declared evidence roots independently of write-set authorization. */
+export function captureExternalEvidenceSnapshot(roots: string[]): ExternalEvidenceSnapshot {
+  const files: Record<string, FileSignature> = {};
+  const unobservableRoots: string[] = [];
+  for (const root of roots.map(normalizeAbsoluteFsPath)) {
+    try {
+      const stat = fs.lstatSync(toNativePath(root));
+      if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error("not a real directory");
+      for (const [file, signature] of Object.entries(scanFileSignatures(root, true))) files[file] = signature;
+    } catch {
+      unobservableRoots.push(root);
+    }
+  }
+  return { roots: roots.map(normalizeAbsoluteFsPath), files, unobservableRoots: [...new Set(unobservableRoots)] };
+}
+
+/** Absolute byte changes beneath read-only evidence roots. */
+export function diffExternalEvidenceSnapshots(
+  before: ExternalEvidenceSnapshot,
+  after: ExternalEvidenceSnapshot,
+): ContentSignatureChange[] {
+  const changes: ContentSignatureChange[] = [];
+  for (const file of [...new Set([...Object.keys(before.files), ...Object.keys(after.files)])].sort()) {
+    const previous = before.files[file];
+    const current = after.files[file];
+    if (!previous && current) changes.push({ path: file, kind: "added", after: current });
+    else if (previous && !current) changes.push({ path: file, kind: "deleted", before: previous });
+    else if (!sameSignature(previous, current)) changes.push({ path: file, kind: "modified", before: previous, after: current });
+  }
+  return changes;
+}
+
 function externalObservationRoots(cwdAbs: string, allowed: string[]): string[] {
   const roots: string[] = [];
   for (const raw of allowed) {
     const normalized = normalizeWriteSetEntry(raw);
-    if (!isAbsoluteEntry(normalized)) continue;
+    if (isWindowsReservedDevicePath(normalized) || !isAbsoluteEntry(normalized)) continue;
     const firstGlob = normalized.search(/[\*]/);
     const concrete = firstGlob >= 0 ? normalized.slice(0, firstGlob) : normalized;
     const trailingSlash = concrete.endsWith("/");
@@ -282,7 +442,8 @@ function captureCwdObservation(cwd: string): CwdObservation | undefined {
   // avoids hashing thousands of historical checkpoint files in dirty repos.
   const statusLines = rawStatusLines.filter((line) => {
     const paths = pathsFromGitStatusLine(line);
-    return paths.length === 0 || !paths.every((file) => isManagedRunStatePath(cwd, file));
+    return paths.length === 0 || !paths.every((file) =>
+      isManagedRunStatePath(cwd, file) || isWindowsReservedDevicePath(file));
   });
   const files = captureCwdStatusFileSignatures(cwd, statusLines);
   if (!files) return undefined;
@@ -337,7 +498,7 @@ function diffCwdObservation(
   const changed: string[] = [];
   const add = (file: string) => {
     const normalized = normalizeWriteSetEntry(file);
-    if (normalized && !changed.includes(normalized)) changed.push(normalized);
+    if (normalized && !isWindowsReservedDevicePath(normalized) && !changed.includes(normalized)) changed.push(normalized);
   };
 
   const beforeLineSet = new Set(beforeStatus);
@@ -386,7 +547,7 @@ function captureCwdStatusFileSignatures(cwd: string, statusLines: string[]): Rec
     for (const line of statusLines) {
       for (const rel of pathsFromGitStatusLine(line)) {
         const relNormalized = normalizeWriteSetEntry(rel);
-        if (!relNormalized) continue;
+        if (!relNormalized || isWindowsReservedDevicePath(relNormalized)) continue;
         const absNative = path.resolve(toNativePath(cwd), toNativePath(relNormalized));
         const absNormalized = normalizeWriteSetEntry(absNative);
         if (!pathInsideOrEqual(absNormalized, cwd)) continue;
@@ -400,6 +561,8 @@ function captureCwdStatusFileSignatures(cwd: string, statusLines: string[]): Rec
 }
 
 function captureCwdPathSignatures(cwd: string, nativePath: string, out: Record<string, FileSignature>): void {
+  const rel = normalizeWriteSetEntry(path.relative(toNativePath(cwd), nativePath));
+  if (isWindowsReservedDevicePath(rel)) return;
   if (!fs.existsSync(nativePath)) return;
   const stat = fs.statSync(nativePath);
   if (stat.isDirectory()) {
@@ -409,7 +572,6 @@ function captureCwdPathSignatures(cwd: string, nativePath: string, out: Record<s
     return;
   }
   if (!stat.isFile()) return;
-  const rel = normalizeWriteSetEntry(path.relative(toNativePath(cwd), nativePath));
   if (!rel || rel.startsWith("..")) return;
   out[rel] = fileSignature(nativePath, stat);
 }
@@ -427,22 +589,200 @@ function fileSignature(nativePath: string, stat = fs.statSync(nativePath)): File
   };
 }
 
-function scanFileSignatures(root: string): Record<string, FileSignature> {
+function scanFileSignatures(root: string, rejectSymlinks = false): Record<string, FileSignature> {
   const out: Record<string, FileSignature> = {};
   const rootNative = toNativePath(root);
   const walk = (dir: string) => {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
     for (const entry of entries) {
       const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
+      const file = normalizeWriteSetEntry(path.resolve(full));
+      if (isWindowsReservedDevicePath(file)) continue;
+      const stat = fs.lstatSync(full);
+      if (stat.isSymbolicLink()) {
+        if (rejectSymlinks) throw new Error(`symlink evidence entry is not observable: ${file}`);
+        continue;
+      }
+      if (stat.isDirectory()) {
         walk(full);
         continue;
       }
-      if (!entry.isFile()) continue;
-      const file = normalizeWriteSetEntry(path.resolve(full));
-      out[file] = fileSignature(full);
+      if (!stat.isFile()) continue;
+      out[file] = fileSignature(full, stat);
     }
   };
   walk(rootNative);
   return out;
+}
+
+// ── Bounded content-level effect snapshots ────────────────────────────────
+
+export interface ContentSnapshotLimits {
+  maxFiles: number;
+  maxTotalBytes: number;
+  maxFileBytes: number;
+  excludeDirectories: string[];
+  /** Literal approved paths only; observation remains rooted in the workspace. */
+  scope?: string[];
+}
+
+export interface ContentSignatureSnapshot {
+  root: string;
+  files: Record<string, FileSignature>;
+  limits: ContentSnapshotLimits;
+  fileCount: number;
+  totalBytes: number;
+  truncated: boolean;
+  /** Paths skipped because of a symlink, exclusion, or enforced bound. */
+  omitted: Array<{ path: string; reason: "excluded" | "symlink" | "file-limit" | "file-byte-limit" | "total-byte-limit" }>;
+}
+
+export interface ContentSignatureChange {
+  path: string;
+  kind: "added" | "modified" | "deleted";
+  before?: FileSignature;
+  after?: FileSignature;
+}
+
+const DEFAULT_CONTENT_EXCLUSIONS = [
+  ".git",
+  ".cache",
+  ".next",
+  "node_modules",
+  "runs-state",
+  "runtime-data",
+  "coverage",
+  "dist",
+  "build",
+  "out",
+];
+
+function positiveBound(value: number | undefined, fallback: number, label: string): number {
+  const resolved = value ?? fallback;
+  if (!Number.isSafeInteger(resolved) || resolved < 1) {
+    throw new Error(`${label} must be a positive safe integer.`);
+  }
+  return resolved;
+}
+
+/**
+ * Hash regular files beneath a root with deterministic ordering and hard
+ * traversal limits. Symlinks are never followed, so a workspace link cannot
+ * expand observation into a protected or unbounded tree. Tracked, untracked,
+ * clean, and already-dirty files are treated identically at the byte level.
+ */
+export function captureContentSignatureSnapshot(
+  root: string,
+  options: Partial<ContentSnapshotLimits> = {},
+): ContentSignatureSnapshot {
+  const rootNative = path.resolve(root);
+  const rootStat = fs.lstatSync(rootNative);
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    throw new Error(`Content snapshot root must be a real directory: ${root}`);
+  }
+  const canonicalRoot = fs.realpathSync.native(rootNative);
+  const limits: ContentSnapshotLimits = {
+    maxFiles: positiveBound(options.maxFiles, 2_000, "maxFiles"),
+    maxTotalBytes: positiveBound(options.maxTotalBytes, 64 * 1024 * 1024, "maxTotalBytes"),
+    maxFileBytes: positiveBound(options.maxFileBytes, 8 * 1024 * 1024, "maxFileBytes"),
+    excludeDirectories: [...new Set((options.excludeDirectories ?? DEFAULT_CONTENT_EXCLUSIONS).map((entry) => entry.toLowerCase()))].sort(),
+  };
+  if (options.scope) {
+    limits.scope = options.scope.map(normalizeWriteSetEntry);
+    if (limits.scope.some(entry => !entry || path.isAbsolute(entry) || /^[a-z]:/i.test(entry) || entry.split('/').includes('..') || /[*?\[\]{}]/.test(entry))) {
+      throw new Error('Content scope requires literal workspace-relative paths.');
+    }
+  }
+  const files: Record<string, FileSignature> = {};
+  const omitted: ContentSignatureSnapshot["omitted"] = [];
+  let fileCount = 0;
+  let visitedFileCount = 0;
+  let totalBytes = 0;
+  let truncated = false;
+  let hardLimitReached = false;
+
+  const walk = (directory: string): void => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (hardLimitReached) return;
+      const full = path.join(directory, entry.name);
+      const relative = normalizeWriteSetEntry(path.relative(canonicalRoot, full));
+      if (!relative || relative.startsWith("../") || isWindowsReservedDevicePath(relative)) continue;
+      if (limits.scope && !limits.scope.some(scope => {
+        const target = scope.replace(/\/$/, '');
+        return relative === target || relative.startsWith(target + '/') || target.startsWith(relative + '/');
+      })) continue;
+      if (entry.isSymbolicLink()) {
+        omitted.push({ path: relative, reason: "symlink" });
+        continue;
+      }
+      if (entry.isDirectory()) {
+        if (limits.excludeDirectories.includes(entry.name.toLowerCase())) {
+          omitted.push({ path: `${relative}/`, reason: "excluded" });
+        } else {
+          walk(full);
+        }
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      if (visitedFileCount >= limits.maxFiles) {
+        truncated = true;
+        hardLimitReached = true;
+        omitted.push({ path: relative, reason: "file-limit" });
+        return;
+      }
+      visitedFileCount += 1;
+      const stat = fs.lstatSync(full);
+      if (stat.isSymbolicLink()) {
+        omitted.push({ path: relative, reason: "symlink" });
+        continue;
+      }
+      if (!stat.isFile()) continue;
+      if (stat.size > limits.maxFileBytes) {
+        truncated = true;
+        omitted.push({ path: relative, reason: "file-byte-limit" });
+        continue;
+      }
+      if (totalBytes + stat.size > limits.maxTotalBytes) {
+        truncated = true;
+        hardLimitReached = true;
+        omitted.push({ path: relative, reason: "total-byte-limit" });
+        return;
+      }
+      files[relative] = fileSignature(full, stat);
+      fileCount += 1;
+      totalBytes += stat.size;
+    }
+  };
+  walk(canonicalRoot);
+  return {
+    root: normalizeWriteSetEntry(canonicalRoot),
+    files,
+    limits,
+    fileCount,
+    totalBytes,
+    truncated,
+    omitted,
+  };
+}
+
+/** Byte-level changes, including mutations to paths dirty before both snapshots. */
+export function diffContentSignatureSnapshots(
+  before: ContentSignatureSnapshot,
+  after: ContentSignatureSnapshot,
+): ContentSignatureChange[] {
+  if (normalizeAbsoluteFsPath(before.root).toLowerCase() !== normalizeAbsoluteFsPath(after.root).toLowerCase()) {
+    throw new Error("Cannot diff content snapshots from different roots.");
+  }
+  const changes: ContentSignatureChange[] = [];
+  const paths = [...new Set([...Object.keys(before.files), ...Object.keys(after.files)])].sort();
+  for (const file of paths) {
+    if (isWindowsReservedDevicePath(file)) continue;
+    const previous = before.files[file];
+    const current = after.files[file];
+    const covered = (snapshot: ContentSignatureSnapshot) => !snapshot.truncated && !snapshot.omitted.some(item => file === item.path || file.startsWith(item.path.replace(/\/$/, '') + '/'));
+    if (!previous && current && covered(before)) changes.push({ path: file, kind: "added", after: current });
+    else if (previous && !current && covered(after)) changes.push({ path: file, kind: "deleted", before: previous });
+    else if (previous && current && !sameSignature(previous, current)) changes.push({ path: file, kind: "modified", before: previous, after: current });
+  }
+  return changes;
 }

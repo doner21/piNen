@@ -92,6 +92,21 @@ async function testCanary() {
 async function driveShape(params, env) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-ea-"));
   const logPath = path.join(tmp, "log.jsonl");
+  const agentDir = path.join(tmp, "agent");
+  fs.mkdirSync(agentDir);
+  fs.writeFileSync(path.join(agentDir, "models.json"), JSON.stringify({
+    providers: {
+      fixture: {
+        baseUrl: "http://127.0.0.1:9/v1", api: "openai-completions", apiKey: "fixture",
+        models: [{ id: "audit-model", name: "Audit fixture", reasoning: false, input: ["text"], contextWindow: 1_000_000, maxTokens: 1_000 }],
+      },
+      vprov: {
+        baseUrl: "http://127.0.0.1:9/v1", api: "openai-completions", apiKey: "fixture",
+        models: [{ id: "vmodel", name: "Override fixture", reasoning: false, input: ["text"], contextWindow: 1_000_000, maxTokens: 1_000 }],
+      },
+    },
+  }));
+  fs.writeFileSync(path.join(agentDir, "settings.json"), JSON.stringify({ defaultProvider: "fixture", defaultModel: "audit-model" }));
   // Frozen gate doc + a completed-run evidence directory with gate-evidence files.
   const docContent = Buffer.from("FROZEN GATE SPEC v1\nAcceptance: all findings resolved.\n");
   const docPath = path.join(tmp, "gate.md");
@@ -102,6 +117,8 @@ async function driveShape(params, env) {
   fs.mkdirSync(evidenceDir, { recursive: true });
   fs.writeFileSync(path.join(evidenceDir, "gate-metrics.json"), JSON.stringify({ runId: "run-xyz", pass: true }));
   fs.writeFileSync(path.join(evidenceDir, "verify.log"), "run-xyz verification OK\n");
+  const auditedPaths = [docPath, path.join(evidenceDir, "gate-metrics.json"), path.join(evidenceDir, "verify.log")];
+  const auditedBefore = new Map(auditedPaths.map((file) => [file, fs.readFileSync(file)]));
 
   const evidenceFilesLine = (env && env.MISSING_EVIDENCE_FILE)
     ? ["GATE_EVIDENCE_FILES:", "- gate-metrics.json", "- does-not-exist.json"].join("\n")
@@ -117,8 +134,10 @@ async function driveShape(params, env) {
     evidenceFilesLine,
   ].join("\n");
 
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CLI_PATH = path.join(__dirname, "fake-pi.cjs");
   process.env.FAKE_PI_LOG = logPath;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
   for (const [k, v] of Object.entries((env && env.fakePi) || {})) process.env[k] = v;
   try {
     const tool = loadOrchestrateTool();
@@ -131,22 +150,31 @@ async function driveShape(params, env) {
       ? fs.readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l))
       : [];
     const markdown = result.content?.[0]?.text || result.markdown || "";
-    return { result, calls, markdown, details: result.details || {}, tmp, docPath, reference, evidenceDir };
+    const auditedTreeImmutable = auditedPaths.every((file) => fs.readFileSync(file).equals(auditedBefore.get(file)));
+    return { result, calls, markdown, details: result.details || {}, tmp, docPath, reference, evidenceDir, auditedTreeImmutable };
   } finally {
     delete process.env.PI_CLI_PATH;
     delete process.env.FAKE_PI_LOG;
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
     for (const k of Object.keys((env && env.fakePi) || {})) delete process.env[k];
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 }
 
 async function testHappyPass() {
-  const { calls, markdown, details } = await driveShape({}, {});
+  const { calls, markdown, details, auditedTreeImmutable } = await driveShape({}, {});
   assert.equal(details.status, "pass", "happy audit must PASS");
   const reviewer = calls.filter((c) => c.agentName === "reviewer");
   const coder = calls.filter((c) => c.agentName === "coder");
+  const planner = calls.filter((c) => c.agentName === "planner");
   assert.equal(reviewer.length, 1, "exactly one verifier (reviewer) spawn");
   assert.equal(coder.length, 0, "evidence-audit must spawn ZERO executors");
+  assert.equal(planner.length, 0, "evidence-audit must spawn ZERO planners");
+  assert.deepEqual(reviewer[0].tools.split(","), ["read", "grep", "find", "ls"], "auditor receives exactly the safe evidence tools");
+  assert.equal(reviewer[0].noTools, false, "auditor can inspect evidence");
+  assert.equal(reviewer[0].noExtensions, true, "auditor cannot receive mutation-capable extension tools");
+  assert.equal(auditedTreeImmutable, true, "frozen doc and raw evidence remain byte immutable");
   assert.match(markdown, /DETERMINISTIC \(no LLM\)/, "report must tag deterministic phases");
   assert.match(markdown, /freeze-verify/, "report must include freeze-verify");
   assert.match(markdown, /evidence-manifest/, "report must include evidence-manifest");
@@ -273,7 +301,7 @@ async function run() {
   await testVerifierFailClosedOnUnparseable();
   await testRouteOverride();
   await testResumeRoundTrip();
-  console.log("PASS evidence-audit: static rules, registry discovery, canary, happy PASS (1 verifier / 0 executors), freeze-mismatch zero-spawn, missing-evidence-file zero-spawn, verifier fail-closed on unparseable, route override, checkpoint manifest+routes, resume round-trip");
+  console.log("PASS evidence-audit: static rules, registry discovery, canary, happy PASS (1 safe-tool verifier / 0 planners / 0 executors, immutable evidence), freeze-mismatch zero-spawn, missing-evidence-file zero-spawn, verifier fail-closed on unparseable, route override, checkpoint manifest+routes, resume round-trip");
 }
 
 run().catch((error) => { console.error("test-evidence-audit: FAIL"); console.error(error); process.exit(1); });

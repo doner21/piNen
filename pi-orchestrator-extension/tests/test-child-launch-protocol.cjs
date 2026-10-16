@@ -66,6 +66,41 @@ async function assertZeroSurvivors(pidFile, label) {
   return pids;
 }
 
+async function testReadOnlyChildUsesExactEvidenceAllowlist() {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-child-read-only-args-"));
+  const log = path.join(tmp, "fake-log.jsonl");
+  const oldEnv = {
+    PI_CLI_PATH: process.env.PI_CLI_PATH,
+    FAKE_PI_LOG: process.env.FAKE_PI_LOG,
+  };
+  process.env.PI_CLI_PATH = path.join(__dirname, "fake-pi.cjs");
+  process.env.FAKE_PI_LOG = log;
+
+  try {
+    const substrate = jiti(path.join(PROJECT_ROOT, "src", "substrate.ts"));
+    const agents = new Map([["read-only-probe", {
+      name: "read-only-probe",
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      tools: ["read", "bash", "edit", "write", "orchestrate", "mutation-extension"],
+    }]]);
+    const result = await substrate.spawnSubagent(
+      "read-only-probe",
+      "Probe the read-only child argv boundary.",
+      { agents, cwd: tmp, allowLocalModel: false, readOnly: true },
+    );
+    assert.equal(result.exitCode, 0);
+    const calls = fs.readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].tools.split(","), ["read", "grep", "find", "ls"], "read-only argv must use the exact safe evidence allowlist");
+    assert.equal(calls[0].noTools, false, "read-only evidence workers must not be reduced to --no-tools");
+    assert.equal(calls[0].noExtensions, true, "extension tools remain unavailable at child launch");
+  } finally {
+    restoreEnv(oldEnv);
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
 async function testSubstrateUnknownAndMalformedDoNotClearStartupTimeout() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-child-protocol-timeout-substrate-"));
   const fake = writeHangingFakePi(tmp);
@@ -135,6 +170,7 @@ async function testInlineOrchestratorUnknownAndMalformedDoNotClearStartupTimeout
     result = await orchestrateTool.execute("test-call", {
       task: "Exercise the default inline plan-execute-verify launcher timeout path.",
       paradigm: "plan-execute-verify",
+      supervision: "off",
       preflight: false,
       maxRetries: 0,
       plannerCount: 1,
@@ -158,9 +194,10 @@ async function testInlineOrchestratorUnknownAndMalformedDoNotClearStartupTimeout
 
 (async () => {
   await testProtocolEventAllowlist();
+  await testReadOnlyChildUsesExactEvidenceAllowlist();
   await testSubstrateUnknownAndMalformedDoNotClearStartupTimeout();
   await testInlineOrchestratorUnknownAndMalformedDoNotClearStartupTimeout();
-  console.log("PASS child-launch-protocol: Pi JSON event allowlist rejects unknown/malformed startup noise on substrate and inline orchestrator launchers; timeout cleanup leaves zero survivors");
+  console.log("PASS child-launch-protocol: read-only argv uses exact safe evidence tools with extensions disabled; Pi JSON event allowlist rejects unknown/malformed startup noise on substrate and inline orchestrator launchers; timeout cleanup leaves zero survivors");
 })().catch((error) => {
   console.error("test-child-launch-protocol: FAIL");
   console.error(error);

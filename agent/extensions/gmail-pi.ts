@@ -124,7 +124,9 @@ export default function gmailPi(pi: ExtensionAPI) {
     label: "Gmail Send",
     description: "Send an email via Gmail. Provide `to`, `subject`, and `body` (plain text).",
     parameters: Type.Object({
-      to: Type.String({ description: "Recipient email address." }),
+      to: Type.String({ description: "Recipient email address(es), comma-separated for multiple recipients." }),
+      cc: Type.Optional(Type.String({ description: "Optional CC email address(es), comma-separated for multiple recipients." })),
+      bcc: Type.Optional(Type.String({ description: "Optional BCC email address(es), comma-separated for multiple recipients. Hidden from delivered headers and tool results." })),
       subject: Type.String({ description: "Email subject line." }),
       body: Type.String({ description: "Email body (plain text)." }),
       account: Type.Optional(Type.String({ description: "Optional account name from gmail-config.json. Uses default if omitted." })),
@@ -136,13 +138,17 @@ export default function gmailPi(pi: ExtensionAPI) {
         await transporter.sendMail({
           from: cfg.email,
           to: params.to,
+          cc: params.cc,
+          bcc: params.bcc,
           subject: params.subject,
           text: params.body,
         });
         transporter.close();
         return text(`Email sent to ${params.to}: "${params.subject}"`);
       } catch (err) {
-        return text(`gmail_send failed: ${(err as Error).message}`, true);
+        // SMTP errors can contain rejected BCC addresses; do not expose them.
+        const message = params.bcc ? "Unable to send email." : (err as Error).message;
+        return text(`gmail_send failed: ${message}`, true);
       }
     },
   });

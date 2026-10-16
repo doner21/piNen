@@ -4,7 +4,50 @@
   "description": "Deterministic multi-agent orchestration extension for Pi using isolated Pi JSON-mode subprocesses.",
   "type": "module",
   "scripts": {
-    "test": "node tests/test-natural-language-controls.cjs && node tests/test-role-concurrency.cjs && node tests/test-judgment-hardening.cjs && node tests/test-paradigm-creator.cjs && node tests/test-dual-plan-synthesis-execute-verify.cjs && node tests/test-dynamic-workflow.cjs && node tests/test-shape-builder.cjs && node tests/test-win-console-spawn-root-cause.cjs && node tests/test-win-lifecycle-process-trace.cjs && node tests/test-venue-rescue-synthesis.cjs && node tests/test-preregistered-concurrency-spike.cjs && node tests/test-abort-resume.cjs && node tests/test-shape-route-overrides.cjs && node tests/test-custom-shape-control-propagation.cjs && node tests/test-dual-plan-footer.cjs && node tests/test-nl-route-hardening.cjs && node tests/test-pev-resume.cjs && node tests/test-deterministic-phase.cjs && node tests/test-frozen-gate-fix-loop.cjs && node tests/test-composable-pipeline-model-id.cjs && node tests/test-composable-pipeline-order-retry.cjs && node tests/test-evidence-audit.cjs && node tests/test-independent-replication.cjs && node tests/test-m66-explicit-routing-proof.cjs && node tests/test-child-launch-protocol.cjs && node tests/test-preflight-bounds-routes.cjs && node tests/test-write-set-enforcement.cjs && node tests/test-terminal-transport-write-set.cjs && node tests/test-ssi-ipc-runtime-regressions.cjs && node tests/test-ssi-single-writer-exclusive-lane.cjs"
+    "pretest": "npm run typecheck:next",
+    "test": "node tests/run-isolated.cjs tests/test-natural-language-controls.cjs tests/test-role-concurrency.cjs tests/test-judgment-hardening.cjs tests/test-paradigm-creator.cjs tests/test-dual-plan-synthesis-execute-verify.cjs tests/test-dynamic-workflow.cjs tests/test-shape-builder.cjs tests/test-win-console-spawn-root-cause.cjs tests/test-win-lifecycle-process-trace.cjs tests/test-venue-rescue-synthesis.cjs tests/test-preregistered-concurrency-spike.cjs tests/test-abort-resume.cjs tests/test-shape-route-overrides.cjs tests/test-custom-shape-control-propagation.cjs tests/test-dual-plan-footer.cjs tests/test-nl-route-hardening.cjs tests/test-pev-resume.cjs tests/test-deterministic-phase.cjs tests/test-frozen-gate-fix-loop.cjs tests/test-composable-pipeline-model-id.cjs tests/test-composable-pipeline-order-retry.cjs tests/test-evidence-audit.cjs tests/test-independent-replication.cjs tests/test-m66-explicit-routing-proof.cjs tests/test-child-launch-protocol.cjs tests/test-preflight-bounds-routes.cjs tests/test-write-set-enforcement.cjs tests/test-guard-decisions.cjs tests/test-supervision-foundations.cjs tests/test-adaptive-supervision-foundations.cjs tests/test-adaptive-supervision-real-canary.cjs tests/test-adaptive-supervision-production.cjs tests/test-shape-execution-contracts.cjs tests/test-all-shape-visible-main-matrix.cjs tests/test-generic-visible-main-dispatch.cjs tests/test-visible-main-legacy-pev-migration.cjs tests/test-visible-main-supervision.cjs tests/test-visible-main-tool-lifecycle.cjs tests/test-visible-main-command.cjs tests/test-visible-main-fresh-host.cjs tests/test-terminal-transport-write-set.cjs tests/test-ssi-ipc-runtime-regressions.cjs tests/test-ssi-single-writer-exclusive-lane.cjs tests/test-orchestrator-next.cjs tests/test-orchestrator-next-fault-corpus.cjs tests/test-durable-mission-foundations.cjs tests/test-durable-mission-runner.cjs tests/test-durable-mission-rpc-worker.cjs tests/test-durable-mission-inspection.cjs tests/test-durable-mission-tool.cjs tests/test-round3-defect-a.cjs tests/test-round3-defect-b.cjs tests/test-round3-defect-c.cjs tests/test-round3-defect-d.cjs tests/test-round3-defect-e.cjs tests/test-round3-defect-f.cjs tests/test-round3-defect-g.cjs tests/test-round3-defect-h.cjs tests/test-round3-defect-i.cjs tests/test-round3-defect-j.cjs tests/test-round3-defect-k.cjs tests/test-round3-defect-l.cjs tests/test-round3-aggregate-replay.cjs tests/test-round4-defect-n.cjs tests/test-round4-defect-o.cjs tests/test-round4-defect-p.cjs tests/test-round4-defect-m.cjs tests/test-round5-defect-q.cjs tests/test-round5-defect-r.cjs tests/test-round5-defect-t.cjs tests/test-round5-defect-u.cjs tests/test-round5-defect-v.cjs tests/test-runs-state-prune.cjs tests/test-round6-defect-y.cjs tests/test-round6-defect-z.cjs tests/test-round7-defect-aa.cjs tests/test-round7-defect-ab.cjs tests/test-round7-defect-ac.cjs tests/test-round7-defect-ad.cjs tests/test-round7-defect-ae.cjs tests/test-round7-defect-af.cjs tests/test-round7-defect-ag.cjs tests/test-round7-defect-ah.cjs tests/test-round7-defect-ai.cjs tests/test-round7-defect-aj.cjs tests/test-round7-defect-ak1.cjs tests/test-round7-defect-ak2.cjs tests/test-round7-defect-ak3.cjs tests/test-round7-runtime-state.cjs tests/test-round7-scheduler-store.cjs tests/test-2026-09-17-binding-capacity.cjs tests/test-2026-09-17-no-force-kill-real-child.cjs tests/test-2026-09-17-action-evidence.cjs",
+    "test:mission": "node tests/run-isolated.cjs tests/test-durable-mission-foundations.cjs tests/test-durable-mission-runner.cjs tests/test-durable-mission-rpc-worker.cjs tests/test-durable-mission-inspection.cjs tests/test-durable-mission-tool.cjs",
+    "test:mission:inspection": "node tests/run-isolated.cjs tests/test-durable-mission-inspection.cjs",
+    "test:mission:tool": "node tests/run-isolated.cjs tests/test-durable-mission-tool.cjs",
+    "test:mission:live-rpc": "node tests/run-isolated.cjs tests/test-durable-mission-rpc-live.cjs",
+    "test:mission:live-vertical": "node tests/run-isolated.cjs tests/test-durable-mission-live-vertical.cjs",
+    "benchmark:mission": "node tests/run-isolated.cjs tests/benchmark-durable-mission-vs-direct.cjs",
+    "test:supervision-foundations": "node tests/run-isolated.cjs tests/test-supervision-foundations.cjs",
+    "test:adaptive-supervision": "node tests/run-isolated.cjs tests/test-adaptive-supervision-foundations.cjs tests/test-adaptive-supervision-real-canary.cjs tests/test-adaptive-supervision-production.cjs",
+    "test:all-shape-visible-main": "node tests/run-isolated.cjs tests/test-all-shape-visible-main-matrix.cjs",
+    "test:supervision": "node tests/run-isolated.cjs tests/test-supervision-foundations.cjs tests/test-shape-execution-contracts.cjs tests/test-all-shape-visible-main-matrix.cjs tests/test-generic-visible-main-dispatch.cjs tests/test-visible-main-legacy-pev-migration.cjs tests/test-visible-main-supervision.cjs tests/test-visible-main-tool-lifecycle.cjs tests/test-visible-main-command.cjs tests/test-visible-main-fresh-host.cjs",
+    "test:legacy-pev-migration": "node tests/run-isolated.cjs tests/test-visible-main-legacy-pev-migration.cjs",
+    "typecheck:next": "node tests/typecheck-next.cjs",
+    "test:round5:q": "node tests/run-isolated.cjs tests/test-round5-defect-q.cjs",
+    "test:round5:r": "node tests/run-isolated.cjs tests/test-round5-defect-r.cjs",
+    "test:round5:t": "node tests/run-isolated.cjs tests/test-round5-defect-t.cjs",
+    "test:round5:u": "node tests/run-isolated.cjs tests/test-round5-defect-u.cjs",
+    "test:round5:v": "node tests/run-isolated.cjs tests/test-round5-defect-v.cjs",
+    "test:round5:x": "node tests/run-isolated.cjs tests/test-round3-aggregate-replay.cjs",
+    "test:round6:y": "node tests/run-isolated.cjs tests/test-round6-defect-y.cjs",
+    "test:round6:z": "node tests/run-isolated.cjs tests/test-round6-defect-z.cjs",
+    "test:round7": "node tests/run-isolated.cjs tests/test-round7-defect-aa.cjs tests/test-round7-defect-ab.cjs tests/test-round7-defect-ac.cjs tests/test-round7-defect-ad.cjs tests/test-round7-defect-ae.cjs tests/test-round7-defect-af.cjs tests/test-round7-defect-ag.cjs tests/test-round7-defect-ah.cjs tests/test-round7-defect-ai.cjs tests/test-round7-defect-aj.cjs tests/test-round7-defect-ak1.cjs tests/test-round7-defect-ak2.cjs tests/test-round7-defect-ak3.cjs tests/test-round7-runtime-state.cjs tests/test-round7-scheduler-store.cjs",
+    "test:2026-09-17": "node tests/test-2026-09-17-binding-capacity.cjs && node tests/test-2026-09-17-no-force-kill-real-child.cjs && node tests/test-2026-09-17-action-evidence.cjs",
+    "test:round7:scheduler-store": "node tests/run-isolated.cjs tests/test-round7-scheduler-store.cjs",
+    "test:round7:aa": "node tests/run-isolated.cjs tests/test-round7-defect-aa.cjs",
+    "test:round7:ab": "node tests/run-isolated.cjs tests/test-round7-defect-ab.cjs",
+    "test:round7:ac": "node tests/run-isolated.cjs tests/test-round7-defect-ac.cjs",
+    "test:round7:ad": "node tests/run-isolated.cjs tests/test-round7-defect-ad.cjs",
+    "test:round7:ae": "node tests/run-isolated.cjs tests/test-round7-defect-ae.cjs",
+    "test:round7:af": "node tests/run-isolated.cjs tests/test-round7-defect-af.cjs",
+    "test:round7:ag": "node tests/run-isolated.cjs tests/test-round7-defect-ag.cjs",
+    "test:round7:ah": "node tests/run-isolated.cjs tests/test-round7-defect-ah.cjs",
+    "test:round7:ai": "node tests/run-isolated.cjs tests/test-round7-defect-ai.cjs",
+    "test:round7:aj": "node tests/run-isolated.cjs tests/test-round7-defect-aj.cjs",
+    "test:round7:ak1": "node tests/run-isolated.cjs tests/test-round7-defect-ak1.cjs",
+    "test:round7:ak2": "node tests/run-isolated.cjs tests/test-round7-defect-ak2.cjs",
+    "test:round7:ak3": "node tests/run-isolated.cjs tests/test-round7-defect-ak3.cjs",
+    "test:scheduler": "node tests/run-isolated.cjs tests/test-round3-defect-h.cjs tests/test-round4-defect-m.cjs tests/test-round5-defect-t.cjs tests/test-round6-defect-z.cjs tests/test-round7-defect-af.cjs tests/test-round7-scheduler-store.cjs",
+    "test:runs-state-prune": "node tests/run-isolated.cjs tests/test-runs-state-prune.cjs",
+    "runs:prune": "node tools/prune-runs-state.cjs",
+    "benchmark:next": "node tests/run-isolated.cjs tests/benchmark-orchestrator-next-vs-legacy.cjs",
+    "test:item3": "node tests/test-2026-09-25-committed-reader-settlement.cjs && node tests/test-2026-09-25-artifact-outcome-settlement.cjs && node tests/test-2026-09-25-artifact-reader-descriptor.cjs && node tests/test-2026-09-25-inconclusive-filesystem-ownership.cjs && node tests/test-2026-09-23-single-owner.cjs && node tests/test-2026-09-21-no-output.cjs --gate-owner-followup && node tests/test-2026-09-21-no-output.cjs && node tests/test-2026-09-21-no-output-review.cjs && node tests/test-2026-09-21-no-output-fresh3.cjs",
+    "test:item3:gate1": "node tests/test-2026-09-21-no-output-gate1.cjs"
   },
   "keywords": [
     "pi-package"
@@ -20,5 +63,9 @@
     "@earendil-works/pi-agent-core": "*",
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.19",
+    "typescript": "^6.0.3"
   }
 }

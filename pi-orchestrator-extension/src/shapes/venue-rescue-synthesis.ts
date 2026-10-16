@@ -16,6 +16,8 @@ import {
   type SubagentResult,
 } from "../substrate";
 
+import { GENERIC_EXECUTOR_SHAPE_EXECUTION } from "../supervision";
+
 import type {
   OrchestrationShape,
   OrchestrationShapeContext,
@@ -89,6 +91,7 @@ const MAX_FINAL_CHARS = 20_000;
 export const venueRescueSynthesisShape: OrchestrationShape = {
   name: "venue-rescue-synthesis",
   description: "A reusable research-to-deliverable pipeline that turns a struggling venue or business unit into an investor-grade rescue plan: cheap text research and a vision-based brand/aesthetic audit feed a specialist financial-narrative phase, a strong synthesis-and-critique phase fuses everything into a strategy with wild and practical options, a design phase builds a stylish interactive HTML/JS deliverable, and an independent verifier checks it. Phases route to distinct models by agent name.",
+  execution: GENERIC_EXECUTOR_SHAPE_EXECUTION,
   run: runVenueRescueSynthesis,
 };
 

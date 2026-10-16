@@ -147,6 +147,7 @@ async function testProposeShapeWithFakePi() {
       {
         task: "Investigate remaining terminal/console flashes on Pi reload and new-session. Normal message-send flashes are already fixed.",
         paradigm: "win-console-spawn-root-cause",
+        supervision: "off",
         preflight: false,
         cwd: tempDir,
         maxSubagents: 6,
@@ -226,6 +227,7 @@ async function testVerifierFailWithExitCodeZero() {
       {
         task: "Investigate remaining terminal/console flashes. Verifier should fail even with exit code 0.",
         paradigm: "win-console-spawn-root-cause",
+        supervision: "off",
         preflight: false,
         cwd: tempDir,
         maxSubagents: 6,
@@ -324,6 +326,7 @@ async function testVerifierPassStillWorks() {
       {
         task: "Investigate flashes. Verifier should pass.",
         paradigm: "win-console-spawn-root-cause",
+        supervision: "off",
         preflight: false,
         cwd: tempDir,
         maxSubagents: 6,

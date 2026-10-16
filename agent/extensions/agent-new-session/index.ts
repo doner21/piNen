@@ -1,10 +1,19 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { writeDiagnostics as writeCanonicalDiagnostics } from "./diagnostics.ts";
+import {
+	type WriteDiagnosticsOptions,
+	writeDiagnostics as writeCanonicalDiagnostics,
+} from "./diagnostics.ts";
 
 /**
- * Agent-operated "new session" bridge — phase-machine + session_shutdown
- * confirmation edition (v3, lifecycle-race-fix).
+ * Agent-operated "new session" bridge — public command-dispatch +
+ * session_shutdown confirmation edition (v4, bundled-runtime fix).
+ *
+ * Pi 0.84.2+ supports dispatching registered extension commands through
+ * pi.sendUserMessage(..., { expandPromptTemplates: true }). We deliberately
+ * invoke that public path only after the idle poll settles. This avoids the
+ * private pi.executeCommand core patch, which patched dist/core/* while the
+ * 0.84.3+ CLI actually runs dist/bundle/cli.js.
  *
  * Fixes false `agent_new_session` failure diagnostics (RUN_20260627-164912):
  * - session_shutdown:new is authoritative. Once confirmed, later
@@ -24,7 +33,6 @@ import { writeDiagnostics as writeCanonicalDiagnostics } from "./diagnostics.ts"
 
 const NEW_SESSION_COMMAND = "agent-new-session";
 const POLL_INTERVAL_MS = 500;
-const MAX_WAIT_MS = 30_000;
 const IDLE_TICKS_REQUIRED = 2;
 const VERIFICATION_TIMEOUT_MS = 10_000;
 const EXECUTE_COMMAND_HARD_TIMEOUT_MS = 60_000;
@@ -195,8 +203,9 @@ function rawTextContainsConfirmation(raw: string): boolean {
 async function writeDiagnostics(
 	patch: Partial<NewSessionDiagnostics> & { attempts?: number; cwd?: string; executeCommandAvailable?: boolean },
 	cwd: string,
+	options?: WriteDiagnosticsOptions,
 ): Promise<void> {
-	return writeCanonicalDiagnostics(patch, cwd);
+	return writeCanonicalDiagnostics(patch, cwd, options);
 }
 
 // ---------------------------------------------------------------------------
@@ -273,24 +282,15 @@ function scheduleIdleNewSession(pi: ExtensionAPI, ctx: ExtensionContext, message
 		attempts: 0,
 		cwd,
 		executeCommandAvailable,
-	}, cwd);
+	}, cwd, { resetForRequest: true });
 
 	pollInterval = setInterval(() => {
 		attempts++;
 
-		if (Date.now() - startedAt > MAX_WAIT_MS) {
-			void writeDiagnostics({
-				requestId: activeRequestId,
-				phase: "failed",
-				attempts,
-				timeout: true,
-				error: `idle poll timed out after ${MAX_WAIT_MS}ms without ${IDLE_TICKS_REQUIRED} stable idle ticks`,
-				cwd,
-				executeCommandAvailable,
-			}, cwd);
-			resetToIdle(cwd);
-			return;
-		}
+		// No give-up deadline. An owner message or scheduler wake arriving after
+		// the request starts a normal turn; the switch waits for that turn to end
+		// instead of failing after a fixed window (13 Oct 2026: two refreshes were
+		// lost this way and the owner had to type /agent-new-session by hand).
 
 		let isIdle = false;
 		let hasPending = false;
@@ -312,11 +312,16 @@ function scheduleIdleNewSession(pi: ExtensionAPI, ctx: ExtensionContext, message
 			return;
 		}
 		const stableIdle = isIdle && !hasPending;
+		const previousIdleTicks = idleTicks;
 		if (stableIdle) {
 			idleTicks++;
 		} else {
 			idleTicks = 0;
 		}
+
+		// Record only state changes so an indefinite wait does not rewrite the
+		// diagnostics file twice a second.
+		if (attempts > 1 && stableIdle === (previousIdleTicks > 0) && idleTicks < IDLE_TICKS_REQUIRED) return;
 
 		void writeDiagnostics({
 			requestId: activeRequestId,
@@ -344,8 +349,9 @@ function scheduleIdleNewSession(pi: ExtensionAPI, ctx: ExtensionContext, message
 }
 
 /**
- * Fire `pi.executeCommand("agent-new-session")` with a single cancellable
- * hard-timeout handle.
+ * Dispatch `/agent-new-session` through Pi's public extension-command path.
+ * The async wrapper preserves the existing verification phase machine while
+ * pi.sendUserMessage itself remains fire-and-forget on ExtensionAPI.
  *
  * Lifecycle-race-fix changes:
  * - Single timeout, not dual (no anonymous uncancellable setTimeout in race).
@@ -363,16 +369,19 @@ function fireNewSession(
 ): void {
 	const requestId = activeRequestId!;
 
-	const executeCommand = (pi as unknown as {
-		executeCommand?: (name: string, args?: string) => Promise<void>;
-	}).executeCommand;
-	if (typeof executeCommand !== "function") {
+	const sendUserMessage = (pi as unknown as {
+		sendUserMessage?: (
+			content: string,
+			options?: { expandPromptTemplates?: boolean },
+		) => void;
+	}).sendUserMessage;
+	if (typeof sendUserMessage !== "function") {
 		phase = "failed";
 		void writeDiagnostics({
 			requestId,
 			phase: "failed",
 			attempts,
-			error: "executeCommand error: pi.executeCommand is not available at fire time",
+			error: "command dispatch error: pi.sendUserMessage is not available",
 			cwd,
 			executeCommandAvailable,
 		}, cwd);
@@ -383,6 +392,12 @@ function fireNewSession(
 	const args = kickoffMessage
 		? JSON.stringify({ kickoff: kickoffMessage })
 		: undefined;
+	const commandText = args
+		? `/${NEW_SESSION_COMMAND} ${args}`
+		: `/${NEW_SESSION_COMMAND}`;
+	const executeCommand = async (): Promise<void> => {
+		sendUserMessage.call(pi, commandText, { expandPromptTemplates: true });
+	};
 
 	const cmdStartedAt = Date.now();
 
@@ -461,7 +476,7 @@ function fireNewSession(
 	}, EXECUTE_COMMAND_HARD_TIMEOUT_MS);
 
 	// Execute command via pi.executeCommand directly (no Promise.race wrapping).
-	void executeCommand.call(pi, NEW_SESSION_COMMAND, args).then(
+	void executeCommand().then(
 		() => {
 			if (hardTimer) { clearTimeout(hardTimer); hardTimer = undefined; }
 			const duration = Date.now() - cmdStartedAt;
@@ -596,7 +611,10 @@ function onVerificationTimeout(
 export default function agentNewSession(pi: ExtensionAPI): void {
 	{
 		const probe = pi as Record<string, unknown>;
-		executeCommandAvailable = typeof probe.executeCommand === "function";
+		// Historical diagnostics retain the executeCommandAvailable field, but
+		// from v4 it represents availability of the supported command-dispatch
+		// transport used by this bridge.
+		executeCommandAvailable = typeof probe.sendUserMessage === "function";
 	}
 
 	// session_shutdown: the reliable SUCCESS signal for new-session.
@@ -633,33 +651,43 @@ export default function agentNewSession(pi: ExtensionAPI): void {
 		description:
 			"Start a fresh Pi session with a clean context window (equivalent to " +
 			"the human /new command). Schedules a deferred new-session creation that " +
-			"fires when the agent becomes idle, then invokes /agent-new-session via " +
-			"pi.executeCommand. The old session is torn down; the agent MUST stop " +
-			"immediately after calling this tool. Confirms success via " +
-			"session_shutdown{reason:new}. Requires the pi.executeCommand core patch.",
+			"fires when the agent becomes idle, then dispatches /agent-new-session " +
+			"through Pi's supported command-expansion API. The old session is torn " +
+			"down; the agent MUST stop immediately after calling this tool. Confirms " +
+			"success via session_shutdown{reason:new}. No core patch is required on " +
+			"Pi 0.84.2 or newer.",
 		promptSnippet:
 			"Start a new Pi session with a clean context window (like /new)",
 		promptGuidelines: [
 			"To start a clean session: (1) write a concise continuation/kickoff " +
 				"message, (2) schedule that continuation via agent_scheduler with " +
-				"delaySeconds: 75-90 (long enough to read diagnostics after the " +
-				"historical 60s false-failure window, use exactly 15 only if the " +
-				"turn is short), (3) call agent_new_session, (4) stop immediately. " +
-				"Always schedule the continuation BEFORE calling agent_new_session.",
+				"delayMinutes: 30 as a FALLBACK only, (3) call agent_new_session with " +
+				"the same continuation as `kickoff`, (4) stop immediately. The kickoff " +
+				"is delivered into the new session at the moment of the switch and is " +
+				"the normal way work resumes. The switch waits as long as needed for " +
+				"the agent to become idle; an owner message or wake arriving first only " +
+				"delays it. Always schedule the fallback BEFORE calling agent_new_session.",
+			"The fallback wake must first read the diagnostics. If phase is " +
+				"'polling', the switch is still waiting for idle: end the turn at once " +
+				"so it can happen. If phase is 'done' and work already resumed from the " +
+				"kickoff, do nothing more. Only if phase is 'failed', tell the user once " +
+				"to run /agent-new-session.",
 			"The old session and all its in-memory state will be torn down. Only " +
 				"filesystem state (such as agent_scheduler schedules) survives.",
 			"The scheduled continuation's FIRST action must be to READ " +
 				"the canonical Pi-home diagnostics file `<PI_HOME>/agent/agent-new-session-diagnostics.json` " +
 				"(`~/.pi/agent/agent-new-session-diagnostics.json` by default; " +
-				"`~/.pi/agent/agent-new-session-diagnostics.json` on this Windows host) " +
+				"`C:/Users/you/.pi/agent/agent-new-session-diagnostics.json` on this Windows host) " +
 				"and check `newSessionConfirmed` / " +
 				"`newSessionSilentlyFailed` / `executeCommandRejected` / `phase`. If " +
 				"phase is 'done' and newSessionConfirmed is true, the switch succeeded. " +
-				"If phase is 'failed' and newSessionSilentlyFailed is true, the session " +
-				"switch did NOT happen — tell the user to run /agent-new-session manually.",
-			"If this tool returns an error about pi.executeCommand not being available, " +
-				"the session switch DID NOT fire and WILL NOT fire. Use manual " +
-				"/agent-new-session in the TUI, or reapply the core patch.",
+				"If phase is 'polling', the switch is still waiting for this session to " +
+				"go idle: end the turn. If phase is 'failed', the switch did NOT happen — " +
+				"tell the user to run /agent-new-session manually.",
+			"This bridge uses pi.sendUserMessage with expandPromptTemplates:true only " +
+				"after Pi is stably idle. Do not remove that option or call it directly " +
+				"from the active tool turn; otherwise the slash command may become plain " +
+				"model input or run during streaming.",
 			"NOTE: newSessionConfirmed:true and confirmedBy:'session_shutdown:new' are " +
 				"authoritative success signals. If these are present, the session switch " +
 				"succeeded even if executeCommandRejected or hardTimeout are also present " +
@@ -670,10 +698,10 @@ export default function agentNewSession(pi: ExtensionAPI): void {
 				kickoff: Type.Optional(
 					Type.String({
 						description:
-							"Brief message to inject into the new session as initial " +
-							"context via withSession. This does NOT replace scheduling a " +
-							"full continuation via agent_scheduler — use that for the " +
-							"actual task context.",
+							"The continuation message (normally beginning 'RESUME AFTER NEW " +
+							"SESSION:'), delivered into the replacement session at the moment " +
+							"of the switch. This is the normal way work resumes; the scheduled " +
+							"wake is only a fallback.",
 					}),
 				),
 			},
@@ -711,27 +739,6 @@ export default function agentNewSession(pi: ExtensionAPI): void {
 				};
 			}
 
-			if (!executeCommandAvailable) {
-				phase = "failed";
-				void writeDiagnostics({
-					phase: "failed",
-					error: "executeCommand error: pi.executeCommand is not available",
-					cwd: ctx.cwd,
-					executeCommandAvailable: false,
-				}, ctx.cwd);
-				return {
-					content: [{
-						type: "text",
-						text:
-							"pi.executeCommand is not available in this Pi runtime (core patch not applied). " +
-							"Options: (1) type /agent-new-session manually in the TUI, or " +
-							"(2) reapply the core patch: " +
-							"node agent/core-patch/reapply-pi-core-patch.mjs apply",
-					}],
-					details: { command: NEW_SESSION_COMMAND, deferred: false, error: "executeCommand not available" },
-				};
-			}
-
 			retryCount = 0;
 			scheduleIdleNewSession(pi, ctx, params.kickoff);
 			return {
@@ -740,13 +747,14 @@ export default function agentNewSession(pi: ExtensionAPI): void {
 						type: "text",
 						text:
 							"New session deferred (request: " + activeRequestId + "). A background " +
-							"idle poll will invoke /agent-new-session shortly after your turn ends " +
-							"and the agent becomes idle (isIdle && !hasPendingMessages). The old " +
+							"idle poll will dispatch /agent-new-session through Pi's public command API shortly after your turn ends " +
+							"and the agent becomes idle (isIdle && !hasPendingMessages), however long " +
+							"that takes; incoming messages only delay it. The old " +
 							"session is torn down; the new session starts with a clean context window. " +
 							"Success is confirmed via session_shutdown{reason:new}. STOP now — do " +
-							"no further work in this runtime. The scheduled continuation must read " +
-							"the canonical Pi-home file <PI_HOME>/agent/agent-new-session-diagnostics.json " +
-							"(~/.pi/agent/agent-new-session-diagnostics.json by default) first to verify the switch applied.",
+							"no further work in this runtime. Work resumes from the kickoff in the new " +
+							"session; the fallback wake reads <PI_HOME>/agent/agent-new-session-diagnostics.json " +
+							"first and ends its turn at once if the phase is still 'polling'.",
 					},
 				],
 				details: { command: NEW_SESSION_COMMAND, deferred: true, requestId: activeRequestId, phase: "polling" },
@@ -771,25 +779,51 @@ export default function agentNewSession(pi: ExtensionAPI): void {
 			}
 
 			const parentSession = ctx.sessionManager.getSessionFile();
+			const cwd = lastKnownCwd ?? ctx.cwd;
 
-			const defaultKickoff =
-				"New session started with a clean context window. " +
-				"If a continuation was scheduled via agent_scheduler in the " +
-				"previous session, it will arrive within ~15 seconds with the " +
-				"task context. Stand by.";
-
-			// Cheap yield before newSession (only works from a timer).
-			const waitForIdle = (ctx as { waitForIdle?: () => Promise<void> }).waitForIdle;
-			if (typeof waitForIdle === "function") {
-				try { await waitForIdle(); } catch { /* best-effort */ }
+			// A direct/manual command needs its own request generation. Tool-driven
+			// dispatch already created one in scheduleIdleNewSession().
+			if (!activeRequestId) {
+				const startedAt = Date.now();
+				activeRequestId = `new-${startedAt}-${Math.random().toString(36).slice(2, 8)}`;
+				phase = "command-in-flight";
+				newSessionConfirmed = false;
+				await writeDiagnostics({
+					requestId: activeRequestId,
+					phase,
+					scheduled: startedAt,
+					requested: startedAt,
+					newSessionInvoked: startedAt,
+					attempts: 1,
+					cwd,
+					executeCommandAvailable,
+				}, cwd, { resetForRequest: true });
 			}
 
+			// The deferred tool already waits for a settled agent. A second
+			// waitForIdle() inside the command adds no safety and can deadlock a
+			// command-dispatch implementation that counts itself as pending.
+			//
+			// Most importantly, do not await a default LLM turn from withSession.
+			// Awaiting sendUserMessage keeps ctx.newSession()/executeCommand open for
+			// the entire new-session agent run; any later model/tool failure then
+			// reaches InteractiveMode's fatal replacement handler and exits to the
+			// parent shell. The scheduler continuation is the normal wake-up path.
 			const result = await ctx.newSession({
 				parentSession,
-				withSession: async (sessionCtx) => {
-					const msg = kickoff || defaultKickoff;
-					await sessionCtx.sendUserMessage(msg);
-				},
+				withSession: kickoff
+					? async (sessionCtx) => {
+						void sessionCtx.sendUserMessage(kickoff).catch((error: unknown) => {
+							const message = error instanceof Error ? error.message : String(error);
+							void writeDiagnostics({
+								requestId: activeRequestId,
+								lateErrorAfterConfirmation: `non-blocking kickoff failed: ${message}`,
+								cwd,
+								executeCommandAvailable,
+							}, cwd);
+						});
+					}
+					: undefined,
 			});
 
 			if (result.cancelled) {

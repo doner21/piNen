@@ -48,7 +48,8 @@ function agentName() {
 }
 function promptText() {
   const last = args[args.length - 1];
-  return last && !last.startsWith("--") ? last : "";
+  if (last && last !== argValue("--model") && !last.startsWith("--")) return last;
+  try { return fs.readFileSync(0, "utf8"); } catch { return ""; }
 }
 function emit(event) { console.log(JSON.stringify(event)); }
 function log(prompt) {
@@ -213,6 +214,7 @@ async function runFrozenGateScenario(mode, extraParams = {}) {
       {
         task: makeTask(cwd),
         paradigm: "frozen-gate-fix-loop",
+        supervision: "off",
         preflight: false,
         cwd,
         maxSubagents: 12,
@@ -259,6 +261,7 @@ async function runPevScenario(mode, extraParams = {}, setup = () => {}) {
       `test-pev-${mode}`,
       {
         task: "Build the PEV fixture artifact(s).",
+        supervision: "off",
         preflight: false,
         cwd,
         maxSubagents: 12,
@@ -301,6 +304,7 @@ async function testExternalWriteSetViolationBeforeVerifier() {
       {
         task: makeTask(cwd),
         paradigm: "frozen-gate-fix-loop",
+        supervision: "off",
         preflight: false,
         cwd,
         maxSubagents: 12,
@@ -382,6 +386,7 @@ async function testExternalOnlyWriteSetStillObservesCwd() {
       {
         task: makeTask(cwd),
         paradigm: "frozen-gate-fix-loop",
+        supervision: "off",
         preflight: false,
         cwd,
         maxSubagents: 12,
@@ -435,6 +440,7 @@ async function testAlreadyDirtyFilesChangedAgainAreViolations() {
       {
         task: makeTask(cwd),
         paradigm: "frozen-gate-fix-loop",
+        supervision: "off",
         preflight: false,
         cwd,
         maxSubagents: 12,
@@ -483,6 +489,7 @@ async function testPevUnobservableWriteSetFailsClosedBeforeVerifier() {
       "test-pev-unobservable-write-set",
       {
         task: "Build the fixture artifact: CREATE file out-1.txt with the fixture content.",
+        supervision: "off",
         preflight: false,
         cwd,
         maxSubagents: 6,

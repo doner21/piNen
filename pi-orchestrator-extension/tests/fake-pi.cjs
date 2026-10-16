@@ -1,8 +1,15 @@
 #!/usr/bin/env node
 const fs = require("node:fs");
 const path = require("node:path");
+const { spawnSync } = require("node:child_process");
 
 const args = process.argv.slice(2);
+if (args.includes("--extension")) {
+  // Deterministic stand-in for the explicitly loaded worker guard. Real-child
+  // loading/interception is covered by test-2026-09-17-no-force-kill-real-child.
+  process.stderr.write("NO_FORCE_KILL_GUARD_READY:v1\n");
+  if (args.some(value => /worker-no-output-monitor\.ts$/.test(value))) process.stderr.write("NO_OUTPUT_MONITOR_READY:v1\n");
+}
 let stdin = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
@@ -73,6 +80,238 @@ function countLogRecords(agentName) {
  *   (pre-flight failure fixture).
  */
 function respond(prompt) {
+  const phaseInstructions = prompt.includes('You are executing declarative workflow') && prompt.includes('Phase instructions:\n')
+    ? prompt.split('Phase instructions:\n').at(-1).split('\n\nExpected output:')[0] : undefined;
+  const phaseCreatesFile = phaseInstructions !== undefined && /CREATE file [\w./\\-]+/i.test(phaseInstructions);
+  // Adaptive Supervision v1 real-subprocess fixtures. These branches model
+  // routed child output; host code still classifies failure equivalence,
+  // material strategy dimensions, safety, scope, and strict acceptance.
+  if (process.env.FAKE_PI_ADAPTIVE_PRODUCTION === "1" &&
+      (prompt.includes("ADAPTIVE_SUPERVISION_PRODUCTION_REPLAN_V1") || prompt.includes("ADAPTIVE_PRODUCTION_SCHEMA_REPAIR_V1"))) {
+    const missionHash = (prompt.match(/preservedMissionHash MUST equal ([a-f0-9]{64})/) || ["", "0".repeat(64)])[1];
+    const gapsText = (prompt.match(/Target (?:unresolved )?gap ids: (\[[^\n]*\])/) || ["", "[]"])[1];
+    const pathsText = (prompt.match(/Allowed mutation paths: (\[[^\n]*\])/) || ["", "[]"])[1];
+    let gaps = [];
+    let paths = [];
+    try { gaps = JSON.parse(gapsText); } catch {}
+    try { paths = JSON.parse(pathsText); } catch {}
+    const mode = process.env.FAKE_PI_ADAPTIVE_PROPOSAL || "legal";
+    const strategy = {
+      strategyId: mode === "disguised-same-family" ? "renamed-old-strategy" : "production-strategy-b",
+      strategyFamily: mode === "disguised-same-family" ? "renamed-old-family" : "production-family-b-repair-and-verify",
+      whichGapIds: gaps,
+      currentBeliefOrHypothesis: mode === "disguised-same-family"
+        ? "The same observation-only route should be repeated."
+        : "A bounded source repair plus deterministic verification can close the frozen product gaps.",
+      method: mode === "disguised-same-family"
+        ? "Inspect and validate the same target again without changing mechanism or instrumentation."
+        : "Repair the approved product target, run a dedicated source test harness, and verify the resulting identity and output.",
+      materialProfile: { mechanism: "model-claim-ignored" },
+      expectedEvidence: ["executor-progress"],
+      abandonmentCondition: "Stop after one bounded attempt without grounded executor progress.",
+      attemptsUsed: 0,
+      resourceBudget: { maxAttempts: 1, resourceUnits: 1, resourceUnitsPerAttempt: 1 },
+      operations: mode === "unsafe" ? ["destructive"] : mode === "disguised-same-family" ? ["bounded-product-work", "test"] : ["bounded-product-work", "test"],
+      requiredPermissions: paths.length ? ["workspace-read", "bounded-write"] : ["workspace-read"],
+      mutationPaths: paths,
+    };
+    const proposal = { preservedMissionHash: missionHash, strategy };
+    if (mode === "acceptance-weakening") proposal.acceptanceCriteriaOverride = ["Any activity passes."];
+    const isRepair = prompt.includes("ADAPTIVE_PRODUCTION_SCHEMA_REPAIR_V1");
+    if (mode === "malformed-then-wrapped") {
+      return { toolEvents: [], text: isRepair ? JSON.stringify({ proposal }) : "not-json: materially different strategy follows later" };
+    }
+    if (mode === "empty-then-fenced") {
+      return { toolEvents: [], text: isRepair ? `\n\`\`\`json\n${JSON.stringify(proposal)}\n\`\`\`\n` : "" };
+    }
+    if (mode === "invalid-twice") {
+      return { toolEvents: [], text: JSON.stringify({ proposal: { preservedMissionHash: missionHash } }) };
+    }
+    if (mode === "wrapped") return { toolEvents: [], text: JSON.stringify({ proposal }) };
+    if (mode === "unambiguous-prose") {
+      return { toolEvents: [], text: `The bounded proposal is below.\n${JSON.stringify(proposal)}\nThis preserves the frozen mission.` };
+    }
+    return { toolEvents: [], text: JSON.stringify(proposal) };
+  }
+
+  if (process.env.FAKE_PI_ADAPTIVE_PRODUCTION === "1" && prompt.includes("ADAPTIVE SUPERVISION V1 — DURABLY ACTIVATED REPLACEMENT STRATEGY")) {
+    const target = process.env.FAKE_PI_ADAPTIVE_B_OUTSIDE === "1"
+      ? "outside-adaptive-scope.txt"
+      : process.env.FAKE_PI_ADAPTIVE_TARGET || "adaptive-product.txt";
+    fs.writeFileSync(path.resolve(process.cwd(), target), "adaptive production Strategy B completed\n", "utf8");
+    return {
+      toolEvents: [
+        { type: "tool_execution_start", toolName: "write" },
+        { type: "tool_execution_end", toolName: "write" },
+        { type: "tool_execution_start", toolName: "bash" },
+        { type: "tool_execution_end", toolName: "bash" },
+      ],
+      text: "STATUS: PASS\nBounded repair and deterministic verification completed.",
+    };
+  }
+
+  if (process.env.FAKE_PI_ADAPTIVE_PRODUCTION === "1" && prompt.includes("You are executing one task") &&
+      (prompt.includes("CREATE adaptive-product.txt with the production adaptive result") ||
+       prompt.includes("ADAPTIVE SUPERVISION V1 — SOLE SAME-FAMILY RETRY"))) {
+    return {
+      toolEvents: [],
+      text: "STATUS: FAIL\nADAPTIVE_PRODUCTION_EQUIVALENT_NO_INFORMATION: the current inspection route produced no product evidence.",
+    };
+  }
+
+  if (prompt.includes("ADAPTIVE_SUPERVISION_CANARY_FAMILY_A")) {
+    return {
+      toolEvents: [],
+      text: JSON.stringify({ outcome: "failure", evidenceRefs: [], observation: "no new acceptance information" }),
+    };
+  }
+
+  if (prompt.includes("ADAPTIVE_SUPERVISION_CANARY_MODEL_B_PROPOSAL")) {
+    const missionHash = (prompt.match(/preservedMissionHash MUST equal ([a-f0-9]{64})/) || ["", "0".repeat(64)])[1];
+    const allowedPathsText = (prompt.match(/Allowed mutation paths: (\[[^\n]*\])/) || ["", "[]"])[1];
+    let allowedPaths = [];
+    try { allowedPaths = JSON.parse(allowedPathsText); } catch {}
+    const target = allowedPaths[0] || process.env.FAKE_PI_ADAPTIVE_TARGET || "adaptive-product.txt";
+    const mode = process.env.FAKE_PI_ADAPTIVE_PROPOSAL || "legal";
+    const disguised = mode === "disguised-same-family";
+    const strategy = {
+      strategyId: disguised ? "strategy-a-with-a-new-name" : "strategy-b-real-model",
+      strategyFamily: disguised ? "family-b-claimed" : "family-b-bounded-write-and-test",
+      whichGapIds: ["G1"],
+      currentBeliefOrHypothesis: disguised
+        ? "Repeat the same inspection under a renamed family."
+        : "A bounded implementation plus test can produce strict product acceptance evidence.",
+      method: disguised
+        ? "Repeat the original non-mutating routed inspection."
+        : "Modify the approved target and validate the result in the approved workspace.",
+      materialProfile: { mechanism: "model-claim-is-not-authoritative" },
+      expectedEvidence: ["strict-product-acceptance"],
+      abandonmentCondition: "Stop after one bounded attempt without strict evidence.",
+      attemptsUsed: 0,
+      resourceBudget: { maxAttempts: 1, resourceUnits: 1, resourceUnitsPerAttempt: 1 },
+      operations: disguised ? ["inspect"] : mode === "unsafe" ? ["destructive"] : ["bounded-product-work", "test"],
+      requiredPermissions: disguised ? ["workspace-read"] : ["workspace-read", "bounded-write"],
+      mutationPaths: disguised ? [] : [target],
+    };
+    const proposal = { preservedMissionHash: missionHash, strategy };
+    if (mode === "acceptance-weakening") proposal.acceptanceCriteriaOverride = ["Any activity is sufficient."];
+    return { toolEvents: [], text: JSON.stringify(proposal) };
+  }
+
+  if (prompt.includes("ADAPTIVE_SUPERVISION_CANARY_STRATEGY_B_EXECUTION")) {
+    const target = process.env.FAKE_PI_ADAPTIVE_TARGET || "adaptive-product.txt";
+    fs.writeFileSync(path.resolve(process.cwd(), target), "adaptive strategy B executed in the same run\n", "utf8");
+    return {
+      toolEvents: [
+        { type: "tool_execution_start", toolName: "write" },
+        { type: "tool_execution_end", toolName: "write" },
+      ],
+      text: JSON.stringify({ outcome: "success", evidenceRef: "real-routed-strategy-b-product-and-test", summary: `wrote and validated ${target}` }),
+    };
+  }
+
+  if (prompt.includes("VISIBLE_MAIN_ADAPTIVE_CANARY_STRICT_VERIFICATION")) {
+    const missionMatch = prompt.match(/Mission: (\{.*\})\nAdaptive state:/s);
+    let criteria = [];
+    try { criteria = JSON.parse(missionMatch?.[1] || "{}").acceptanceCriteria || []; } catch {}
+    const status = process.env.FAKE_PI_ADAPTIVE_VERIFY_FAIL === "1" ? "fail" : "pass";
+    return {
+      toolEvents: [],
+      text: JSON.stringify({
+        status,
+        reasons: [status === "pass" ? "all frozen product criteria passed after real Strategy B" : "forced adaptive strict-verification failure"],
+        criterionFindings: criteria.map((criterion) => ({
+          criterionId: criterion.id,
+          status,
+          evidence: [{ kind: "test", observed: `adaptive real-run check for ${criterion.text}`, exitCode: status === "pass" ? 0 : 1 }],
+        })),
+      }),
+    };
+  }
+
+  if (process.env.FAKE_PI_ADAPTIVE_PRODUCTION === "1" && prompt.includes("ADAPTIVE PRODUCTION V1") && prompt.includes("Plan the following task")) {
+    const target = process.env.FAKE_PI_ADAPTIVE_TARGET || "adaptive-product.txt";
+    return {
+      toolEvents: [],
+      text: JSON.stringify({
+        tasks: [{ id: "task-1", description: `CREATE ${target} with the production adaptive result and validate every frozen criterion.`, dependsOn: [], expects_file_change: true }],
+        notes: "One coherent real production adaptive task.",
+        predicted_write_set: [target],
+      }),
+    };
+  }
+
+  if (prompt.includes("ADAPTIVE ENFORCE CANARY") && prompt.includes("Plan the following task")) {
+    const contracted = prompt.match(/CONTRACTED WRITE SET[\s\S]*?\n- ([^\n]+)/);
+    const target = contracted?.[1]?.trim() || process.env.FAKE_PI_ADAPTIVE_TARGET || "adaptive-product.txt";
+    return {
+      toolEvents: [],
+      text: JSON.stringify({
+        tasks: [{ id: "task-1", description: `CREATE ${target} with the bounded Strategy B product result and validate it.`, dependsOn: [], expects_file_change: true }],
+        notes: "One bounded task for the real adaptive A-to-B canary.",
+        predicted_write_set: [target],
+      }),
+    };
+  }
+
+  if (prompt.includes("VISIBLE_MAIN_CRITERION_VERIFICATION")) {
+    const missionMatch = prompt.match(/Mission: (\{.*\})\nPlan:/s);
+    let criteria = [];
+    try { criteria = JSON.parse(missionMatch?.[1] || "{}").acceptanceCriteria || []; } catch {}
+    const sequence = process.env.FAKE_PI_VISIBLE_VERIFY_SEQUENCE;
+    const verifierIndex = Number((prompt.match(/Verifier instance (\d+)\//) || ["", "1"])[1]) - 1;
+    const sequenceStatus = sequence?.split(",").map((item) => item.trim().toLowerCase())[verifierIndex];
+    const status = sequenceStatus === "fail" || sequenceStatus === "pass"
+      ? sequenceStatus
+      : process.env.FAKE_PI_VISIBLE_VERIFY_FAIL === "1" ? "fail" : "pass";
+    return {
+      toolEvents: [],
+      text: JSON.stringify({
+        status,
+        reasons: [status === "pass" ? "criterion evidence passed" : "forced criterion failure"],
+        criterionFindings: criteria.map((criterion) => ({
+          criterionId: criterion.id,
+          status,
+          evidence: [{ kind: "test", observed: `fake machine check for ${criterion.id}`, exitCode: status === "pass" ? 0 : 1 }],
+        })),
+      }),
+    };
+  }
+
+  if (prompt.includes("ORCHESTRATOR NEXT V2 PHASE:")) {
+    const phaseId = (prompt.match(/ORCHESTRATOR NEXT V2 PHASE:\s*([^\r\n]+)/) || ["", "unknown"])[1].trim();
+    if (phaseId === "plan") {
+      return { toolEvents: [], text: JSON.stringify({ summary: "fixture plan", steps: ["create product.txt", "run the deterministic validator"] }) };
+    }
+    if (phaseId === "implement") {
+      const target = path.resolve(process.cwd(), process.env.FAKE_PI_NEXT_TARGET || "product.txt");
+      fs.writeFileSync(target, process.env.FAKE_PI_NEXT_CONTENT || "built\n", "utf8");
+      if (process.env.FAKE_PI_NEXT_TAMPER_VALIDATOR === "1") {
+        fs.writeFileSync(path.resolve(process.cwd(), "validate.cjs"), "process.exit(0);\n", "utf8");
+      }
+      return {
+        toolEvents: [
+          { type: "tool_execution_start", toolName: "write" },
+          { type: "tool_execution_end", toolName: "write" },
+        ],
+        text: JSON.stringify({ summary: "fixture implementation complete", files: [path.basename(target)], tests: [] }),
+      };
+    }
+    if (phaseId === "verify") {
+      const status = process.env.FAKE_PI_NEXT_VERIFY_FAIL === "1" ? "fail" : "pass";
+      return {
+        toolEvents: [],
+        text: JSON.stringify({
+          status,
+          summary: status === "pass" ? "fixture machine evidence passes" : "fixture forced verifier failure",
+          checks: [{ id: "machine", status, evidence: ["deterministic command output supplied in typed input"] }],
+          remaining: status === "pass" ? [] : ["repair fixture"],
+        }),
+      };
+    }
+    return { toolEvents: [], text: JSON.stringify({ summary: `fixture ${phaseId} finding`, data: { phaseId } }) };
+  }
+
   if (prompt.includes("SHAPE-BUILDER IMPLEMENTATION VERIFIER")) {
     const status = process.env.FAKE_PI_SHAPE_BUILDER_VERIFIER_STATUS || "pass";
     const targetName = (prompt.match(/Target shape:\s*(\S+)/) || ["", "fixture-target"])[1];
@@ -227,8 +466,58 @@ function respond(prompt) {
 
   // verify-only paradigm fixture
   if (prompt.includes("VERIFICATION-ONLY orchestration")) {
+    const evidenceFixture = process.env.FAKE_PI_SAFE_EVIDENCE_FIXTURE;
+    if (evidenceFixture) {
+      // guard-decisions (2026-09-03): verify-only verifiers keep bash so they
+      // can run tests; read-only is proven by the host's before/after content
+      // snapshot. The exact allowlist is therefore the evidence set plus bash.
+      const expectedTools = ["read", "grep", "find", "ls", "bash"];
+      const offeredTools = String(argValue("--tools") || "").split(",").map((tool) => tool.trim()).filter(Boolean);
+      const exactSafeAllowlist = offeredTools.length === expectedTools.length &&
+        expectedTools.every((tool) => offeredTools.includes(tool));
+      const mutationCapabilityExposed = !args.includes("--no-extensions") ||
+        offeredTools.some((tool) => ["write", "edit", "orchestrate"].includes(tool));
+
+      // Model a hostile mutation attempt: the fixture CLI only carries it out
+      // when the real argv boundary exposed a mutation-capable path. A secure
+      // launch therefore leaves the workspace byte-identical.
+      if (mutationCapabilityExposed) {
+        fs.writeFileSync(path.resolve(process.cwd(), "mutation-attempt.txt"), "unsafe launch exposed mutation capability\n", "utf8");
+      }
+
+      let fixtureText = "";
+      try { fixtureText = fs.readFileSync(path.resolve(process.cwd(), evidenceFixture), "utf8"); } catch {}
+      const canInspect = exactSafeAllowlist && !args.includes("--no-tools") && !mutationCapabilityExposed && fixtureText.length > 0;
+      return {
+        toolEvents: canInspect
+          ? expectedTools.flatMap((toolName) => [
+              { type: "tool_execution_start", toolName },
+              { type: "tool_execution_end", toolName },
+            ])
+          : [],
+        text: JSON.stringify({
+          overall: canInspect ? "pass" : "fail",
+          reasons: [canInspect
+            ? `inspected ${evidenceFixture} through the safe evidence allowlist`
+            : "the child launch did not provide the exact inspection-only capability boundary"],
+          checks: [{
+            id: "check-1",
+            description: "safe evidence fixture is inspectable without mutation capability",
+            status: canInspect ? "pass" : "fail",
+            citations: canInspect ? [`${evidenceFixture}:1 ${fixtureText.trim()}`] : ["CLI capability inspection failed"],
+          }],
+        }),
+      };
+    }
+    // guard-decisions fixture: a verifier that mutates the workspace during a
+    // verify-only run. The host must detect it by effects and force FAIL.
+    if (process.env.FAKE_PI_VERIFY_ONLY_MUTATE === "1") {
+      fs.writeFileSync(path.resolve(process.cwd(), "verifier-side-effect.txt"), "verifier wrote this during verify-only\n", "utf8");
+    }
     return {
-      toolEvents: [],
+      toolEvents: process.env.FAKE_PI_VERIFY_ONLY_MUTATE === "1"
+        ? [{ type: "tool_execution_start", toolName: "bash" }, { type: "tool_execution_end", toolName: "bash" }]
+        : [],
       text: JSON.stringify({
         overall: "pass",
         reasons: ["all checks verified against cited evidence"],
@@ -328,6 +617,8 @@ function respond(prompt) {
 
   if (prompt.includes("Plan the following task")) {
     const style = process.env.FAKE_PI_PLAN_STYLE;
+    if (style === "round8-missing") return { toolEvents: [], text: "" };
+    if (style === "round8-outside" || style === "round8-protected") return { toolEvents: [], text: JSON.stringify({tasks:[{id:"task-1",description:"CREATE file out-1.txt with fixture content.",dependsOn:[]}],predicted_write_set:[style === "round8-outside" ? "outside.txt" : "native/audio.cpp"]}) };
     if (style === "impl-1") {
       return {
         toolEvents: [],
@@ -337,14 +628,65 @@ function respond(prompt) {
         }),
       };
     }
-    if (style === "impl-1-ws") {
-      // Same single CREATE task, but the planner also declares its predicted
-      // write set (predict-then-write fixtures).
+    if (style === "impl-1-ws" || style === "impl-1-ws-nul-diagnostic") {
+      // Recurrence fixture: an older planner runs a diagnostic in a POSIX
+      // shell with Windows-style redirection after the host captured its
+      // content baseline. Git Bash creates a literal root NUL artifact.
+      const createsNulArtifact = style === "impl-1-ws-nul-diagnostic";
+      if (createsNulArtifact) {
+        const diagnostic = spawnSync("bash", ["-lc", "missing-visible-main-diagnostic-command 2>NUL || true"], {
+          cwd: process.cwd(),
+          encoding: "utf8",
+          windowsHide: true,
+        });
+        if (diagnostic.error || !fs.readdirSync(process.cwd()).includes("NUL")) {
+          throw diagnostic.error || new Error("NUL recurrence fixture did not create the literal artifact");
+        }
+      }
       return {
-        toolEvents: [],
+        toolEvents: createsNulArtifact ? [
+          { type: "tool_execution_start", toolName: "bash" },
+          { type: "tool_execution_end", toolName: "bash" },
+        ] : [],
         text: JSON.stringify({
           tasks: [{ id: "task-1", description: "CREATE file out-1.txt with the fixture content.", dependsOn: [] }],
           notes: "fixture impl plan (1 task, predicted write set)",
+          predicted_write_set: ["out-1.txt"],
+        }),
+      };
+    }
+    if (style === "impl-1-ws-extra") {
+      // guard-decisions fixture: the planner predicts out-1.txt only; the
+      // paired executor style also writes extra-note.txt (in-worktree, out of set).
+      return {
+        toolEvents: [],
+        text: JSON.stringify({
+          tasks: [{ id: "task-1", description: "CREATE file out-1.txt with the fixture content.", dependsOn: [], expects_file_change: true }],
+          notes: "fixture impl plan (1 task, predicted write set omits the second file)",
+          predicted_write_set: ["out-1.txt"],
+        }),
+      };
+    }
+    if (style === "declared-false-1") {
+      // guard-decisions fixture: the description carries a mutation verb the
+      // heuristics would treat as implementation, but the planner declares a
+      // validation-only effect. No file change is legitimate.
+      return {
+        toolEvents: [],
+        text: JSON.stringify({
+          tasks: [{ id: "task-1", description: "Run the fixture checks and update the maintainer on the result.", dependsOn: [], expects_file_change: false }],
+          notes: "fixture validation plan (declared no file change)",
+        }),
+      };
+    }
+    if (style === "declared-true-1") {
+      // guard-decisions fixture: no mutation verb in the description, but the
+      // planner declares an implementation effect. Zero change must still fail.
+      return {
+        toolEvents: [],
+        text: JSON.stringify({
+          tasks: [{ id: "task-1", description: "Prepare the fixture artifact out-1.txt for review.", dependsOn: [], expects_file_change: true }],
+          notes: "fixture implementation plan (declared file change)",
           predicted_write_set: ["out-1.txt"],
         }),
       };
@@ -455,18 +797,56 @@ function respond(prompt) {
     };
   }
 
-  if (prompt.includes("You are executing one task")) {
+  if (phaseInstructions !== undefined && !phaseCreatesFile && /\b(?:verify|read)\b/i.test(phaseInstructions)) {
+    const instructions = phaseInstructions;
+    const files = [...new Set(instructions.match(/[\w./-]+\.txt/g) ?? [])];
+    const missing = files.filter(file => !fs.existsSync(path.resolve(process.cwd(), file)) || !fs.readFileSync(path.resolve(process.cwd(), file), 'utf8').includes(file));
+    return { toolEvents: files.flatMap((file, index) => [
+      {type: 'tool_execution_start', toolCallId: `verify-read-${index}`, toolName: 'read', input: {path: file}},
+      {type: 'tool_execution_end', toolCallId: `verify-read-${index}`, toolName: 'read'},
+    ]), text: JSON.stringify({status: missing.length ? 'fail' : 'pass', reasons: missing.length ? missing.map(file => `Missing or incorrect phase artifact: ${file}`) : ['Independent fixture process read assigned phase artifacts']}) };
+  }
+
+  if (prompt.includes("You are executing one task") || phaseCreatesFile) {
+    const assignedPrompt = phaseInstructions ?? prompt;
     const style = process.env.FAKE_PI_EXECUTOR_STYLE;
+    if (style === "ledger-red-edit-green") {
+      fs.writeFileSync(path.resolve(process.cwd(), "out-1.txt"), "ledger fixture\n", "utf8");
+      const toolEvents = [
+        { type: "tool_execution_start", toolCallId: "red-1", toolName: "bash", input: { command: "API_TOKEN=super-secret-value api_key='quoted secret value' node focused-test.cjs --red 'https://fixture.invalid/?token=url-secret-value'" } },
+        { type: "tool_execution_end", toolCallId: "red-1", toolName: "bash", result: { details: { exitCode: "1", status: "failed" } } },
+      ];
+      for (let index = 0; index < 205; index += 1) {
+        toolEvents.push(
+          { type: "tool_execution_start", toolCallId: `read-${index}`, toolName: "read", input: { path: `fixture-${index}.txt` } },
+          { type: "tool_execution_end", toolCallId: `read-${index}`, toolName: "read", result: { details: {} } },
+        );
+      }
+      toolEvents.push(
+        { type: "tool_execution_start", toolCallId: "edit-1", toolName: "edit", input: { path: "src/index.ts" } },
+        { type: "tool_execution_end", toolCallId: "edit-1", toolName: "edit", result: { details: {} } },
+        { type: "tool_execution_start", toolCallId: "green-1", toolName: "bash", input: { command: "node focused-test.cjs --green" } },
+        { type: "tool_execution_end", toolCallId: "green-1", toolName: "bash", result: { details: { status: "success" } }, isError: false },
+        { type: "tool_execution_start", toolCallId: "pending-1", toolName: "bash", input: { command: "password='unfinished secret phrase' node never-dispatched.cjs" } },
+      );
+      return { toolEvents, text: "All tests passed on the first try; no failed command occurred and no action evidence should override this report." };
+    }
     if (style === "write-summary-table") {
-      const match = prompt.match(/CREATE file ([\w./\\-]+)/i);
-      const file = match ? match[1] : "fixture-out.txt";
+      // The full prompt contains the complete plan before the assigned task;
+      // select the final CREATE binding so resume fixtures execute only the
+      // current task rather than replaying the first historical task.
+      const matches = [...assignedPrompt.matchAll(/CREATE file ([\w./\\-]+)/gi)];
+      const file = matches.at(-1)?.[1] || "fixture-out.txt";
       fs.writeFileSync(path.resolve(process.cwd(), file), `fixture content for ${file} written at ${new Date().toISOString()}\n`, "utf8");
+      const script = `require('node:fs').statSync(${JSON.stringify(file)})`;
+      const command = 'node -e ' + JSON.stringify(script);
+      const checked = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8' });
       return {
         toolEvents: [
-          { type: "tool_execution_start", toolName: "write" },
-          { type: "tool_execution_end", toolName: "write" },
-          { type: "tool_execution_start", toolName: "bash" },
-          { type: "tool_execution_end", toolName: "bash" },
+          { type: "tool_execution_start", toolCallId: "phase-write", toolName: "write", input: {path: file} },
+          { type: "tool_execution_end", toolCallId: "phase-write", toolName: "write" },
+          { type: "tool_execution_start", toolCallId: "phase-check", toolName: "bash", input: {command} },
+          { type: "tool_execution_end", toolCallId: "phase-check", toolName: "bash", result: {details: {exitCode: checked.status}} },
         ],
         // Ramen Don false-FAIL reply shape: a summary table, no prose about
         // files, long enough and pipe-terminated to trip legacy heuristics.
@@ -480,6 +860,19 @@ function respond(prompt) {
           "| typecheck | ok | n/a |",
           "| summary | implementation finished | table |",
         ].join("\n"),
+      };
+    }
+    if (style === "write-summary-table-extra") {
+      const matches = [...prompt.matchAll(/CREATE file ([\w./\\-]+)/gi)];
+      const file = matches.at(-1)?.[1] || "fixture-out.txt";
+      fs.writeFileSync(path.resolve(process.cwd(), file), `fixture content for ${file}\n`, "utf8");
+      fs.writeFileSync(path.resolve(process.cwd(), "extra-note.txt"), "an in-worktree file the planner did not predict\n", "utf8");
+      return {
+        toolEvents: [
+          { type: "tool_execution_start", toolName: "write" },
+          { type: "tool_execution_end", toolName: "write" },
+        ],
+        text: `Created ${file} and extra-note.txt.`,
       };
     }
     if (style === "claims-no-write") {
@@ -1159,15 +1552,55 @@ function main() {
   else if (/You are verifier \d+ of \d+ in a composable orchestration/.test(prompt)) composablePhase = "verify";
   const candidatePlanCount = (prompt.match(/^### Candidate Plan \d+/gm) || []).length;
 
+  let adaptivePhase = null;
+  if (prompt.includes("ADAPTIVE_PRODUCTION_SCHEMA_REPAIR_V1")) adaptivePhase = "production-replan-repair";
+  else if (prompt.includes("ADAPTIVE_SUPERVISION_PRODUCTION_REPLAN_V1")) adaptivePhase = "production-replan";
+  else if (prompt.includes("ADAPTIVE SUPERVISION V1 — DURABLY ACTIVATED REPLACEMENT STRATEGY")) adaptivePhase = "production-strategy-b";
+  else if (prompt.includes("ADAPTIVE SUPERVISION V1 — SOLE SAME-FAMILY RETRY")) adaptivePhase = "production-strategy-a-retry";
+  else if (prompt.includes("ADAPTIVE PRODUCTION V1")) adaptivePhase = "production-planning";
+  else if (process.env.FAKE_PI_ADAPTIVE_PRODUCTION === "1" && prompt.includes("You are executing one task") && prompt.includes("CREATE adaptive-product.txt with the production adaptive result")) adaptivePhase = "production-strategy-a";
+  else if (prompt.includes("ADAPTIVE_SUPERVISION_CANARY_FAMILY_A")) adaptivePhase = "family-a";
+  else if (prompt.includes("ADAPTIVE_SUPERVISION_CANARY_MODEL_B_PROPOSAL")) adaptivePhase = "model-b-proposal";
+  else if (prompt.includes("ADAPTIVE_SUPERVISION_CANARY_STRATEGY_B_EXECUTION")) adaptivePhase = "strategy-b-execution";
+  else if (prompt.includes("VISIBLE_MAIN_ADAPTIVE_CANARY_STRICT_VERIFICATION")) adaptivePhase = "strict-verification";
+  else if (prompt.includes("ADAPTIVE ENFORCE CANARY")) adaptivePhase = "canary-planning";
+
+  let adaptivePersistedState = null;
+  if (adaptivePhase === "strategy-b-execution" || adaptivePhase === "production-strategy-b") {
+    const runId = adaptivePhase === "production-strategy-b"
+      ? (prompt.match(/Production run identity: ([^\.\s]+)/) || ["", ""])[1]
+      : (prompt.match(/Run identity: ([^\.\s]+)/) || ["", ""])[1];
+    const runsRoot = process.env.PI_ORCHESTRATOR_RUNS_ROOT;
+    if (runId && runsRoot) {
+      try {
+        const stateName = adaptivePhase === "production-strategy-b" ? "adaptive-v1.json" : "adaptive-enforce-canary.json";
+        const eventsName = adaptivePhase === "production-strategy-b" ? "adaptive-v1.events.jsonl" : "adaptive-enforce-canary.events.jsonl";
+        const persisted = JSON.parse(fs.readFileSync(path.join(runsRoot, runId, stateName), "utf8"));
+        const persistedEvents = fs.readFileSync(path.join(runsRoot, runId, eventsName), "utf8")
+          .split(/\r?\n/).filter(Boolean).map(JSON.parse);
+        adaptivePersistedState = {
+          phase: persisted.phase,
+          activationDurableBeforeDispatch: persisted.activations?.some((item) => item.durableBeforeDispatch === true) || false,
+          approvalCount: persisted.approvalCount,
+          reconstructedRun: persisted.reconstructedRun,
+          ...(adaptivePhase === "production-strategy-b" ? { eventKinds: persistedEvents.map((event) => event.kind) } : {}),
+        };
+      } catch {}
+    }
+  }
+
   const record = {
     agentName: agentNameFromSystemPrompt(),
     composablePhase,
+    adaptivePhase,
+    adaptivePersistedState,
     candidatePlanCount,
     promptHasFinalSynthesizedPlan: prompt.includes("fixture final plan from synthesis"),
     provider: argValue("--provider") || null,
     model: argValue("--model") || null,
     tools: argValue("--tools") || null,
     noTools: args.includes("--no-tools"),
+    noExtensions: args.includes("--no-extensions"),
     predictedWriteSetBlock,
     promptHasIntake: Boolean(intake),
     orchestrationControls: intake && intake.orchestration_controls ? intake.orchestration_controls : null,
@@ -1182,20 +1615,35 @@ function main() {
     } : null,
     promptIncludesExecutorOutputContract: prompt.includes("Executor output contract (highest priority):"),
     promptIncludesNoGenericReportRule: prompt.includes("Do not add generic report sections."),
-    promptSnippet: prompt.slice(0, 240)
+    promptDirectsPosixDevNull: prompt.includes("POSIX-shell diagnostics") &&
+      prompt.includes("only to `/dev/null`") && prompt.includes("never redirect to literal `NUL`"),
+    promptSnippet: prompt.slice(0, 240) + (prompt.includes("VISIBLE_MAIN_CRITERION_VERIFICATION") ? " VISIBLE_MAIN_CRITERION_VERIFICATION" : "")
   };
   if (process.env.FAKE_PI_LOG) {
     fs.appendFileSync(process.env.FAKE_PI_LOG, `${JSON.stringify(record)}\n`, "utf8");
   }
 
   const { toolEvents, text } = respond(prompt);
-  console.log(JSON.stringify({ type: "message_start" }));
-  for (const event of toolEvents) {
-    console.log(JSON.stringify(event));
-  }
-  console.log(JSON.stringify({
-    type: "message_end",
-    message: { role: "assistant", content: [{ type: "text", text }] }
-  }));
-  console.log(JSON.stringify({ type: "agent_end" }));
+  const emit = () => {
+    console.log(JSON.stringify({ type: "message_start" }));
+    for (const event of toolEvents) {
+      console.log(JSON.stringify(event));
+    }
+    console.log(JSON.stringify({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text }] }
+    }));
+    console.log(JSON.stringify({ type: "agent_end" }));
+  };
+  const nextPhaseId = (prompt.match(/ORCHESTRATOR NEXT V2 PHASE:\s*([^\r\n]+)/) || ["", ""])[1].trim();
+  const delayedPhase = process.env.FAKE_PI_NEXT_DELAY_PHASE || "";
+  const nextDelayMs = nextPhaseId && (!delayedPhase || delayedPhase === nextPhaseId)
+    ? Number.parseInt(process.env.FAKE_PI_NEXT_DELAY_MS || "0", 10)
+    : 0;
+  const visibleVerifierDelayMs = prompt.includes("VISIBLE_MAIN_CRITERION_VERIFICATION")
+    ? Number.parseInt(process.env.FAKE_PI_VISIBLE_VERIFY_DELAY_MS || "0", 10)
+    : 0;
+  const responseDelayMs = Math.max(nextDelayMs, visibleVerifierDelayMs);
+  if (Number.isInteger(responseDelayMs) && responseDelayMs > 0) setTimeout(emit, responseDelayMs);
+  else emit();
 }

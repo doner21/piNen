@@ -29,10 +29,17 @@ import {
   type SubagentResult,
 } from "./substrate";
 import { RunStateStore, collectSurvivorResult, type LoadedRunState } from "./run-state";
-import type { OrchestrationShapeContext, OrchestrationShapeResult } from "./types";
+import {
+  GENERIC_EXECUTOR_SHAPE_EXECUTION,
+  GENERIC_SHAPE_ADAPTER_ID,
+  resolveShapeSupervision,
+} from "./supervision";
+import type { OrchestrationShapeContext, OrchestrationShapeResult, ShapeExecutionContract } from "./types";
 
 export const DYNAMIC_WORKFLOW_SCHEMA_VERSION = 1 as const;
 export const DYNAMIC_WORKFLOW_FILE_SUFFIX = ".workflow.json";
+/** Host-owned capability; workflow documents cannot self-declare or weaken it. */
+export const DYNAMIC_WORKFLOW_EXECUTION: ShapeExecutionContract = GENERIC_EXECUTOR_SHAPE_EXECUTION;
 export const DYNAMIC_WORKFLOW_LIMITS = Object.freeze({
   MAX_ARTIFACT_BYTES: 256 * 1024,
   MAX_NAME_CHARS: 64,
@@ -111,6 +118,8 @@ export interface DynamicWorkflowProvenance {
 export interface ResolvedDynamicWorkflow {
   workflow: DynamicWorkflowIR;
   provenance: DynamicWorkflowProvenance;
+  /** Injected by the trusted host resolver, never read from user workflow JSON. */
+  execution: ShapeExecutionContract;
 }
 
 export interface WorkflowRoots {
@@ -219,6 +228,7 @@ export function loadDynamicWorkflowArtifact(
   const validatedSnapshot = cloneSnapshot(workflow);
   return {
     workflow: validatedSnapshot,
+    execution: DYNAMIC_WORKFLOW_EXECUTION,
     provenance: {
       sourcePath,
       scope,
@@ -366,6 +376,7 @@ export function resolvePinnedDynamicWorkflow(
   }
   return {
     workflow,
+    execution: DYNAMIC_WORKFLOW_EXECUTION,
     provenance: {
       sourcePath,
       scope: "pinned",
@@ -654,6 +665,17 @@ function hashSnapshot(snapshot: DynamicWorkflowIR): string {
 
 /** Verify that the executable IR still exactly matches its pinned provenance. */
 function assertResolvedWorkflowIntegrity(resolved: ResolvedDynamicWorkflow): DynamicWorkflowIR {
+  const capability = resolveShapeSupervision(resolved.execution);
+  if (
+    capability.disposition !== "supervised" ||
+    capability.classification !== "executor-bearing" ||
+    capability.identity.adapterId !== GENERIC_SHAPE_ADAPTER_ID
+  ) {
+    throw new DynamicWorkflowError(
+      "INVALID_WORKFLOW_EXECUTION_CAPABILITY",
+      "Resolved workflow is missing the host-owned generic task-boundary supervision capability.",
+    );
+  }
   const workflow = validateDynamicWorkflow(resolved.workflow, { expectedName: resolved.workflow?.name });
   const provenance = expectRecord(resolved.provenance, "workflow provenance");
   rejectUnknownKeys(provenance, PROVENANCE_KEYS, "workflow provenance");

@@ -13,6 +13,9 @@ This repository contains the **harness and its capabilities**, not the publisher
 - **Graphify Brain:** code, skills, autonomous maintenance, global-graph maintenance, and an empty memory store ready for each installation.
 - **Continuity:** delayed wake-ups, agent-operated reload/new-session bridges, context monitoring, handoff workflows, and the optional Pi core patch.
 - **Tooling and integrations:** Playwright/browser search, Tavily/MCP gateway, Gmail, Telegram, Spotify MCP, Railway, GoDaddy domains, Supabase guidance, documents/spreadsheets/slides/PDFs, image/media workflows, and more.
+- **Headless orchestration:** run `/orchestrate` in a detached host so the coordinating session stays free to talk, with automatic plan approval for approved briefs (`agent/skills/headless-orchestration`).
+- **Lean working method:** a short, reasoned rule set for long autonomous work: hard safety lines, proof by a failing-then-passing test, owner real-use tests as the definition of done, blind re-planning after a failed fix, and standing permissions so questions never stop a run (`agent/docs/lean-working-method.md`, `agent/docs/standing-permissions.md`).
+- **Telegram topics:** one forum topic per Pi window, so each session can be followed and answered from a phone (`agent/telegram-pi`).
 - **Safety:** destructive-command confirmation, isolated Git backup refs, gitleaks configuration, secret-safe templates, no committed auth, and no project/session/runtime data.
 
 See [CAPABILITIES.md](CAPABILITIES.md) for the complete inventory.

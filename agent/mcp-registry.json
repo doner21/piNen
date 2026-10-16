@@ -26,17 +26,17 @@
       "browser_tabs",
       "browser_wait_for"
     ],
-    "connectedAt": 1786046284304
+    "connectedAt": 1791548330772
   },
   {
     "id": "godaddy-mcp",
     "label": "GoDaddy MCP",
-    "status": "connected",
+    "status": "disconnected",
     "tools": [
       "domains_suggest",
       "domains_check_availability"
     ],
-    "connectedAt": 1786123927054
+    "connectedAt": 1792144768985
   },
   {
     "id": "railway-mcp",
@@ -76,6 +76,6 @@
       "update_volume",
       "whoami"
     ],
-    "connectedAt": 1786123927414
+    "connectedAt": 1792144774010
   }
 ]

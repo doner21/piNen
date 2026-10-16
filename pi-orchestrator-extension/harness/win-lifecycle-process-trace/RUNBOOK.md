@@ -47,7 +47,7 @@ Write-Host "Run directory: $env:RUN_DIR"
 # 1. Start the polling listener (hidden, auto-stops after 120s by default)
 Start-Process powershell -ArgumentList (
     "-NoProfile -WindowStyle Hidden -File `"" +
-    "~\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Start-PiPollingTrace.ps1`"" +
+    "C:\Users\you\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Start-PiPollingTrace.ps1`"" +
     " -RunId `"$env:RUN_ID`"" +
     " -OutputPath `"$env:RUN_DIR`"" +
     " -DurationSeconds 120" +
@@ -70,12 +70,12 @@ if (Test-Path (Join-Path $env:RUN_DIR ".trace-subscriber.txt")) {
 # Follow procedures in sections 4-7 below
 
 # 3. Stop the polling listener
-& "~\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Stop-PiPollingTrace.ps1" `
+& "C:\Users\you\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Stop-PiPollingTrace.ps1" `
     -RunId $env:RUN_ID `
     -OutputPath $env:RUN_DIR
 
 # 4. Correlate evidence
-& "~\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Merge-PiPollingEvidence.ps1" `
+& "C:\Users\you\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Merge-PiPollingEvidence.ps1" `
     -RunId $env:RUN_ID `
     -OutputPath $env:RUN_DIR
 ```
@@ -124,7 +124,7 @@ Temp root convention from planner: `%TEMP%\pi-lifecycle-trace\<run_id>\`
 
 ```powershell
 # In a PowerShell window (keep this open for the entire session):
-& "~\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Start-PiLifecycleTrace.ps1" `
+& "C:\Users\you\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Start-PiLifecycleTrace.ps1" `
     -RunId $env:RUN_ID `
     -OutputPath $env:RUN_DIR `
     -PiExecutableName "pi.exe"
@@ -141,7 +141,7 @@ Follow the path-specific procedures in §4–§7. Use `Write-PiLifecycleMarker.p
 When all lifecycle paths are complete:
 
 ```powershell
-& "~\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Stop-PiLifecycleTrace.ps1" `
+& "C:\Users\you\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Stop-PiLifecycleTrace.ps1" `
     -RunId $env:RUN_ID `
     -OutputPath $env:RUN_DIR
 ```
@@ -150,14 +150,14 @@ When all lifecycle paths are complete:
 
 **For WMI Event Mode:**
 ```powershell
-& "~\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Merge-PiLifecycleEvidence.ps1" `
+& "C:\Users\you\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Merge-PiLifecycleEvidence.ps1" `
     -RunId $env:RUN_ID `
     -OutputPath $env:RUN_DIR
 ```
 
 **For Polling Mode:**
 ```powershell
-& "~\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Merge-PiPollingEvidence.ps1" `
+& "C:\Users\you\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Merge-PiPollingEvidence.ps1" `
     -RunId $env:RUN_ID `
     -OutputPath $env:RUN_DIR
 ```
@@ -187,7 +187,7 @@ Output files:
 # Step 1: Ensure trace listener is running (see §3.1)
 
 # Step 2: Write COLD_START_BEGIN marker
-& "~\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
+& "C:\Users\you\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
     -MarkerName "COLD_START_BEGIN" `
     -RunId $env:RUN_ID `
     -OutputPath $env:RUN_DIR `
@@ -202,7 +202,7 @@ Output files:
 # Step 4: Wait for Pi to visibly render (TUI appears in terminal)
 
 # Step 5: Write COLD_START_FIRST_RENDER marker
-& "~\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
+& "C:\Users\you\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
     -MarkerName "COLD_START_FIRST_RENDER" `
     -RunId $env:RUN_ID `
     -OutputPath $env:RUN_DIR `
@@ -211,7 +211,7 @@ Output files:
 # Step 6: Wait for Pi to stabilize (model loaded, prompt visible, no startup messages)
 
 # Step 7: Write COLD_START_END marker
-& "~\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
+& "C:\Users\you\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
     -MarkerName "COLD_START_END" `
     -RunId $env:RUN_ID `
     -OutputPath $env:RUN_DIR `
@@ -257,7 +257,7 @@ $SHELL_KIND = if ($PSVersionTable.PSEdition -eq "Core") { "pwsh" } else { "power
 # For Windows Terminal: use Get-Process WindowsTerminal | Select-Object Id
 
 # Step 2: Write OPEN_FROM_TERMINAL_BEGIN marker
-& "~\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
+& "C:\Users\you\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
     -MarkerName "OPEN_FROM_TERMINAL_BEGIN" `
     -RunId $env:RUN_ID `
     -OutputPath $env:RUN_DIR `
@@ -271,7 +271,7 @@ $SHELL_KIND = if ($PSVersionTable.PSEdition -eq "Core") { "pwsh" } else { "power
 # Step 4: Press Enter to execute the command
 
 # Step 5: IMMEDIATELY write OPEN_FROM_TERMINAL_COMMAND_SENT marker
-& "~\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
+& "C:\Users\you\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
     -MarkerName "OPEN_FROM_TERMINAL_COMMAND_SENT" `
     -RunId $env:RUN_ID `
     -OutputPath $env:RUN_DIR `
@@ -282,7 +282,7 @@ $SHELL_KIND = if ($PSVersionTable.PSEdition -eq "Core") { "pwsh" } else { "power
 # Step 6: Wait for Pi TUI to appear in terminal
 
 # Step 7: Write OPEN_FROM_TERMINAL_ATTACHED marker
-& "~\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
+& "C:\Users\you\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
     -MarkerName "OPEN_FROM_TERMINAL_ATTACHED" `
     -RunId $env:RUN_ID `
     -OutputPath $env:RUN_DIR `
@@ -293,7 +293,7 @@ $SHELL_KIND = if ($PSVersionTable.PSEdition -eq "Core") { "pwsh" } else { "power
 # Step 8: Wait for Pi to stabilize
 
 # Step 9: Write OPEN_FROM_TERMINAL_END marker
-& "~\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
+& "C:\Users\you\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
     -MarkerName "OPEN_FROM_TERMINAL_END" `
     -RunId $env:RUN_ID `
     -OutputPath $env:RUN_DIR `
@@ -338,7 +338,7 @@ $SHELL_KIND = if ($PSVersionTable.PSEdition -eq "Core") { "pwsh" } else { "power
 #    $PI_PID = (Get-Process -Name "pi" -ErrorAction SilentlyContinue | Select-Object -First 1).Id
 
 # Step 2: Write RELOAD_BEGIN marker
-& "~\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
+& "C:\Users\you\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
     -MarkerName "RELOAD_BEGIN" `
     -RunId $env:RUN_ID `
     -OutputPath $env:RUN_DIR `
@@ -348,7 +348,7 @@ $SHELL_KIND = if ($PSVersionTable.PSEdition -eq "Core") { "pwsh" } else { "power
 # Step 3: Type '/reload' in Pi and press Enter
 
 # Step 4: IMMEDIATELY write RELOAD_TRIGGER_SENT marker
-& "~\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
+& "C:\Users\you\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
     -MarkerName "RELOAD_TRIGGER_SENT" `
     -RunId $env:RUN_ID `
     -OutputPath $env:RUN_DIR `
@@ -358,7 +358,7 @@ $SHELL_KIND = if ($PSVersionTable.PSEdition -eq "Core") { "pwsh" } else { "power
 # Step 5: Wait for reload to complete — Pi reconnects, TUI appears, prompt visible
 
 # Step 6: Write RELOAD_POST_IDLE marker
-& "~\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
+& "C:\Users\you\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
     -MarkerName "RELOAD_POST_IDLE" `
     -RunId $env:RUN_ID `
     -OutputPath $env:RUN_DIR `
@@ -370,7 +370,7 @@ $SHELL_KIND = if ($PSVersionTable.PSEdition -eq "Core") { "pwsh" } else { "power
 #    Note whether PID changed: $PI_PID vs $NEW_PI_PID
 
 # Step 8: Write RELOAD_END marker
-& "~\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
+& "C:\Users\you\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
     -MarkerName "RELOAD_END" `
     -RunId $env:RUN_ID `
     -OutputPath $env:RUN_DIR `
@@ -415,7 +415,7 @@ $SHELL_KIND = if ($PSVersionTable.PSEdition -eq "Core") { "pwsh" } else { "power
 #    $OLD_PI_PID = (Get-Process -Name "pi" -ErrorAction SilentlyContinue | Select-Object -First 1).Id
 
 # Step 2: Write NEW_SESSION_BEGIN marker
-& "~\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
+& "C:\Users\you\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
     -MarkerName "NEW_SESSION_BEGIN" `
     -RunId $env:RUN_ID `
     -OutputPath $env:RUN_DIR `
@@ -425,7 +425,7 @@ $SHELL_KIND = if ($PSVersionTable.PSEdition -eq "Core") { "pwsh" } else { "power
 # Step 3: Type '/new' in Pi and press Enter
 
 # Step 4: IMMEDIATELY write NEW_SESSION_TRIGGER_SENT marker
-& "~\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
+& "C:\Users\you\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
     -MarkerName "NEW_SESSION_TRIGGER_SENT" `
     -RunId $env:RUN_ID `
     -OutputPath $env:RUN_DIR `
@@ -435,7 +435,7 @@ $SHELL_KIND = if ($PSVersionTable.PSEdition -eq "Core") { "pwsh" } else { "power
 # Step 5: Wait for new session to render — Pi TUI appears (may be in new window or same window)
 
 # Step 6: Write NEW_SESSION_RENDER marker
-& "~\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
+& "C:\Users\you\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
     -MarkerName "NEW_SESSION_RENDER" `
     -RunId $env:RUN_ID `
     -OutputPath $env:RUN_DIR `
@@ -448,7 +448,7 @@ $SHELL_KIND = if ($PSVersionTable.PSEdition -eq "Core") { "pwsh" } else { "power
 # Step 8: Wait for new session to stabilize
 
 # Step 9: Write NEW_SESSION_END marker
-& "~\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
+& "C:\Users\you\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Write-PiLifecycleMarker.ps1" `
     -MarkerName "NEW_SESSION_END" `
     -RunId $env:RUN_ID `
     -OutputPath $env:RUN_DIR `
@@ -478,12 +478,12 @@ After ALL lifecycle paths are traced, run:
 
 ```powershell
 # Step 1a: Stop WMI event trace listener (from the listener window or a new window)
-& "~\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Stop-PiLifecycleTrace.ps1" `
+& "C:\Users\you\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Stop-PiLifecycleTrace.ps1" `
     -RunId $env:RUN_ID `
     -OutputPath $env:RUN_DIR
 
 # OR Step 1b: Stop polling trace listener
-& "~\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Stop-PiPollingTrace.ps1" `
+& "C:\Users\you\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Stop-PiPollingTrace.ps1" `
     -RunId $env:RUN_ID `
     -OutputPath $env:RUN_DIR
 ```
@@ -557,7 +557,7 @@ logman stop PiLifecycleTrace -ets
 If a human separately produces a ProcMon CSV/PML export, the merge script supports importing it as an additional evidence source with `-ProcMonCsv` parameter.
 
 ```powershell
-& "~\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Merge-PiLifecycleEvidence.ps1" `
+& "C:\Users\you\.pi\pi-orchestrator-extension\harness\win-lifecycle-process-trace\Merge-PiLifecycleEvidence.ps1" `
     -RunId $env:RUN_ID `
     -OutputPath $env:RUN_DIR `
     -ProcMonCsv "$env:RUN_DIR\procmon-export.csv"

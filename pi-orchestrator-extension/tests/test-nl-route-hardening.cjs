@@ -47,12 +47,12 @@ async function runPev(params) {
   }));
   process.env.PI_CLI_PATH = path.join(__dirname, "fake-pi.cjs");
   process.env.FAKE_PI_LOG = logPath;
-  process.env.PI_AGENT_DIR = agentDir;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
   try {
     const tool = loadOrchestrateTool();
     const result = await tool.execute(
       "test-nl-hardening",
-      { paradigm: "plan-execute-verify", preflight: false, hardGates: "off", maxRetries: 0, maxSubagents: 8, cwd: tmp, ...params },
+      { paradigm: "plan-execute-verify", supervision: "off", preflight: false, hardGates: "off", maxRetries: 0, maxSubagents: 8, cwd: tmp, ...params },
       undefined, () => {}, { cwd: tmp },
     );
     const calls = fs.existsSync(logPath)
@@ -62,7 +62,7 @@ async function runPev(params) {
   } finally {
     delete process.env.PI_CLI_PATH;
     delete process.env.FAKE_PI_LOG;
-    delete process.env.PI_AGENT_DIR;
+    delete process.env.PI_CODING_AGENT_DIR;
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 }

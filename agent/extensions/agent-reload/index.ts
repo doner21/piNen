@@ -5,13 +5,14 @@ import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
 /**
- * Agent-operated Pi reload bridge — phase-machine + session_shutdown
- * confirmation edition (v3, diagnostics-reporting-fix).
+ * Agent-operated Pi reload bridge — public command-dispatch +
+ * session_shutdown confirmation edition (v4, bundled-runtime fix).
  *
  * Design (see FIX_PLAN.md):
  * - The LLM-callable `agent_reload_runtime` tool schedules a background idle
  *   poll that waits for `ctx.isIdle() && !ctx.hasPendingMessages()` (2 stable
- *   ticks), then invokes `/agent-reload-runtime` via `pi.executeCommand`.
+ *   ticks), then dispatches `/agent-reload-runtime` through Pi 0.84.2+'s public
+ *   `pi.sendUserMessage(..., { expandPromptTemplates: true })` path.
  * - Success is confirmed via the `session_shutdown` event with reason
  *   "reload" (fires in the still-alive OLD instance, correct cwd, before
  *   teardown). NOT session_start (cwd-fragile in the rebuilt instance,
@@ -23,11 +24,10 @@ import { randomUUID } from "node:crypto";
  *   can retry).
  * - Diagnostics merge on every write (audit trail across polls/reloads).
  *
- * IMPORTANT: `pi.executeCommand` is not in the public Pi API; it requires the
- * local core patch (agent/core-patch/reapply-pi-core-patch.mjs). Without it,
- * the tool returns a clear error and does not start the poll.
- *
- * The tool never uses `pi.sendUserMessage('/...')`.
+ * This no longer depends on the private `pi.executeCommand` patch. Pi 0.84.3+
+ * launches a bundled CLI, so patching only dist/core/* cannot affect the live
+ * CLI runtime. Public command expansion survives npm updates and works in the
+ * actual bundled runtime.
  *
  * Diagnostics: ONE canonical location at `~/.pi/agent/agent-reload-diagnostics.json`
  * regardless of session cwd. Atomic writes (temp + rename). Write failures
@@ -118,10 +118,22 @@ const RELOAD_CONFIRMATION = "session_shutdown:reload";
  *  - Write failures are logged to stderr; never swallowed silently.
  *  - Merge: patch overwrites scalars; arrays append and cap.
  */
-async function writeDiagnostics(
+let diagnosticsWriteQueue: Promise<void> = Promise.resolve();
+
+function writeDiagnostics(
+	patch: Partial<ReloadDiagnostics> & { attempts?: number; cwd?: string; executeCommandAvailable?: boolean },
+	_cwd: string,
+): Promise<void> {
+	const operation = diagnosticsWriteQueue.then(() => writeDiagnosticsOnce(patch, _cwd));
+	diagnosticsWriteQueue = operation.catch(() => {});
+	return operation;
+}
+
+async function writeDiagnosticsOnce(
 	patch: Partial<ReloadDiagnostics> & { attempts?: number; cwd?: string; executeCommandAvailable?: boolean },
 	_cwd: string, // kept for caller compatibility; IGNORED — always uses canonical path
 ): Promise<void> {
+	let tmpPath: string | undefined;
 	try {
 		await fsp.mkdir(CANONICAL_DIAG_DIR, { recursive: true });
 
@@ -182,14 +194,25 @@ async function writeDiagnostics(
 			delete merged.error;
 		}
 
-		// 4. Atomic write: temp file + rename.
-		const tmpPath = resolve(CANONICAL_DIAG_DIR, `.agent-reload-diagnostics.tmp-${randomUUID().slice(0, 8)}`);
+		// 4. Atomic write: temp file + rename. Windows can reject replacement
+		// renames briefly, so fall back to a complete copy and clean the temp.
+		tmpPath = resolve(CANONICAL_DIAG_DIR, `.agent-reload-diagnostics.tmp-${randomUUID().slice(0, 8)}`);
 		await fsp.writeFile(tmpPath, JSON.stringify(merged, null, 2), "utf8");
-		await fsp.rename(tmpPath, CANONICAL_DIAG_PATH);
+		try {
+			await fsp.rename(tmpPath, CANONICAL_DIAG_PATH);
+			tmpPath = undefined;
+		} catch (renameError) {
+			await fsp.copyFile(tmpPath, CANONICAL_DIAG_PATH);
+			await fsp.unlink(tmpPath);
+			tmpPath = undefined;
+			void renameError;
+		}
 	} catch (err) {
 		/* diagnostics must never throw, but MUST log to stderr */
 		const msg = err instanceof Error ? err.message : String(err);
 		process.stderr.write(`[agent-reload] writeDiagnostics FAILED: ${msg}\n`);
+	} finally {
+		if (tmpPath) await fsp.unlink(tmpPath).catch(() => {});
 	}
 }
 
@@ -343,22 +366,28 @@ function fireReload(
 ): void {
 	const requestId = activeRequestId!;
 
-	const executeCommand = (pi as unknown as {
-		executeCommand?: (name: string, args?: string) => Promise<void>;
-	}).executeCommand;
-	if (typeof executeCommand !== "function") {
+	const sendUserMessage = (pi as unknown as {
+		sendUserMessage?: (
+			content: string,
+			options?: { expandPromptTemplates?: boolean },
+		) => void;
+	}).sendUserMessage;
+	if (typeof sendUserMessage !== "function") {
 		phase = "failed";
 		void writeDiagnostics({
 			requestId,
 			phase: "failed",
 			attempts,
-			error: "executeCommand error: pi.executeCommand is not available at fire time",
+			error: "command dispatch error: pi.sendUserMessage is not available",
 			cwd,
 			executeCommandAvailable,
 		}, cwd);
 		resetToIdle(cwd);
 		return;
 	}
+	const executeCommand = async (): Promise<void> => {
+		sendUserMessage.call(pi, `/${RELOAD_COMMAND}`, { expandPromptTemplates: true });
+	};
 
 	// Hard timeout: if executeCommand never resolves/rejects, reset state.
 	hardTimer = setTimeout(() => {
@@ -378,7 +407,7 @@ function fireReload(
 	const cmdStartedAt = Date.now();
 	void Promise.resolve(
 		Promise.race([
-			executeCommand.call(pi, RELOAD_COMMAND),
+			executeCommand(),
 			new Promise<void>((_, reject) =>
 				setTimeout(() => reject(new Error("hard-timeout")), EXECUTE_COMMAND_HARD_TIMEOUT_MS),
 			),
@@ -493,7 +522,9 @@ function onVerificationTimeout(
 export default function agentReload(pi: ExtensionAPI): void {
 	{
 		const probe = pi as Record<string, unknown>;
-		executeCommandAvailable = typeof probe.executeCommand === "function";
+		// Historical diagnostics keep this field name; v4 records availability
+		// of the supported extension-command dispatch transport.
+		executeCommandAvailable = typeof probe.sendUserMessage === "function";
 	}
 
 	// session_shutdown: the reliable SUCCESS signal. Fires in the still-alive
@@ -528,9 +559,9 @@ export default function agentReload(pi: ExtensionAPI): void {
 		label: "Agent Reload Runtime",
 		description:
 			"Schedule a deferred Pi runtime reload that fires when the agent becomes idle. " +
-			"Confirms success via the session_shutdown{reason:reload} event. " +
-			"Requires the pi.executeCommand core patch. " +
-			"Without it, returns a clear error and does not start the idle poll.",
+			"Dispatches the registered reload command through Pi's supported command-expansion " +
+			"API and confirms success via session_shutdown{reason:reload}. No private core patch " +
+			"is required on Pi 0.84.2 or newer.",
 		promptSnippet:
 			"Schedule a deferred reload that fires when the agent becomes idle after the turn ends",
 		promptGuidelines: [
@@ -543,9 +574,9 @@ export default function agentReload(pi: ExtensionAPI): void {
 				"`reloadSilentlyFailed` / `executeCommandRejected` / `phase` before relying " +
 				"on any new tool actions. If reloadSilentlyFailed is true, the reload did " +
 				"NOT apply — tell the user to run /agent-reload-runtime manually.",
-			"If this tool returns an error about pi.executeCommand not being available, " +
-				"the reload DID NOT fire and WILL NOT fire. Use manual /agent-reload-runtime " +
-				"in the TUI, or reapply the core patch (agent/core-patch/reapply-pi-core-patch.mjs).",
+			"The bridge must call pi.sendUserMessage with expandPromptTemplates:true only " +
+				"from its settled idle poll. Omitting command expansion sends literal slash text " +
+				"to the model instead of invoking the registered command.",
 		],
 		parameters: Type.Object({}, { additionalProperties: false }),
 		executionMode: "sequential",
@@ -580,27 +611,6 @@ export default function agentReload(pi: ExtensionAPI): void {
 				};
 			}
 
-			if (!executeCommandAvailable) {
-				phase = "failed";
-				void writeDiagnostics({
-					phase: "failed",
-					error: "executeCommand error: pi.executeCommand is not available",
-					cwd: ctx.cwd,
-					executeCommandAvailable: false,
-				}, ctx.cwd);
-				return {
-					content: [{
-						type: "text",
-						text:
-							"pi.executeCommand is not available in this Pi runtime (core patch not applied). " +
-							"Options: (1) type /agent-reload-runtime manually in the TUI, or " +
-							"(2) reapply the core patch: " +
-							"node agent/core-patch/reapply-pi-core-patch.mjs apply",
-					}],
-					details: { command: RELOAD_COMMAND, deferred: false, error: "executeCommand not available" },
-				};
-			}
-
 			// Reset retry count on a fresh terminal-phase call.
 			retryCount = 0;
 			scheduleIdleReload(pi, ctx);
@@ -609,7 +619,7 @@ export default function agentReload(pi: ExtensionAPI): void {
 					type: "text",
 					text:
 						"Reload deferred (request: " + activeRequestId + "). A background idle poll " +
-						"will invoke /agent-reload-runtime shortly after your turn ends and the " +
+						"will dispatch /agent-reload-runtime through Pi's public command API shortly after your turn ends and the " +
 						"agent becomes idle (isIdle && !hasPendingMessages). Success is confirmed " +
 						"via session_shutdown{reason:reload}. STOP now — do no further work in this " +
 						"runtime. The scheduled continuation should read " +

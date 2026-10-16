@@ -1,16 +1,54 @@
-# piNen Agent Policy
+# Global Pi Agent Policy
 
 ## How work gets done (build-first policy, 2026-07-22)
 
-piNen prioritizes real build work over process. The old Orchestrator Role Integrity Policy (role ledgers, pin maps, mandatory predicted-write-set paperwork, GATE_DEFECT verdicts, contract hygiene rules, mandatory subagent routing) is retired — it produced paperwork loops instead of product. The rules are now:
+The owner's priority is real build work, not process. The old Orchestrator Role Integrity Policy (role ledgers, pin maps, predicted write sets, GATE_DEFECT verdicts, contract hygiene rules, mandatory subagent routing) is retired — it produced paperwork loops instead of product. The rules are now:
 
 1. **Two modes, picked by the user's words.**
    - **Direct mode (default):** the current agent builds, fixes, and tests the user's task itself.
-   - **Orchestration mode:** when the user asks to orchestrate, run an orchestration, or says "orchestration work" — go into orchestration mode (see the section below). Treat any explicit orchestration request as a normal supported mode, not an exception.
-2. **Definition of done = the real test.** Intermediate engineering tasks close autonomously with agent-run machine checks and coherent tested changes (plus commits when authorized). Batch user sensory review only at substantial integrated build-room or slice boundaries, when there is a physical artifact the user can run, hear, or measure; give them a short test card (what to do, what should happen, what failure looks like). No closeout documents, ledgers, receipts, or evidence folders.
+   - **Orchestration mode:** when the user asks to orchestrate, run an orchestration, or says "orchestration work" — go into orchestration mode (see the section below). Most of this owner's work is orchestration work, so treat any explicit orchestration request as normal, not exceptional.
+2. **Definition of done = the real test.** Intermediate engineering tasks close autonomously with agent-run machine checks and coherent commits. Batch human sensory review only at substantial integrated build-room or slice boundaries, when there is a physical artifact the owner can run, hear, or measure; give them a short test card (what to do, what should happen, what failure looks like). No closeout documents, ledgers, receipts, or evidence folders.
 3. **Machine validation is agent-owned.** Run and interpret tests, logs, JSON, hashes, captures, and other machine-readable output; never delegate their inspection to the human. Report honestly and plainly: say what changed, what ran, what was observed, and what's unverified, without contract/legal phrasing or "no-credit" or "authorization boundary" language.
 4. **A failing check gets fixed, not processed.** If a test correctly fails, fix the product. If the check itself is wrong or obsolete, fix or delete the check in the same run and say so in the commit message. Never leave a red check "documented around," and never build new gates around a broken one.
 5. **If context runs low**, finish the current step and persist a short handoff (what's done, what's next, key paths). When continuation tooling is available, schedule and trigger a fresh session and resume autonomously; report an infrastructure failure only if autonomous continuation is unavailable.
+
+## Lean working method (standing method since 2026-10-06)
+
+Full text and reasons: `C:/Users/you/.pi/agent/docs/lean-working-method.md`. Read it before planning or briefing any multi-step or orchestrated work. Dropping the paperwork and keeping the safety rules let item 3 commit in hours after three weeks of runs; heavy rules made models literal and stalled them. The core:
+
+- **Hard lines, never bent:**
+  - Protected code needs the owner's named permission: the native folders (`experiments/phase0/parallel-crossfade/`, `tools/phase1/native/`, native parts of `tools/stage6/`, their build files) and live hardware windows. TypeScript that talks to the native host is ordinary code. An approved brief is permission to build everything else in it; a question never stops the run. Full page: `agent/docs/standing-permissions.md`.
+  - Owner data and working builds stay untouched; work in separate copies.
+  - Never force-kill what you did not start. You may stop your own test or worker process after 30 minutes of silence while it blocks its parent; say so afterwards.
+  - Add no timers, deadlines, sleeps, signals or exits to product code, tests or launch arguments. A null timeout field placed by a tool schema is not a timer.
+  - Use the owner's named models per role, with no substitution.
+  - Only the coordinator commits, and only after the review passes. Never push without the owner's word.
+  - At each milestone end, after the owner's listening pass and the review, the coordinator pushes the milestone branch and opens one pull request into the main branch with a short plain description; it never merges it. Lane merges in between stay local.
+  - Never be idle silently: if nothing is running and you are blocked, message the owner once with the decision you need, and remind every two hours.
+- **Proof:**
+  - a test that fails before the fix and passes after it, re-run by the reviewer. Writing that test, fixtures included, is capped at two hours per fix; past the cap, use the cheapest existing machine check and put the behaviour on the owner's next listening card (safety checks the owner cannot hear are exempt);
+  - faults the owner can hear or see are confirmed by listening first: send the card as soon as the fix builds and the agent's own check (measuring what the owner hears, not a theory) passes, with no reviewer in between; protected code, STOP, swap and identity checks are still reviewed first;
+  - after a failed listening card, or a review showing a fix does not work, run a blind read-only planner before the next repair: it gets the owner's symptom words and the source only, never earlier diagnoses or fix history, traces the whole chain and names the production path the test must include;
+  - one fresh independent review per milestone boundary, plus an extra one only for protected code or on request;
+  - the owner's real-use test card;
+  - one known-limitations list, approved once.
+- **Dropped:** chronology audits, timing proofs, reading statements, hash and pin ledgers, receipts, evidence folders, per-batch reviews and release tasks, whole-tree re-verification every step.
+- **Judgement:**
+  - Apply each rule's reason, not its letter.
+  - Replace an invented check that is impossible or out of proportion with the simplest check that protects the real rule, and note it in the handoff.
+  - A disputed verdict is not a stop: a FAIL contradicted by the reviewer's own evidence or the coordinator's direct observation gets the missing evidence and a rerun of the review, and stops only if the rerun still fails. Never write "FAIL for missing proof" into a brief. The coordinator notes its outside observations in the run folder before the reviewer starts. Replace a days-old coordinator session at the next milestone.
+  - Set a cutoff and a fallback for exploratory steps.
+  - Stop for the owner only for what is genuinely theirs.
+- **Long work runs headless:**
+  - Run long commands in the background, not as blocking calls.
+  - Build in headless workers.
+  - Wrap `/orchestrate` in a headless pi process; the coordinator checks its files every 10 to 15 minutes and forwards alarms.
+  - Never let the orchestrator edit its own running copy.
+- **Rule hygiene:**
+  - Every new rule names the incident it prevents.
+  - Delete rules that catch nothing.
+  - Fix a rule that causes a false failure rather than adding another.
+  - Keep briefs short and plain.
 
 ## Orchestration mode (when the user asks for it)
 
@@ -19,13 +57,15 @@ When the user requests orchestration, use the deterministic `/orchestrate` comma
 1. **The current agent coordinates; subagents do the work.** Run intake, spawn the planner/executor/verifier subagents, pass artifacts between them, and report the result. Don't quietly do the main task yourself while claiming it was orchestrated — if you end up doing it directly, say so plainly.
 2. **Keep the machinery, drop the paperwork.** Use `/orchestrate`'s own built-in gates as they are. Do not add role-integrity ledgers, pin maps, satisfiability statements, closeout documents, or any run paperwork beyond what the tool itself produces.
 3. **When a run fails:** repair the specific defect (in the product or orchestration tool) and re-run autonomously. While there is material progress, continue through multiple build/fix/test cycles using materially different approaches, independent diagnosis or subagents, model/provider fallback where useful, and reversible scope reduction. Attempts and elapsed time are not human checkpoints. Involve the human only for a sensory-ready integrated build, a material subjective scope/design choice, an irreversible or destructive action, unavailable credentials or hardware, or sustained no-progress that requires a concrete scope-backout decision.
-4. **The finish line is the same as direct mode:** a real test passing or a physical artifact the user can run, hear, or measure — plus a plain-language summary of what the run did.
+4. **The finish line is the same as direct mode:** a real test passing or a physical artifact the owner can run, hear, or measure — plus a plain-language summary of what the run did.
 
 > **NenFlow v3 and PEV loops are retired (2026-07-18).** Do not run NenFlow, spawn `pev-*` subagents, or read nenflow prompts/health files. If a NenFlow run is requested, route it to `/orchestrate`. See `agent/docs/nenflow-v3-retirement.md`.
 
+
 ## Engram Persistent Memory
 
-This Pi installation uses Engram for persistent memory. The installer places the binary at `agent/bin/engram.exe` on Windows (or `agent/bin/engram` on Unix), and the `gentle-engram` npm package provides Pi-native `mem_*` tools.
+This Pi installation uses Engram for persistent memory. The binary ships at `agent/bin/engram.exe`
+and the `gentle-engram` npm package provides Pi-native `mem_*` tools.
 
 ### If Engram tools are unavailable
 
@@ -48,26 +88,9 @@ $env:ENGRAM_BIN = "$env:USERPROFILE\.pi\agent\bin\engram.exe"
 export ENGRAM_BIN="$HOME/.pi/agent/bin/engram"
 ```
 
-### Persistent-memory protocol
-
-Use Engram as durable working memory, not as a dump of transient output.
-
-Save immediately after completing a bug fix, making an architecture/design decision, discovering a non-obvious codebase fact, changing configuration/environment setup, establishing a reusable pattern, or learning a user preference/constraint.
-
-Use `mem_save` with a short searchable title, an appropriate type (`bugfix`, `decision`, `architecture`, `discovery`, `pattern`, `config`, or `preference`), project/personal scope, and a stable `topic_key` where the fact may evolve. Structure content as:
-
-- **What**: what changed or was learned
-- **Why**: motivation
-- **Where**: relevant files/paths
-- **Learned**: edge cases and gotchas
-
-When recalling prior work, call `mem_context` first, then `mem_search` and `mem_get_observation` if needed. Before declaring meaningful work complete, save a `mem_session_summary` with Goal, Instructions, Discoveries, Accomplished, Next Steps, and Relevant Files. After context compaction, restore project memory before continuing.
-
-Never commit or publish Engram databases, observations, session summaries, saved prompts, or health traces.
-
 ## Graphify Brain is first-class project memory context
 
-This Pi installation uses the Graphify Brain at `~/.pi/graphify-brain` as its global project memory system.
+This Pi installation uses the Graphify Brain at `C:\Users\you\.pi\graphify-brain` as its global project memory system.
 Treat the graphify-brain and its knowledge graphs as persistent context that should be consulted in every substantive session.
 
 ## Startup behavior
@@ -107,7 +130,7 @@ If a project is linked and Graphify artifacts are available:
 
 ## Spotify — All Operations via MCP Server
 
-The Spotify MCP server at `~/.pi/agent/spotify-mcp` is the single source of truth for ALL Spotify operations. Do not use the built-in `spotify_*` Pi tools — they lack playlist management and use a separate token system.
+The Spotify MCP server at `C:/Users/you/.pi/agent/spotify-mcp` is the single source of truth for ALL Spotify operations. Do not use the built-in `spotify_*` Pi tools — they lack playlist management and use a separate token system.
 
 ### Available MCP tools (prefix: `spotify_`)
 
@@ -147,16 +170,17 @@ When working in a Git repository:
 2. Inspect relevant diffs before summarizing or committing changes.
 3. Do not commit, push, reset, rebase, or force-push unless the user explicitly asks.
 
-   **Project-local override:** A project's own `AGENTS.md` takes precedence over rules 3–4 of this section for work within that project's repository. When a project AGENTS.md grants standing authorization for commits or other Git operations within its repo scope, that authorization governs; the global default restriction does not apply.
+   **Project-local override:** A project's own `AGENTS.md` (e.g., `C:/Users/you/my-project/AGENTS.md`) takes precedence over rules 3–4 of this section for work within that project's repository. When a project AGENTS.md grants standing authorization for commits or other Git operations within its repo scope, that authorization governs; the global default restriction does not apply.
 
 4. Never commit secrets, auth files, tokens, session logs, local runtime state, caches, or generated diagnostics unless the user explicitly confirms.
 5. Prefer small, focused commits with clear messages when the user requests commits.
-6. If modifying Pi extension code (`agent/extensions/**/*.ts`), remember that `/reload` does not reliably re-evaluate extension source in already-running Pi processes; a full Pi process restart may be required.
-7. Be explicit about what was changed, what was not changed, and whether changes are merely on disk, committed locally, or pushed remotely.
+6. After modifying global Pi extension source (`agent/extensions/**/*.ts`), use `/reload` to rebuild the extension runtime. A full restart may still be required for already-imported Pi core modules or stale package-extension modules.
+7. On Pi 0.84.2+, agent reload/new-session bridges use `pi.sendUserMessage(..., { expandPromptTemplates: true })` from a stable-idle poll. Do not require the legacy `pi.executeCommand` core patch: Pi 0.84.3+ launches `dist/bundle/cli.js`, while that patch only touched `dist/core/*`.
+8. Be explicit about what was changed, what was not changed, and whether changes are merely on disk, committed locally, or pushed remotely.
 
 ## Automated Git Backup Policy
 
-When explicitly enabled and configured by the user, the deterministic `git-backup` extension may create and push **isolated backup refs only**. This policy does not itself grant authorization, and isolated-backup authorization never permits agents to commit to, merge, rebase, reset, force-push, or push the working branch without a separate explicit request.
+The user has granted standing authorization for the deterministic `git-backup` extension to create and push **isolated backup refs only**. This authorization does not permit agents to commit to, merge, rebase, reset, force-push, or push the working branch without a separate explicit request.
 
 The project-local override described in § Git Safety / Smart Git Usage applies here as well: a project AGENTS.md may grant standing authorization for working-branch operations within that project's scope.
 

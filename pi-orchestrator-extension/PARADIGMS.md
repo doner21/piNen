@@ -9,7 +9,7 @@ This document describes the orchestration paradigms (shapes) available in the Pi
 | `plan-execute-verify` | Classic planner → executor waves → verifier flow. Default paradigm. Supports retries with failure feedback and deterministic model routing checks. |
 | `multi-verify-vote` | Planner → executor waves → multiple verifiers (odd count) → majority vote. Each verifier independently judges pass/fail; outcome is decided by majority. |
 | `composable-pipeline` | Dynamic pipeline composition via natural language (hypothesize → critique → synthesize → plan → execute → verify, with per-phase counts). |
-| `dual-plan-synthesis-execute-verify` | Two independently routed planner passes → synthesis → executor → direct-evidence verifier, with bounded retry feedback. Defaults are role-safe OpenAI Codex GPT-5.6 Sol for planning/execution and GPT-5.5 for verification; explicit overrides are honored. |
+| `dual-plan-synthesis-execute-verify` | Two independent routed planners (OpenRouter GLM 5.2 + OpenAI Codex GPT 5.5) → Opus 4.8 synthesis reviewer → DeepSeek V4 Pro executor → GPT 5.5 direct-evidence verifier, with bounded executor retry feedback. |
 | `verify-only` | Verification-only: input is an evidence checklist + paths; spawns verifier(s) ONLY (no planner, no executors); output is per-check verdicts with citations. Supports multi-verifier majority vote ("3 verifiers" in the task text). Exempt from all implementation-task heuristics — verification output is legitimately text-only. Verifiers are granted read/bash/grep tools so they can gather and cite evidence independently. |
 | `paradigm-creator` | Conservative meta-orchestration for proposing new reusable paradigms. V1 is explicit-only and propose-only: it runs one bounded assessment planner, then deterministic TypeScript helpers normalize the name, validate the spec, gate confidence, render a template, run static checks, and return reload handoff details without writing files. |
 | `shape-builder` | Deterministic meta-constructor for reusable orchestration. Ordinary specs compile to durable user/project declarative JSON, are rediscovered and canaried in-process, and return `usable: true`, `reloadRequired: false`. Explicit `artifactKind: "native-shape"` retains generated extension code, registry/tests, independent verification, and reload gating. |
@@ -19,6 +19,17 @@ This document describes the orchestration paradigms (shapes) available in the Pi
 | `evidence-audit` | Hardened re-verifier over a COMPLETED run's evidence (falsifier-grade `verify-only`). Phase 1 DETERMINISTIC `verify-hash` of the frozen gate document (mismatch ⇒ zero-spawn FAIL); Phase 2 DETERMINISTIC `manifest` (sha256 + bytes) of the declared gate-evidence files — a missing file is a zero-spawn FAIL, and the checkpointed manifest IS the audit fingerprint; Phase 3 spawns exactly ONE read-only verifier (NO executor) that audits run-id binding, internal consistency, and freshness from raw artifacts with fail-closed JSON; Phase 4 DETERMINISTIC `verify-hash` confirms the frozen doc was untouched. Never writes into the audited tree. Verifier route override honored; resume-supported. |
 | `independent-replication` | Two INDEPENDENT implementations of ONE frozen gate in isolated lane subdirectories, routed to (ideally) different models, compared honestly. DETERMINISTIC `verify-hash` before, between (mid), and after the two lanes (tamper-proof; mismatch ⇒ FAIL at the next deterministic check with lane B not run). Each lane runs its own lane-confined executor (lane B forbidden from reading lane A) then an independent fail-closed verifier. Overall verdict is aggregated IN CODE (PASS iff both lanes PASS and all freeze checks hold); the diversity caveat is COMPUTED from the resolved lane routes (fully-disjoint vs shared-model narrowed). Per-lane route overrides honored; resume-supported. |
 | `ssi-single-writer-exclusive-lane` | **Usable deterministic, production-proven SSI shape.** Three parallel read-only diagnoses → one synthesis → one allowlisted logical writer → two read-only source reviews → one cross-process-locked serialized native/Electron/WASAPI lane → at most one same-writer repair/retest → PASS-gated commit/push with independent remote verification. Use for integrated SSI work in a dirty shared checkout; not for small isolated changes or optional concurrent-rebuild stress. |
+
+## Shared execution-classification and supervision contract
+
+Shape safety is registered as data rather than inferred from a shape name. Every native shape exposes an immutable `execution` contract, and every resolved declarative workflow receives the same host-owned contract:
+
+- `read-only` may dispatch directly, with spawned profiles capability-forced to `--no-tools`.
+- `executor-bearing` and `mutating` must name `host-task-boundary-v1` plus an adapter implemented by the current host (`plan-execute-verify-adapter-v1` or `generic-shape-adapter-v1`).
+- Missing, contradictory, malformed, unknown-version, and well-formed-but-unimplemented adapter declarations fail closed before provider preflight or worker spawn. Future/custom native registrations and generated shapes are not grandfathered.
+- Omitted supervision defaults to `visible-main`; only explicit `supervision: "off"` requests the bounded legacy path.
+
+The generic adapter persists protocol identity and a shape-neutral cursor in both supervision state and historical `RunStateStore` metadata. It checkpoints the host-derived plan before execution, consumes one mission/checkpoint-bound opaque approval for at most one settled task, records byte-level effects under the frozen lane/write set, and returns `awaiting_supervisor` before another task or verifier. Replay and cross-bound tokens are refused. Host restart invalidates outstanding tokens and pauses nonterminal work; detached executor survivors can be collected through the durable phase record without duplicate execution. This contract covers built-ins, bespoke/current shapes, dynamic workflows, shape-builder output, future registrations, and historical resume. `orchestrate_next` remains a separate side-by-side kernel and its regressions run in the same full suite.
 
 ## Dynamic declarative workflow registry
 
@@ -94,11 +105,11 @@ Labeled inputs (case-insensitive), in the task and/or a referenced `SPEC_FILE`: 
 
 This shape is intentionally route-specific for high-stakes implementation loops:
 
-1. Plan A and Plan B use the planner-role route (default `openai-codex/gpt-5.6-sol`).
-2. Synthesis uses the same planner-role route and produces the only plan the executor may implement.
-3. Execution uses the executor-role route (default `openai-codex/gpt-5.6-sol`).
-4. Verification uses the verifier-role route (default `openai-codex/gpt-5.5`), returning JSON PASS/FAIL with evidence and retry feedback.
-5. Explicit per-role provider/model overrides are honored; retries remain bounded.
+1. Plan A runs as `provider=openrouter`, `model=z-ai/glm-5.2`.
+2. Plan B runs independently as `provider=openai-codex`, `model=gpt-5.5`.
+3. Synthesis runs as `provider=anthropic`, `model=claude-opus-4-8` and produces the only plan the executor may implement.
+4. Execution runs as `provider=deepseek`, `model=deepseek-v4-pro`.
+5. Verification runs as `provider=openai-codex`, `model=gpt-5.5`, returning JSON PASS/FAIL with evidence and retry feedback.
 6. On FAIL, only the executor + verifier phases repeat, bounded by `maxRetries`; planning and synthesis are not repeated.
 
 ### `verify-only` usage
@@ -243,26 +254,40 @@ This contract applies only to explicit `artifactKind: "native-shape"`. The verif
 
 Parse failure, overall "fail", any check "fail", or any missing required field → `implemented_verified: false`. Only strict PASS advances lifecycle.
 
-## Judgment layer: hard gates and effect evidence
+## Judgment layer: hard gates and advisory evidence
 
-All paradigms run under the judgment layer introduced by the 2026-06-12
-hardening (effect-based verdicts):
+Host safety and model judgment are separate authorities. Host-owned safety
+invariants remain hard regardless of the `hardGates` presentation mode. Product
+correctness remains with the verifier's semantic verdict; the host must not
+replace a grounded model PASS/FAIL merely because evidence uses an unfamiliar
+label or a settled task changed zero bytes. The table describes the default
+`visible-main` host path used by supervised executor-bearing work.
 
-- **`hardGates: "strict" | "advisory" | "off"`** (default `advisory`):
-  - `advisory` — text-shape heuristics (truncation signals, "text-only
-    response", short-output checks, escape-clause scans, file-claim regexes)
-    are demoted to report warnings; the verifier's evidenced verdict is the
-    gate; hard gates only escalate (force FAIL) on effect-based
-    contradictions (e.g. verifier PASS with zero observed mutations for
-    implementation work — the 2026-06-03 false-PASS class).
-  - `strict` — effect findings and non-immune text-shape findings fail fast
-    before the verifier spawn.
-  - `off` — everything is a warning; the verifier verdict is final.
-- **Effect-evidence immunity**: a task with ≥1 successful mutating tool call
-  (write/edit/bash) or ≥1 worktree file change can NEVER be failed by a
-  text-shape heuristic, in any mode.
-- Per-task tool-call counts and worktree deltas are exposed in the report and
-  in the verifier's ARTIFACT EVIDENCE block.
+| Class | Check | Host behavior |
+|---|---|---|
+| **Hard** | Approval replay, mission/checkpoint binding, or cross-bound token use | Refuse before another worker can spawn. |
+| **Hard** | Missing, malformed, unsupported, or unimplemented shape supervision adapter | Fail closed before provider preflight or execution. |
+| **Hard** | Spawn ceiling, concurrency ceiling, iteration/retry budget, or task-size safety cap | Clamp or refuse deterministically; models cannot expand the budget. |
+| **Hard** | Protected-root/worktree escape, symlink escape, or an explicit external mutation target | Refuse the mutation. Read access alone does not grant write authority. |
+| **Hard** | Substantive verifier semantic FAIL | Remains blocking; a bounded repair may run when budget remains, otherwise the run ends FAIL. |
+| **Hard** | Ambiguous transport loss after mutation | `blocked_infrastructure` with `retryAllowed=false`; never duplicate uncertain work. A complete host-owned phase result may instead be recovered normally. |
+| **Hard** | Explicit route/provider safety restrictions, including forbidden local or shape-specific executor routes | Refuse before the unsafe role dispatch. |
+| **Advisory** | A settled executor changed zero bytes, including `expectsFileChange=true` work | Preserve its semantic status/findings and stop at `awaiting_supervisor`; emit `no_content_progress` advice when the plan promised a mutation. |
+| **Advisory** | Unknown evidence-kind vocabulary, or missing machine evidence on reviewer PASS | Normalize to semantic notes; do not flip the reviewer verdict. |
+| **Advisory** | Missing or mismatched launcher route observation | Report separately from product acceptance; it is not a product FAIL. |
+| **Advisory** | Commit/content baseline drift | Name affected paths and require the next one-use supervisor continue to acknowledge the new baseline. Run-owned declared commits advance the baseline automatically. |
+| **Advisory** | Explicitly read-only external path reference | Record as an external input and remove it from mutation scope; mutation intent remains hard. |
+| **Advisory** | In-worktree mutation omitted from the planner write set | Persist a scope amendment and await supervisor acceptance; protected or external paths remain hard. |
+| **Advisory** | Legacy verifier failure whose failed criteria are routing-only bookkeeping | Preserve the evidence and return `awaiting_supervisor`; do not manufacture a product repair or terminal FAIL. |
+
+`hardGates: "strict" | "advisory" | "off"` (default `advisory`) controls
+legacy text-shape heuristics such as truncation, short-output, escape-clause, and
+file-claim scans; it does not disable the hard safety rows above. On the
+explicit legacy/off-supervision path, `strict` also retains its historical
+pre-verifier zero-effect implementation gate. A successful mutating tool call
+or observed worktree change remains immune to text-shape heuristics. Per-task
+tool counts and byte-level deltas are included in reports and verifier artifact
+evidence.
 
 ## Orchestrator Role Integrity
 

@@ -51,6 +51,8 @@ import {
   type DeterministicPhaseOutput,
 } from "../deterministic-phase";
 
+import { GENERIC_EXECUTOR_SHAPE_EXECUTION } from "../supervision";
+
 import type {
   OrchestrationShape,
   OrchestrationShapeContext,
@@ -106,6 +108,7 @@ export const independentReplicationShape: OrchestrationShape = {
     "executor (confined to its subdir; lane B forbidden from reading lane A) then verifier (fail-closed JSON). " +
     "The overall verdict is aggregated IN CODE (PASS iff both lanes PASS and all freeze checks hold), and a " +
     "diversity caveat is COMPUTED from the resolved lane routes (fully-disjoint vs shared-model narrowed).",
+  execution: GENERIC_EXECUTOR_SHAPE_EXECUTION,
   run: runIndependentReplication,
 };
 

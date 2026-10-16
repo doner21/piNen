@@ -153,7 +153,14 @@ function testPureHelpers() {
 
   const rendered = mod.renderShapeFromTemplate(validSpec());
   assert.match(rendered, /export const redTeamJudgeShape: OrchestrationShape/);
+  assert.match(rendered, /execution:\s*GENERIC_EXECUTOR_SHAPE_EXECUTION/,
+    "future paradigm proposals must carry the host supervision capability");
   assert.deepEqual(mod.staticCheckGeneratedShape(rendered), []);
+  const unclassified = rendered
+    .replace('import { GENERIC_EXECUTOR_SHAPE_EXECUTION } from "../supervision";\n', "")
+    .replace("  execution: GENERIC_EXECUTOR_SHAPE_EXECUTION,\n", "");
+  assert.ok(mod.staticCheckGeneratedShape(unclassified).some((error) => /supervision capability/.test(error)),
+    "future proposed executor shapes must fail static validation when classification is omitted");
   assert.deepEqual(
     [...mod.KNOWN_PARADIGMS].sort(),
     EXPECTED_REGISTERED_PARADIGMS.slice().sort(),

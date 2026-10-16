@@ -1,0 +1,1240 @@
+{"status": "ready", "window": "Markdown Type Foundry", "hwnd": 460774}
+{"kind": "command", "entry": {"command": "SELECT_ALL", "count": 1}, "clicks": 1, "seconds": 0.047}
+{"kind": "command", "entry": {"command": "BACKSPACE", "count": 1}, "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "#", "clicks": 2, "seconds": 0.034}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.018}
+{"kind": "text", "entry": "T", "clicks": 2, "seconds": 0.02}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.015}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "H", "clicks": 2, "seconds": 0.033}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.027}
+{"kind": "text", "entry": "P", "clicks": 2, "seconds": 0.037}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.015}
+{"kind": "command", "entry": {"command": "SELECT_LEFT", "count": 7}, "clicks": 14, "seconds": 0.162}
+{"kind": "command", "entry": {"command": "BACKSPACE", "count": 1}, "clicks": 1, "seconds": 0.018}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "P", "clicks": 2, "seconds": 0.025}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": "f", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "A", "clicks": 2, "seconds": 0.032}
+{"kind": "text", "entry": "I", "clicks": 2, "seconds": 0.017}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "W", "clicks": 2, "seconds": 0.037}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "M", "clicks": 2, "seconds": 0.038}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "\n", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "\n", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "A", "clicks": 2, "seconds": 0.019}
+{"kind": "text", "entry": "I", "clicks": 2, "seconds": 0.018}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "w", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.027}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "m", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.027}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "m", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.015}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "p", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "w", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "m", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.018}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.019}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "x", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": ".", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "T", "clicks": 2, "seconds": 0.033}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "y", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.036}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "w", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "b", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "j", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": ",", "clicks": 1, "seconds": 0.015}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": ",", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.036}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "m", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.019}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.028}
+{"kind": "text", "entry": "p", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "p", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "p", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "b", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": ",", "clicks": 1, "seconds": 0.015}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "v", "clicks": 1, "seconds": 0.018}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "b", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": ",", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.028}
+{"kind": "command", "entry": {"command": "SELECT_LEFT", "count": 1}, "clicks": 2, "seconds": 0.018}
+{"kind": "command", "entry": {"command": "BACKSPACE", "count": 1}, "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "v", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "b", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.039}
+{"kind": "text", "entry": ".", "clicks": 1, "seconds": 0.019}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.037}
+{"kind": "text", "entry": "C", "clicks": 2, "seconds": 0.027}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.018}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.023}
+{"kind": "command", "entry": {"command": "SELECT_LEFT", "count": 4}, "clicks": 8, "seconds": 0.11}
+{"kind": "command", "entry": {"command": "BACKSPACE", "count": 1}, "clicks": 1, "seconds": 0.019}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.027}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.011}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": ",", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.027}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "m", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "p", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.028}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "b", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.036}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "m", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.038}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "p", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": ":", "clicks": 2, "seconds": 0.033}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "m", "clicks": 1, "seconds": 0.027}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.019}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": ",", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.014}
+{"kind": "command", "entry": {"command": "SELECT_LEFT", "count": 1}, "clicks": 2, "seconds": 0.025}
+{"kind": "command", "entry": {"command": "BACKSPACE", "count": 1}, "clicks": 1, "seconds": 0.011}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.013}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.036}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": ",", "clicks": 1, "seconds": 0.036}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.036}
+{"kind": "text", "entry": "p", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.019}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": ",", "clicks": 1, "seconds": 0.028}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "p", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": ",", "clicks": 1, "seconds": 0.038}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.018}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.019}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "g", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.015}
+{"kind": "text", "entry": ".", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "E", "clicks": 2, "seconds": 0.023}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.015}
+{"kind": "command", "entry": {"command": "SELECT_LEFT", "count": 1}, "clicks": 2, "seconds": 0.017}
+{"kind": "command", "entry": {"command": "BACKSPACE", "count": 1}, "clicks": 1, "seconds": 0.019}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.028}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.025}
+{"kind": "command", "entry": {"command": "SELECT_LEFT", "count": 1}, "clicks": 2, "seconds": 0.027}
+{"kind": "command", "entry": {"command": "BACKSPACE", "count": 1}, "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "p", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.015}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.037}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "b", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "x", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.027}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.016}
+{"kind": "command", "entry": {"command": "SELECT_LEFT", "count": 6}, "clicks": 12, "seconds": 0.126}
+{"kind": "command", "entry": {"command": "BACKSPACE", "count": 1}, "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.038}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.018}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.028}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": ".", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "\n", "clicks": 1, "seconds": 0.027}
+{"kind": "text", "entry": "\n", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "T", "clicks": 2, "seconds": 0.024}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "f", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "f", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "m", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.018}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "p", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "b", "clicks": 1, "seconds": 0.018}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "y", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": ",", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "b", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "v", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "y", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.015}
+{"kind": "command", "entry": {"command": "SELECT_LEFT", "count": 1}, "clicks": 2, "seconds": 0.01}
+{"kind": "command", "entry": {"command": "BACKSPACE", "count": 1}, "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.015}
+{"kind": "text", "entry": "f", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.015}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.036}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "p", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "p", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "f", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "f", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.027}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.037}
+{"kind": "text", "entry": "x", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": ".", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.018}
+{"kind": "text", "entry": "A", "clicks": 2, "seconds": 0.018}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "b", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.027}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "v", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.027}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": ";", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.038}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "b", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "f", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.037}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "p", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "p", "clicks": 1, "seconds": 0.039}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.015}
+{"kind": "command", "entry": {"command": "SELECT_LEFT", "count": 4}, "clicks": 8, "seconds": 0.105}
+{"kind": "command", "entry": {"command": "BACKSPACE", "count": 1}, "clicks": 1, "seconds": 0.019}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.036}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.015}
+{"kind": "text", "entry": "p", "clicks": 1, "seconds": 0.019}
+{"kind": "text", "entry": "p", "clicks": 1, "seconds": 0.027}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.015}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.036}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": ".", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "G", "clicks": 2, "seconds": 0.027}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.037}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "v", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.027}
+{"kind": "text", "entry": "f", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "-", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "y", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": ",", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "f", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "m", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.018}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": ",", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": ",", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.015}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "p", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "f", "clicks": 1, "seconds": 0.014}
+{"kind": "text", "entry": "f", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.019}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.019}
+{"kind": "command", "entry": {"command": "SELECT_LEFT", "count": 1}, "clicks": 2, "seconds": 0.029}
+{"kind": "command", "entry": {"command": "BACKSPACE", "count": 1}, "clicks": 1, "seconds": 0.018}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "m", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "j", "clicks": 1, "seconds": 0.018}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "g", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "m", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "-", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "m", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "y", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "m", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "b", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "f", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "f", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.015}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "y", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": ",", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "y", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "b", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "g", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "v", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.015}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "m", "clicks": 1, "seconds": 0.048}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.038}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": ".", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "\n", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "\n", "clicks": 1, "seconds": 0.027}
+{"kind": "text", "entry": "T", "clicks": 2, "seconds": 0.031}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.019}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.027}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "q", "clicks": 1, "seconds": 0.028}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "b", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.028}
+{"kind": "text", "entry": "v", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.028}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.027}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": ":", "clicks": 2, "seconds": 0.037}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "w", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.014}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "w", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.036}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "g", "clicks": 1, "seconds": 0.036}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.019}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.038}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "y", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "m", "clicks": 1, "seconds": 0.015}
+{"kind": "command", "entry": {"command": "SELECT_LEFT", "count": 5}, "clicks": 10, "seconds": 0.127}
+{"kind": "command", "entry": {"command": "BACKSPACE", "count": 1}, "clicks": 1, "seconds": 0.027}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.027}
+{"kind": "text", "entry": "y", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.027}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.015}
+{"kind": "command", "entry": {"command": "SELECT_LEFT", "count": 3}, "clicks": 6, "seconds": 0.079}
+{"kind": "command", "entry": {"command": "BACKSPACE", "count": 1}, "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "y", "clicks": 1, "seconds": 0.029}
+{"kind": "command", "entry": {"command": "SELECT_LEFT", "count": 1}, "clicks": 2, "seconds": 0.027}
+{"kind": "command", "entry": {"command": "BACKSPACE", "count": 1}, "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "y", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.019}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.019}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "m", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.037}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.037}
+{"kind": "text", "entry": "g", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": ",", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.027}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "b", "clicks": 1, "seconds": 0.019}
+{"kind": "text", "entry": "b", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "y", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.019}
+{"kind": "text", "entry": "w", "clicks": 1, "seconds": 0.037}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "w", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.027}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": ",", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "f", "clicks": 1, "seconds": 0.015}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": ",", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "?", "clicks": 2, "seconds": 0.029}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.036}
+{"kind": "text", "entry": "F", "clicks": 2, "seconds": 0.037}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.037}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.015}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "y", "clicks": 1, "seconds": 0.028}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.027}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.014}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.015}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "b", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "y", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "m", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": "k", "clicks": 1, "seconds": 0.015}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "g", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.036}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "g", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.015}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.018}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.015}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.019}
+{"kind": "command", "entry": {"command": "SELECT_LEFT", "count": 6}, "clicks": 12, "seconds": 0.132}
+{"kind": "command", "entry": {"command": "BACKSPACE", "count": 1}, "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.028}
+{"kind": "command", "entry": {"command": "SELECT_LEFT", "count": 2}, "clicks": 4, "seconds": 0.039}
+{"kind": "command", "entry": {"command": "BACKSPACE", "count": 1}, "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.028}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.015}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": ".", "clicks": 1, "seconds": 0.015}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "R", "clicks": 2, "seconds": 0.033}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "p", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.027}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": "b", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "g", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.037}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.037}
+{"kind": "text", "entry": "x", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "p", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "m", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "p", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.018}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": ",", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.036}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.028}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.015}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "v", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "b", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.018}
+{"kind": "command", "entry": {"command": "SELECT_LEFT", "count": 4}, "clicks": 8, "seconds": 0.069}
+{"kind": "command", "entry": {"command": "BACKSPACE", "count": 1}, "clicks": 1, "seconds": 0.019}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.011}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.01}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.015}
+{"kind": "command", "entry": {"command": "SELECT_LEFT", "count": 4}, "clicks": 8, "seconds": 0.092}
+{"kind": "command", "entry": {"command": "BACKSPACE", "count": 1}, "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.018}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": ",", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "p", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.015}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "v", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "m", "clicks": 1, "seconds": 0.027}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.015}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "g", "clicks": 1, "seconds": 0.024}
+{"kind": "command", "entry": {"command": "SELECT_LEFT", "count": 6}, "clicks": 12, "seconds": 0.139}
+{"kind": "command", "entry": {"command": "BACKSPACE", "count": 1}, "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "m", "clicks": 1, "seconds": 0.011}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.028}
+{"kind": "command", "entry": {"command": "SELECT_LEFT", "count": 3}, "clicks": 6, "seconds": 0.073}
+{"kind": "command", "entry": {"command": "BACKSPACE", "count": 1}, "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "m", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "g", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "f", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.052}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.046}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.042}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "f", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": ".", "clicks": 1, "seconds": 0.039}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "T", "clicks": 2, "seconds": 0.039}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "g", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "m", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "y", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.027}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "m", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.018}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.033}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.015}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "m", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": "d", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.024}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "y", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": ",", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.028}
+{"kind": "text", "entry": "b", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.028}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.038}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.02}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "h", "clicks": 1, "seconds": 0.026}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "y", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "q", "clicks": 1, "seconds": 0.045}
+{"kind": "text", "entry": "u", "clicks": 1, "seconds": 0.041}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.05}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.04}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "l", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "y", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.027}
+{"kind": "text", "entry": "m", "clicks": 1, "seconds": 0.027}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.043}
+{"kind": "text", "entry": "k", "clicks": 1, "seconds": 0.016}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.04}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.039}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.045}
+{"kind": "text", "entry": "v", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.023}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.039}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.022}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.031}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.045}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.044}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.038}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.029}
+{"kind": "text", "entry": "s", "clicks": 1, "seconds": 0.035}
+{"kind": "text", "entry": "i", "clicks": 1, "seconds": 0.046}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.021}
+{"kind": "text", "entry": "r", "clicks": 1, "seconds": 0.043}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.032}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.03}
+{"kind": "text", "entry": "o", "clicks": 1, "seconds": 0.037}
+{"kind": "text", "entry": " ", "clicks": 1, "seconds": 0.017}
+{"kind": "text", "entry": "e", "clicks": 1, "seconds": 0.027}
+{"kind": "text", "entry": "n", "clicks": 1, "seconds": 0.034}
+{"kind": "text", "entry": "a", "clicks": 1, "seconds": 0.047}
+{"kind": "text", "entry": "c", "clicks": 1, "seconds": 0.025}
+{"kind": "text", "entry": "t", "clicks": 1, "seconds": 0.04}
+{"kind": "text", "entry": ".", "clicks": 1, "seconds": 0.035}
+stopped

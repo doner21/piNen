@@ -40,6 +40,7 @@ import { createWriteStream, existsSync, mkdirSync, promises as fsp, renameSync, 
 import { EOL } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import topicCore from "../extensions/telegram-pi/multi-session.cjs";
 
 // ---------------------------------------------------------------------------
 // Paths & defaults
@@ -507,7 +508,15 @@ async function main() {
 	}
 }
 
-main().catch((err) => {
-	logLine("error", `fatal: ${err && err.stack ? err.stack : String(err)}`);
-	process.exit(1);
-});
+if (topicCore.selectRuntime(__dirname).mode === "topics") {
+	const { main: routerMain } = await import("./forum-router.mjs");
+	routerMain().catch((err) => {
+		console.error(redact(String(err?.message || "Router failed")).split(process.env.TELEGRAM_BOT_TOKEN || "__no_token__").join("[token-redacted]"));
+		process.exitCode = 1;
+	});
+} else {
+	main().catch((err) => {
+		logLine("error", `fatal: ${err && err.stack ? err.stack : String(err)}`);
+		process.exit(1);
+	});
+}

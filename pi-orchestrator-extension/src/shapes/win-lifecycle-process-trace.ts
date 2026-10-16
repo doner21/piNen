@@ -41,6 +41,8 @@ import {
   type SubagentResult,
 } from "../substrate";
 
+import { GENERIC_EXECUTOR_SHAPE_EXECUTION } from "../supervision";
+
 import type {
   OrchestrationShape,
   OrchestrationShapeContext,
@@ -76,6 +78,7 @@ export const winLifecycleProcessTraceShape: OrchestrationShape = {
     "via DeepSeek V4 Pro, verifier judges with GPT-5.5. " +
     "Shape is non-invasive until a separate human-approved run; must not " +
     "fake evidence.",
+  execution: GENERIC_EXECUTOR_SHAPE_EXECUTION,
   run: runWinLifecycleProcessTrace,
 };
 

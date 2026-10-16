@@ -23,6 +23,8 @@ import {
   type SubagentResult,
 } from "../substrate";
 import { formatRouteLabel, resolveShapePhaseRoute } from "../routes";
+import { GENERIC_EXECUTOR_SHAPE_EXECUTION } from "../supervision";
+
 import type {
   OrchestrationShape,
   OrchestrationShapeContext,
@@ -98,6 +100,7 @@ const PRODUCTION_DEPS: RuntimeDependencies = {
 export const ssiSingleWriterExclusiveLaneShape: OrchestrationShape = {
   name: "ssi-single-writer-exclusive-lane",
   description: "SSI completion with parallel read-only diagnosis, one allowlisted logical writer, and an exclusive serialized machine-test lane.",
+  execution: GENERIC_EXECUTOR_SHAPE_EXECUTION,
   run: (context) => runSsiSingleWriterExclusiveLane(context, PRODUCTION_DEPS),
 };
 

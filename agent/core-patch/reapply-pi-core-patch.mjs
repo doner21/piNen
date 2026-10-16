@@ -8,19 +8,18 @@
  *
  * Why this exists
  * ---------------
- * Pi extensions have no public API for a tool/event-handler to dispatch a
- * registered slash command (see agent/extensions/agent-reload/UPSTREAM_REQUEST.md,
- * https://github.com/earendil-works/pi/issues/6010). As an interim workaround,
- * three installed Pi `dist/` files are patched to expose
- * `pi.executeCommand(name, args?)` on the ExtensionAPI. This SINGLE core
- * patch enables BOTH of the following autonomous agent bridges:
+ * Older Pi releases had no public API for a tool/event-handler to dispatch a
+ * registered slash command. This script retains the legacy unbundled
+ * `pi.executeCommand(name, args?)` compatibility patch and the Windows child
+ * process hiding edits.
  *
- *   - agent_reload_runtime  (agent/extensions/agent-reload)
- *   - agent_new_session     (agent/extensions/agent-new-session)
- *
- * Each extension probes for `pi.executeCommand` at init. If the patch is
- * present, the deferred idle-poll bridge activates; if absent, the tool
- * returns a clear error about the missing API (no silent failure):
+ * Pi 0.84.2 added the supported
+ * `pi.sendUserMessage(..., { expandPromptTemplates: true })` command path, and
+ * Pi 0.84.3 changed the Node CLI entrypoint to `dist/bundle/cli.js`. Patching
+ * only `dist/core/*` therefore cannot alter the active bundled CLI. The
+ * agent_reload_runtime and agent_new_session extensions now use the public
+ * command path after a stable-idle poll and do NOT depend on this private
+ * patch. This patcher remains for modular-runtime/backward compatibility:
  *
  *   - dist/core/extensions/loader.js  (runtime stub + api delegate)
  *   - dist/core/extensions/runner.js  (runtime binding / command dispatch)
@@ -38,9 +37,10 @@
  *   - Backups before write + rollback guidance.
  *   - Safe failure: if an expected anchor is missing (Pi source drifted),
  *     the patcher STOPS and reports instead of corrupting files.
- *   - NO silent auto-patching, NO live reload, NO restart.
- *   - NEVER uses `pi.sendUserMessage('/command')` as a command bridge
- *     (that path does not dispatch commands — see UPSTREAM_REQUEST.md §2).
+ *   - NO silent auto-patching, NO live reload, NO restart in this script.
+ *   - The companion slash command reloads extensions after a successful apply.
+ *   - Public command dispatch requires `expandPromptTemplates: true`; omitting
+ *     that option sends literal slash text instead of invoking a command.
  *
  * Prior patch evidence
  * --------------------
@@ -68,9 +68,10 @@
  *   2  unmatched target / safe failure (anchor drift) — manual adaptation required
  *   3  bad usage / arguments
  *
- * After a successful `apply`, the RUNNING Pi process will NOT pick up the new
- * API until the user manually runs `/reload` (or `/agent-reload-runtime`) or
- * restarts Pi. This script deliberately does NOT trigger a reload.
+ * This script deliberately does NOT trigger a reload. The companion slash
+ * command reloads extensions after apply so the public bridge is activated.
+ * A resource `/reload` cannot load edits to already-imported core modules, and
+ * the bundled Pi 0.84.3+ CLI does not execute the patched dist/core files.
  */
 
 import { execFileSync } from "node:child_process";
@@ -147,24 +148,24 @@ const PATCHES = [
         desc: "loader.js: add pi.executeCommand API delegate",
         find: [
           "        getCommands() {",
-          "            runtime.assertActive();",
+          "            assertActive();",
           "            return runtime.getCommands();",
           "        },",
           "        setModel(model) {",
         ].join("\n"),
         replace: [
           "        getCommands() {",
-          "            runtime.assertActive();",
+          "            assertActive();",
           "            return runtime.getCommands();",
           "        },",
           "        executeCommand(name, args) {",
-          "            runtime.assertActive();",
+          "            assertActive();",
           "            return runtime.executeCommand(name, args);",
           "        },",
           "        setModel(model) {",
         ].join("\n"),
         sentinel:
-          "        executeCommand(name, args) {\n            runtime.assertActive();\n            return runtime.executeCommand(name, args);",
+          "        executeCommand(name, args) {\n            assertActive();\n            return runtime.executeCommand(name, args);",
       },
     ],
   },
@@ -210,11 +211,13 @@ const PATCHES = [
         find: [
           "export type SendUserMessageHandler = (content: string | (TextContent | ImageContent)[], options?: {",
           "    deliverAs?: \"steer\" | \"followUp\";",
+          "    expandPromptTemplates?: boolean;",
           "}) => void;",
         ].join("\n"),
         replace: [
           "export type SendUserMessageHandler = (content: string | (TextContent | ImageContent)[], options?: {",
           "    deliverAs?: \"steer\" | \"followUp\";",
+          "    expandPromptTemplates?: boolean;",
           "}) => void;",
           "export type ExecuteCommandHandler = (name: string, args?: string) => Promise<void>;",
         ].join("\n"),
@@ -561,7 +564,9 @@ function cmdApply() {
   }
 
   if (s.needed === 0) {
-    console.log("All edits already applied. Nothing to do (idempotent).");
+    console.log("All legacy compatibility edits already applied. Nothing to do (idempotent).");
+    console.log("The Pi 0.84.3+ bundled CLI does not execute these dist/core files.");
+    console.log("agent_new_session and agent_reload_runtime use Pi's public command-dispatch API instead.");
     writeManifest({ ...readManifest(), appliedTo: [{ piRoot, version, at: new Date().toISOString() }] });
     return 0;
   }
@@ -631,14 +636,11 @@ function cmdApply() {
     console.log(`Backup for rollback: ${backupDir}`);
     return 2;
   }
-  console.log("\nPatch applied successfully and verified statically.");
-  console.log("IMPORTANT: the running Pi process still uses the OLD (unpatched) code.");
-  console.log("To load the patched core, the user must manually run:");
-  console.log("    /reload");
-  console.log("  (or /agent-reload-runtime, or restart Pi).");
-  console.log("After reload, both agent_reload_runtime AND agent_new_session work");
-  console.log("through the same pi.executeCommand core bridge.");
-  console.log("This script did NOT trigger a reload.");
+  console.log("\nLegacy compatibility patch applied successfully and verified statically.");
+  console.log("Pi 0.84.3+ runs dist/bundle/cli.js, not these patched dist/core files.");
+  console.log("agent_reload_runtime and agent_new_session use the supported public");
+  console.log("command-dispatch API and no longer require pi.executeCommand.");
+  console.log("This script did NOT trigger a reload; the companion slash command reloads extensions.");
   return 0;
 }
 
@@ -683,8 +685,8 @@ function cmdVerify() {
     console.log("\nVerify result: NOT fully patched / structural checks failed.");
     return 1;
   }
-  console.log("\nVerify result: PASS — patch is present and structurally consistent.");
-  console.log("NOTE: this is a static check only. No live reload was performed.");
+  console.log("\nVerify result: PASS — legacy compatibility patch is present and structurally consistent.");
+  console.log("NOTE: Pi 0.84.3+ uses dist/bundle/cli.js; the agent bridges use public command dispatch.");
   return 0;
 }
 
@@ -772,9 +774,8 @@ function cmdRollback(argBackup) {
   console.log(`\nRestored ${restored} file(s) from ${backupName}.`);
   console.log(`Current (pre-rollback) state was snapshotted to:\n  ${preRollbackDir}`);
   console.log("\nTo re-apply the patch later, run: `apply`.");
-  console.log("IMPORTANT: run `/reload` (or restart Pi) to load the rolled-back core.");
-  console.log("  After reload/restart, both agent_reload_runtime and agent_new_session");
-  console.log("  reflect the rolled-back state (they share the pi.executeCommand bridge).");
+  console.log("The rollback affects only the legacy modular-runtime compatibility edits.");
+  console.log("Pi 0.84.3+ agent reload/new-session bridges use public command dispatch.");
   return 0;
 }
 
@@ -798,8 +799,9 @@ Commands:
 Environment:
   PI_CORE_ROOT   Override the resolved Pi package root directory.
 
-This script is USER-INVOKED ONLY. Importing it does nothing. It never triggers
-a live reload and never uses pi.sendUserMessage('/command') as a bridge.`);
+This script is USER-INVOKED ONLY. Importing it does nothing and it never
+triggers a live reload. Pi 0.84.2+ bridges use public command dispatch with
+expandPromptTemplates:true; the companion slash command reloads extensions.`);
 }
 
 function main(argv) {

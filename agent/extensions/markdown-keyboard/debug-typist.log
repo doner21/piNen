@@ -1,0 +1,4 @@
+{"status": "ready", "window": "Markdown Type Foundry", "hwnd": 133074}
+{"kind": "command", "entry": {"command": "SELECT_ALL", "count": 1}, "clicks": 1, "seconds": 0.082}
+{"kind": "command", "entry": {"command": "BACKSPACE", "count": 1}, "clicks": 1, "seconds": 0.052}
+stopped

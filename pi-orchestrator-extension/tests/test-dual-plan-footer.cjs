@@ -52,6 +52,7 @@ async function testFooterMatchesResolvedRoutes() {
       {
         task: "Apply a minimal scheduler race fix and verify it.",
         paradigm: "dual-plan-synthesis-execute-verify",
+        supervision: "off",
         preflight: false, cwd: tmp, maxSubagents: 8, maxRetries: 0,
         // Allowed non-default executor route: the configured GPT-5.5 fallback.
         executorProvider: "openai-codex", executorModel: "gpt-5.5",

@@ -17,6 +17,8 @@ import {
 } from "../substrate";
 import { formatRouteLabel, resolveShapePhaseRoute } from "../routes";
 
+import { GENERIC_EXECUTOR_SHAPE_EXECUTION } from "../supervision";
+
 import type {
   OrchestrationShape,
   OrchestrationShapeContext,
@@ -58,6 +60,7 @@ const MAX_FINAL_CHARS = 20_000;
 export const m66ExplicitRoutingProofShape: OrchestrationShape = {
   name: "m66-explicit-routing-proof",
   description: "A bounded proof shape that preserves explicit planner, executor, and verifier routes through genuine registered-tool dispatch and records isolated runtime role evidence.",
+  execution: GENERIC_EXECUTOR_SHAPE_EXECUTION,
   run: runM66ExplicitRoutingProof,
 };
 

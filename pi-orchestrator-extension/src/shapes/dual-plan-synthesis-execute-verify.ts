@@ -24,6 +24,8 @@ import {
 import { RunStateStore, collectSurvivorResult } from "../run-state";
 import { resolveRouteWithFallback, type ResolvedRoute } from "../routes";
 
+import { GENERIC_EXECUTOR_SHAPE_EXECUTION } from "../supervision";
+
 import type {
   OrchestrationShape,
   OrchestrationShapeContext,
@@ -95,6 +97,7 @@ export const dualPlanSynthesisExecuteVerifyShape: OrchestrationShape = {
   description:
     "Two independent routed planners → routed synthesis reviewer → routed executor → " +
     "routed direct-evidence verifier with bounded executor retry feedback.",
+  execution: GENERIC_EXECUTOR_SHAPE_EXECUTION,
   run: runDualPlanSynthesisExecuteVerify,
 };
 
@@ -167,17 +170,23 @@ function checkDiscoveryReadOnly(label: string, result: SubagentResult): void {
 // ── Predicted write-set block helper ───────────────────────────────────────
 
 /**
- * Build the untruncated, clearly delimited BEGIN/END block that is injected
- * into planner and synthesis prompts.  Agents must not plan outside this set;
- * if it is insufficient they must report conflict rather than widen.
+ * Build the untruncated, clearly delimited BEGIN/END block for an explicit,
+ * non-empty caller scope. Agents must not plan outside this set; if it is
+ * insufficient they must report conflict rather than widen.
  */
 function buildPredictedWriteSetBlock(writeSet: string[]): string {
-  if (!writeSet || writeSet.length === 0) {
-    return "BEGIN_PREDICTED_WRITE_SET\n(empty — no contract-granted writes)\nEND_PREDICTED_WRITE_SET";
-  }
   return "BEGIN_PREDICTED_WRITE_SET\n" +
     writeSet.map((entry) => `- ${entry}`).join("\n") +
     "\nEND_PREDICTED_WRITE_SET";
+}
+
+/** Omission means no caller-level scope, so it must inject no authority text. */
+function buildPredictedWriteSetSection(writeSet: string[] | undefined): string {
+  if (!writeSet?.length) return "";
+  return `
+Authoritative contract-granted write set (do not plan outside it; if insufficient, report conflict rather than widen):
+${buildPredictedWriteSetBlock(writeSet)}
+`;
 }
 
 // ── Main orchestration ─────────────────────────────────────────────────────
@@ -205,9 +214,9 @@ async function runDualPlanSynthesisExecuteVerify(
       `verifier=verifier:${formatRoute(routes.verifier)}.`,
   );
 
-  // Normalize the predicted write set ONCE here so every consumer — both
-  // planner prompts, the synthesis prompt, and discovery-only details —
-  // sees the identical mechanically frozen array.
+  // Normalize an explicit predicted write set ONCE so every consumer sees the
+  // same frozen scope. Preserve undefined: omission grants no caller-level
+  // deterministic restriction and must not become an authoritative empty set.
   const predictedWriteSet = normalizeWriteSet(params.predictedWriteSet);
 
   // In discovery-only mode, restrict planner/synthesis tools to a read-only
@@ -333,7 +342,7 @@ async function runDualPlanSynthesisExecuteVerify(
       spawnGuard,
       plannerOutputs,
       synthesis,
-      predictedWriteSet,
+      predictedWriteSet ?? [],
       routes,
     );
     const details = buildDiscoveryOnlyDetails(
@@ -341,7 +350,7 @@ async function runDualPlanSynthesisExecuteVerify(
       spawnGuard,
       plannerOutputs,
       synthesis,
-      predictedWriteSet,
+      predictedWriteSet ?? [],
       routes,
     );
     return { markdown, details };
@@ -434,7 +443,7 @@ async function runPlannerPhase(
   signal: AbortSignal | undefined,
   emit: (text: string) => void,
   inheritedModel: { provider?: string; model?: string } | undefined,
-  predictedWriteSet: string[],
+  predictedWriteSet: string[] | undefined,
   routes: DualPlanRoutes,
 ): Promise<PlannerOutput[]> {
   const plannerJobs: Array<{ label: "Plan A" | "Plan B"; route: ResolvedRoute; prompt: string }> = [
@@ -471,17 +480,14 @@ function buildPlannerPrompt(
   label: "Plan A" | "Plan B",
   route: { provider: string; model: string },
   task: string,
-  predictedWriteSet: string[],
+  predictedWriteSet: string[] | undefined,
 ): string {
   return `You are ${label} in a dual-plan-synthesis-execute-verify orchestration.
 You should be running as provider=${route.provider}, model=${route.model}.
 
 Original task:
 ${task}
-
-Authoritative contract-granted write set (do not plan outside it; if insufficient, report conflict rather than widen):
-${buildPredictedWriteSetBlock(predictedWriteSet)}
-
+${buildPredictedWriteSetSection(predictedWriteSet)}
 Produce an independent implementation plan only. Do not edit files.
 
 Return concise markdown with:
@@ -497,7 +503,7 @@ Do not assume the other planner's answer.`;
 function buildSynthesisPrompt(
   task: string,
   plannerOutputs: PlannerOutput[],
-  predictedWriteSet: string[],
+  predictedWriteSet: string[] | undefined,
   route: ResolvedRoute,
 ): string {
   return `You are the synthesis reviewer in a dual-plan-synthesis-execute-verify orchestration.
@@ -505,10 +511,7 @@ You should be running as provider=${route.provider}, model=${route.model}.
 
 Original task:
 ${task}
-
-Authoritative contract-granted write set (do not plan outside it; if insufficient, report conflict rather than widen):
-${buildPredictedWriteSetBlock(predictedWriteSet)}
-
+${buildPredictedWriteSetSection(predictedWriteSet)}
 Independent planner outputs:
 ${plannerOutputs
   .map((output) => `## ${output.label} (${output.route.provider}/${output.route.model})\n${output.result.text}`)
@@ -906,8 +909,9 @@ function buildFinalMarkdown(
 
 // ── Discovery-only helpers ────────────────────────────────────────────────
 
-function normalizeWriteSet(raw: string[] | undefined): string[] {
-  if (!raw || raw.length === 0) return [];
+function normalizeWriteSet(raw: string[] | undefined): string[] | undefined {
+  if (raw === undefined) return undefined;
+  if (raw.length === 0) return [];
   const seen = new Set<string>();
   const normalized: string[] = [];
   for (const entry of raw) {

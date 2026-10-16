@@ -14,10 +14,11 @@
  * - Advisory lock: `<agentDir>/scheduler.lock` (O_EXCL acquire + stale break)
  *   serializes every read-modify-write so multiple Pi processes can't clobber
  *   each other.
- * - cwd-scoped schedules: each schedule records an `originCwdKey`. Only
- *   schedules whose key matches the *current* session cwd are drained or
- *   timer-fired in that session. A schedule created in project A never fires
- *   while you're working in project B.
+ * - cwd/session-scoped schedules: each schedule records an `originCwdKey`.
+ *   `targetSessionFile` is the preferred session fence; otherwise a recorded
+ *   `originSessionFile` is the fence. Only records with neither session field
+ *   retain cwd-wide delivery, so legacy schedules remain compatible without
+ *   leaking fenced wake-ups into another Pi window.
  * - Claim-before-deliver: firing atomically transitions a schedule
  *   `pending -> delivering` (persisted) *before* sending the message, so two
  *   timers/processes can never double-deliver the same wake-up. A `claimToken`
@@ -27,12 +28,21 @@
  * - Single session-scoped timer: at most one `setTimeout` per session, always
  *   aimed at the earliest due schedule for the current cwd. Cleared on
  *   `session_shutdown`; never started in the factory.
- * - Reason-aware `session_start` drain: `startup`/`new`/`resume` recover stuck
- *   deliveries, drain (deferred ~250ms) only schedules due at the session-start
- *   instant, suppress any leftover overdue, then arm. `reload`/`fork` recover
- *   and suppress everything due before the session-start instant, arming only
- *   future schedules. Suppressed records (`dueAt <= suppressOverdueDueAtOrBefore`)
- *   are skipped by both `armTimer` and `onTimerFire`.
+ * - Reason-aware `session_start` drain: a confirmed `new` session first adopts
+ *   pending fences from its predecessor, whether or not the predecessor JSONL
+ *   still exists (or fails them visibly when the replacement is ephemeral).
+ *   `startup`/`new`/`resume`/`reload` then recover
+ *   stuck deliveries, drain (deferred ~250ms) schedules due at the session-start
+ *   instant, and arm any remainder. `fork` alone suppresses records due before
+ *   the fork started so an old wake-up is not injected into a cloned conversation.
+ * - External-store refresh: user input and every completed turn re-read the
+ *   durable store and re-arm the single timer, so records inserted by another
+ *   process are discovered without waiting for another session start.
+ * - Orphan-fence reconciliation: every runtime store read may retire a pending
+ *   fenced record only after the target file is conclusively absent and a
+ *   complete process/session observation finds no live (or unknown-liveness)
+ *   exact target in the origin cwd. Runtime leases protect live sessions whose
+ *   JSONL file has not been flushed yet; uncertain probes fail closed.
  * - Guards: minimum-delay nudge (no immediate self-triggering loops), maximum
  *   delay cap, per-cwd pending backlog cap, terminal-record retention pruning,
  *   stuck-`delivering` recovery, and "deliver at most once" via status machine.
@@ -80,8 +90,14 @@ const LOCK_STALE_MS = 60_000;
 const LOCK_TIMEOUT_MS = 5_000;
 /** Lock poll interval. */
 const LOCK_POLL_MS = 50;
+/** Bounded backoff for transient Windows contention while atomically replacing
+ *  the store. The initial rename is immediate; these are retry delays only. */
+const STORE_RENAME_RETRY_DELAYS_MS = [10, 25, 50, 100, 200] as const;
+const WINDOWS_RENAME_CONTENTION_CODES = new Set(["EACCES", "EBUSY", "EPERM"]);
 /** Deferred drain delay on startup/new/resume so the UI/runtime settles first. */
 const SESSION_START_DRAIN_DELAY_MS = 250;
+/** Let a newly-created target flush its first session file/lease before orphan checks. */
+const ORPHAN_FENCE_GRACE_MS = 5_000;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -110,8 +126,10 @@ export interface ScheduleRecord {
 	originCwdKey: string;
 	/** Human-readable cwd captured at creation time. */
 	originCwd?: string;
-	/** Session file the schedule was created in (for traceability). */
+	/** Session file the schedule was created in; fallback fence when no target is set. */
 	originSessionFile?: string;
+	/** Explicit destination session; takes precedence over the origin fallback. */
+	targetSessionFile?: string;
 	/** Whether the schedule was created via the tool or a slash command. */
 	createdBy?: ScheduleCreatedBy;
 	/** Epoch ms when the record was last mutated. */
@@ -138,6 +156,41 @@ export interface SchedulerStore {
 	nextSeq: number;
 }
 
+export type SessionFileProbe = "present" | "missing" | "unknown";
+export type ProcessLiveness = "live" | "dead" | "unknown";
+
+export interface SessionProcessObservation {
+	cwd: string;
+	sessionFile?: string;
+	pid?: number;
+	liveness: ProcessLiveness;
+}
+
+export interface SessionProcessObservationSnapshot {
+	/** `unknown` means the inventory itself is incomplete and cannot prove absence. */
+	certainty: "complete" | "unknown";
+	observations: SessionProcessObservation[];
+}
+
+export interface SchedulerDependencies {
+	probeSessionFile?: (sessionFile: string) => Promise<SessionFileProbe>;
+	observeSessionProcesses?: () => Promise<SessionProcessObservationSnapshot>;
+}
+
+interface ResolvedSchedulerDependencies {
+	probeSessionFile: (sessionFile: string) => Promise<SessionFileProbe>;
+	observeSessionProcesses: () => Promise<SessionProcessObservationSnapshot>;
+}
+
+interface SchedulerSessionLease {
+	version: 1;
+	leaseId: string;
+	pid: number;
+	cwd: string;
+	sessionFile?: string;
+	updatedAt: number;
+}
+
 /** Subset of ScheduleRecord needed to render a wake-up envelope. */
 export type WakeEnvelopeInput = Pick<
 	ScheduleRecord,
@@ -148,7 +201,17 @@ export type WakeEnvelopeInput = Pick<
 	| "originCwd"
 	| "originCwdKey"
 	| "originSessionFile"
+	| "targetSessionFile"
 >;
+
+interface PendingDeliveryConfirmation {
+	claimToken: string;
+	claimed: WakeEnvelopeInput;
+	previousAttempt?: number;
+	previousOverdue?: boolean;
+	envelope?: string;
+	sent: boolean;
+}
 
 // ---------------------------------------------------------------------------
 // Tool parameter schema
@@ -184,6 +247,12 @@ const AgentSchedulerParams = Type.Object({
 	label: Type.Optional(
 		Type.String({ description: "Optional human-readable purpose (schedule)." }),
 	),
+	targetSessionFile: Type.Optional(
+		Type.String({
+			description:
+				"Exact destination session file for schedule. Use 'current' to target the creating session.",
+		}),
+	),
 	id: Type.Optional(
 		Type.String({
 			description: "Schedule id or unique prefix (required for get/cancel).",
@@ -212,6 +281,31 @@ export type AgentSchedulerInput = Static<typeof AgentSchedulerParams>;
 export function normalizeCwdKey(cwd: string): string {
 	const resolved = cwd ? resolve(cwd) : "";
 	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+/** Normalize a session file for routing comparisons. */
+export function normalizeSessionFileKey(sessionFile: string): string {
+	const resolved = sessionFile ? resolve(sessionFile) : "";
+	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+/** Return the effective session fence: explicit target, then origin fallback. */
+export function deliveryTargetSessionFile(
+	rec: Pick<ScheduleRecord, "targetSessionFile" | "originSessionFile">,
+): string | undefined {
+	return rec.targetSessionFile?.trim() || rec.originSessionFile?.trim() || undefined;
+}
+
+/** Match the durable routing contract. Only records with no fence use cwd. */
+export function scheduleMatchesSession(
+	rec: Pick<ScheduleRecord, "originCwdKey" | "targetSessionFile" | "originSessionFile">,
+	cwdKey: string,
+	sessionFile?: string,
+): boolean {
+	const target = deliveryTargetSessionFile(rec);
+	if (!target) return rec.originCwdKey === cwdKey;
+	if (!sessionFile) return false;
+	return normalizeSessionFileKey(target) === normalizeSessionFileKey(sessionFile);
 }
 
 /** Parse a human delay token like "10m", "2h", "1d", "90s", or "30" (seconds).
@@ -267,11 +361,22 @@ function splitOnDashDash(s: string): [string, string] | null {
 export function parseScheduleArgs(
 	args: string,
 ):
-	| { source: "relative"; delayMs: number; message: string }
-	| { source: "absolute"; dueAt: number; message: string }
+	| { source: "relative"; delayMs: number; message: string; targetSessionFile?: string }
+	| { source: "absolute"; dueAt: number; message: string; targetSessionFile?: string }
 	| null {
-	const trimmed = args.trim();
+	let trimmed = args.trim();
 	if (!trimmed) return null;
+	let targetSessionFile: string | undefined;
+	if (trimmed.startsWith("--target-session")) {
+		const option = /^--target-session(?:=("[^"]+"|'[^']+'|\S+)|\s+("[^"]+"|'[^']+'|\S+))\s+([\s\S]+)$/.exec(trimmed);
+		if (!option) return null;
+		const rawTarget = option[1] ?? option[2];
+		targetSessionFile = rawTarget.replace(/^(?:"([\s\S]*)"|'([\s\S]*)')$/, "$1$2");
+		if (!targetSessionFile) return null;
+		trimmed = option[3].trim();
+	}
+	const withTarget = <T extends object>(value: T): T & { targetSessionFile?: string } =>
+		targetSessionFile ? { ...value, targetSessionFile } : value;
 
 	// Absolute form: "at <time> [--] <message>".
 	const atMatch = /^at\s+/i.exec(trimmed);
@@ -309,7 +414,7 @@ export function parseScheduleArgs(
 		if (!message) return null;
 		const dueAt = parseAbsolute(timePart);
 		if (dueAt === null) return null;
-		return { source: "absolute", dueAt, message };
+		return withTarget({ source: "absolute" as const, dueAt, message });
 	}
 
 	// Relative form.
@@ -329,7 +434,7 @@ export function parseScheduleArgs(
 	if (!delayTok || !message) return null;
 	const delayMs = parseDelay(delayTok);
 	if (delayMs === null) return null;
-	return { source: "relative", delayMs, message };
+	return withTarget({ source: "relative" as const, delayMs, message });
 }
 
 /** Compute a due time (epoch ms) from tool schedule params. Exactly one timing
@@ -405,6 +510,8 @@ export function buildWakeEnvelope(rec: WakeEnvelopeInput, deliveredAt: number): 
 	const overdueBy = overdueByMs > 0 ? formatDelay(overdueByMs) : "0s";
 	const originCwd = rec.originCwd ?? rec.originCwdKey ?? "(unknown)";
 	const originSession = rec.originSessionFile ?? "(unavailable)";
+	const targetSession = deliveryTargetSessionFile(rec);
+	const targetText = targetSession ?? "(any session in origin cwd)";
 	const label = rec.label ? ` (${rec.label})` : "";
 	return [
 		"[Agent Scheduler Wake-Up]",
@@ -414,6 +521,12 @@ export function buildWakeEnvelope(rec: WakeEnvelopeInput, deliveredAt: number): 
 		`Overdue by: ${overdueBy} (${overdueByMs}ms)`,
 		`Origin cwd: ${originCwd}`,
 		`Origin session: ${originSession}`,
+		`Target session: ${targetText}`,
+		...(targetSession
+			? [
+					"Routing guard: If the current session file does not match the target session, refuse this wake-up and do not perform the task.",
+				]
+			: []),
 		"",
 		"Task:",
 		rec.message,
@@ -433,7 +546,9 @@ export function formatSchedule(s: ScheduleRecord, now: number): string {
 	const label = s.label ? ` ${JSON.stringify(s.label)}` : "";
 	const overdue = s.overdue ? " (overdue)" : "";
 	const reason = s.failureReason ? ` :: ${s.failureReason}` : "";
-	return `#${s.id} [${s.status}]${overdue} due ${due}${when ? ` (${when})` : ""}${label}${reason}`;
+	const target = deliveryTargetSessionFile(s);
+	const routed = target ? ` -> ${target}` : "";
+	return `#${s.id} [${s.status}]${overdue} due ${due}${when ? ` (${when})` : ""}${label}${routed}${reason}`;
 }
 
 /** Return an empty store. */
@@ -466,6 +581,7 @@ export function normalizeStore(parsed: unknown): SchedulerStore {
 				originCwdKey: typeof r.originCwdKey === "string" ? r.originCwdKey : "",
 				originCwd: r.originCwd,
 				originSessionFile: r.originSessionFile,
+				targetSessionFile: r.targetSessionFile,
 				createdBy: r.createdBy,
 				updatedAt: r.updatedAt,
 				claimToken: r.claimToken,
@@ -513,15 +629,15 @@ export function pruneStore(store: SchedulerStore, now = Date.now()): void {
 	}
 	// Drop terminal records past retention.
 	const fresh = terminal.filter((r) => {
-		const ts = r.deliveredAt ?? r.cancelledAt ?? r.createdAt;
+		const ts = r.deliveredAt ?? r.cancelledAt ?? r.updatedAt ?? r.createdAt;
 		return now - ts < RETENTION_MS;
 	});
 	// Enforce hard cap, dropping oldest terminal first.
 	if (fresh.length > MAX_RECORDS) {
 		fresh.sort(
 			(a, b) =>
-				(a.deliveredAt ?? a.cancelledAt ?? a.createdAt) -
-				(b.deliveredAt ?? b.cancelledAt ?? b.createdAt),
+				(a.deliveredAt ?? a.cancelledAt ?? a.updatedAt ?? a.createdAt) -
+				(b.deliveredAt ?? b.cancelledAt ?? b.updatedAt ?? b.createdAt),
 		);
 		fresh.splice(0, fresh.length - MAX_RECORDS);
 	}
@@ -550,6 +666,126 @@ function randomHex(bytes: number): string {
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((r) => setTimeout(r, ms));
+}
+
+function sessionLeaseDir(): string {
+	return join(getSchedulerPaths().dir, "scheduler-sessions");
+}
+
+async function defaultProbeSessionFile(sessionFile: string): Promise<SessionFileProbe> {
+	try {
+		await fsp.access(sessionFile);
+		return "present";
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		return code === "ENOENT" || code === "ENOTDIR" ? "missing" : "unknown";
+	}
+}
+
+function probeProcessLiveness(pid: number): ProcessLiveness {
+	if (!Number.isSafeInteger(pid) || pid <= 0) return "unknown";
+	try {
+		process.kill(pid, 0);
+		return "live";
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "ESRCH" ? "dead" : "unknown";
+	}
+}
+
+function parseSessionLease(value: unknown): SchedulerSessionLease | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const lease = value as Partial<SchedulerSessionLease>;
+	if (
+		lease.version !== 1 ||
+		typeof lease.leaseId !== "string" ||
+		!Number.isSafeInteger(lease.pid) ||
+		typeof lease.cwd !== "string" ||
+		typeof lease.updatedAt !== "number" ||
+		(lease.sessionFile !== undefined && typeof lease.sessionFile !== "string")
+	) return undefined;
+	return lease as SchedulerSessionLease;
+}
+
+/** Find the newest replacement-session identity published by this Pi process.
+ *  A second runtime in the same process can publish the lease before the
+ *  session manager exposes its new JSONL path to this lifecycle callback. */
+async function ownLeasedSessionFile(
+	cwd: string | undefined,
+	previousSessionFile: string,
+): Promise<string | undefined> {
+	if (!cwd) return undefined;
+	let names: string[];
+	try {
+		names = await fsp.readdir(sessionLeaseDir());
+	} catch {
+		return undefined;
+	}
+	let newest: SchedulerSessionLease | undefined;
+	for (const name of names) {
+		if (!name.endsWith(".json")) continue;
+		try {
+			const lease = parseSessionLease(
+				JSON.parse(await fsp.readFile(join(sessionLeaseDir(), name), "utf8")),
+			);
+			const candidate = lease?.sessionFile?.trim();
+			if (
+				!lease ||
+				lease.pid !== process.pid ||
+				normalizeCwdKey(lease.cwd) !== normalizeCwdKey(cwd) ||
+				!candidate ||
+				normalizeSessionFileKey(candidate) === normalizeSessionFileKey(previousSessionFile)
+			) continue;
+			if (!newest || lease.updatedAt > newest.updatedAt) newest = lease;
+		} catch {
+			// A partially-written or concurrently-removed lease is not authoritative.
+		}
+	}
+	return newest?.sessionFile?.trim() || undefined;
+}
+
+/** Observe scheduler runtimes across Pi processes through their process-bound leases. */
+async function observeLeasedSessionProcesses(): Promise<SessionProcessObservationSnapshot> {
+	let names: string[];
+	try {
+		names = await fsp.readdir(sessionLeaseDir());
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "ENOENT"
+			? { certainty: "complete", observations: [] }
+			: { certainty: "unknown", observations: [] };
+	}
+	const observations: SessionProcessObservation[] = [];
+	let certainty: SessionProcessObservationSnapshot["certainty"] = "complete";
+	for (const name of names) {
+		if (!name.endsWith(".json")) continue;
+		try {
+			const lease = parseSessionLease(
+				JSON.parse(await fsp.readFile(join(sessionLeaseDir(), name), "utf8")),
+			);
+			if (!lease) {
+				certainty = "unknown";
+				continue;
+			}
+			observations.push({
+				cwd: lease.cwd,
+				sessionFile: lease.sessionFile,
+				pid: lease.pid,
+				liveness: probeProcessLiveness(lease.pid),
+			});
+		} catch {
+			certainty = "unknown";
+		}
+	}
+	return { certainty, observations };
+}
+
+function resolveSchedulerDependencies(
+	dependencies: SchedulerDependencies,
+): ResolvedSchedulerDependencies {
+	return {
+		probeSessionFile: dependencies.probeSessionFile ?? defaultProbeSessionFile,
+		observeSessionProcesses:
+			dependencies.observeSessionProcesses ?? observeLeasedSessionProcesses,
+	};
 }
 
 /**
@@ -601,7 +837,7 @@ async function withLock<T>(
 }
 
 /** Read the store without locking (rename makes reads atomic). */
-async function readStore(): Promise<SchedulerStore> {
+async function readStoreRaw(): Promise<SchedulerStore> {
 	const { store: storePath, dir } = getSchedulerPaths();
 	try {
 		await fsp.mkdir(dir, { recursive: true });
@@ -624,6 +860,27 @@ async function readStore(): Promise<SchedulerStore> {
 	}
 }
 
+/** Rename a prepared store into place, tolerating brief Windows file contention. */
+async function replaceStoreAtomic(tmp: string, storePath: string): Promise<void> {
+	for (let retry = 0; ; retry += 1) {
+		try {
+			await fsp.rename(tmp, storePath);
+			return;
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			const delay = STORE_RENAME_RETRY_DELAYS_MS[retry];
+			if (
+				!code ||
+				!WINDOWS_RENAME_CONTENTION_CODES.has(code) ||
+				delay === undefined
+			) {
+				throw error;
+			}
+			await sleep(delay);
+		}
+	}
+}
+
 /** Atomic write: unique temp file -> rename. Caller must hold the lock. */
 async function writeStoreAtomic(store: SchedulerStore): Promise<void> {
 	const { store: storePath, dir } = getSchedulerPaths();
@@ -631,8 +888,14 @@ async function writeStoreAtomic(store: SchedulerStore): Promise<void> {
 	await fsp.mkdir(dir, { recursive: true });
 	const data = JSON.stringify(store, null, 2);
 	const tmp = `${storePath}.${process.pid}.${randomHex(6)}.tmp`;
-	await fsp.writeFile(tmp, data, "utf8");
-	await fsp.rename(tmp, storePath);
+	try {
+		await fsp.writeFile(tmp, data, "utf8");
+		await replaceStoreAtomic(tmp, storePath);
+	} finally {
+		// A successful rename consumes the temp path. On failure, remove only our
+		// private temp file; the existing destination is never unlinked.
+		await fsp.unlink(tmp).catch(() => {});
+	}
 }
 
 /** Lock + read + mutate + write. */
@@ -641,7 +904,7 @@ async function mutateStore<T>(
 ): Promise<T> {
 	const { lock: lockPath } = getSchedulerPaths();
 	return withLock(lockPath, async () => {
-		const store = await readStore();
+		const store = await readStoreRaw();
 		const result = await fn(store);
 		await writeStoreAtomic(store);
 		return result;
@@ -658,6 +921,22 @@ function sessionFileOf(ctx: ExtensionContext | undefined): string | undefined {
 	}
 }
 
+function resolveRequestedTargetSession(
+	input: string | undefined,
+	ctx: ExtensionContext,
+): { targetSessionFile?: string; error?: string } {
+	if (input === undefined) return {};
+	const trimmed = input.trim();
+	if (!trimmed) return { error: "targetSessionFile must not be empty." };
+	if (trimmed.toLowerCase() === "current") {
+		const current = sessionFileOf(ctx);
+		return current
+			? { targetSessionFile: current }
+			: { error: "The current session has no durable session file to target." };
+	}
+	return { targetSessionFile: resolve(ctx.cwd, trimmed) };
+}
+
 // ---------------------------------------------------------------------------
 // Runtime (session-scoped)
 // ---------------------------------------------------------------------------
@@ -671,60 +950,105 @@ class SchedulerRuntime {
 	private drainTimer: ReturnType<typeof setTimeout> | undefined;
 	/** Id the current timer is aimed at, for cancellation checks. */
 	private armedId: string | undefined;
-	/** Current session cwd, captured from session_start / tool ctx. */
+	/** Current session cwd and file, captured from lifecycle/tool contexts. */
 	private cwd: string | undefined;
+	private sessionFile: string | undefined;
 	/** Suppresses re-entrancy in the timer fire path. */
 	private firing = false;
-	/** Epoch ms captured at session_start; used to bound the startup drain. */
-	private sessionStartAt: number | undefined;
 	/** When set, pending records with dueAt <= this are suppressed (not armed
-	 *  or timer-fired) for the rest of the session. Used to drop overdue
-	 *  schedules that were already drained or should not fire on reload/fork. */
+	 *  or timer-fired) for the rest of the session. Used only for forks, where an
+	 *  old wake-up must not be injected into a cloned conversation. */
 	private suppressOverdueDueAtOrBefore: number | undefined;
+	/** Invalidates older overlapping async arm attempts so only one timer wins. */
+	private armRevision = 0;
+	/** Set as soon as ordinary input begins. A due timer must then wait for
+	 *  agent_settled instead of starting an overlapping prompt during tool work. */
+	private boundaryBlocked = false;
+	/** Claimed records remain here until their wake user entry is observable in
+	 *  the durable session tree. Calling sendUserMessage is not confirmation. */
+	private pendingConfirmations = new Map<string, PendingDeliveryConfirmation>();
+	private readonly leaseId = `${process.pid}-${randomHex(8)}`;
+	private leasePath: string | undefined;
 
-	constructor(private readonly pi: ExtensionAPI) {}
+	constructor(
+		private readonly pi: ExtensionAPI,
+		private readonly dependencies: ResolvedSchedulerDependencies,
+	) {}
 
 	// -- lifecycle ---------------------------------------------------------
 
-	onSessionStart(event: SessionStartEvent, ctx: ExtensionContext): void {
+	async onSessionStart(event: SessionStartEvent, ctx: ExtensionContext): Promise<void> {
 		this.cwd = ctx.cwd;
+		this.sessionFile = sessionFileOf(ctx);
+		this.boundaryBlocked = !this.contextIsIdle(ctx);
 		const startedAt = Date.now();
-		this.sessionStartAt = startedAt;
-		// Inspect the start reason to decide how overdue schedules are handled.
-		const reason = event.reason;
-		if (reason === "reload" || reason === "fork") {
-			// Recover crashed deliveries, then suppress everything due before the
-			// session-start instant and arm only future schedules. We do NOT
-			// drain on reload/fork: the prior session already had its chance and
-			// re-draining could double-deliver into a forked conversation.
+		// A successful `new` is the only lifecycle event that authoritatively links
+		// a predecessor to this replacement. Reconcile before publishing this
+		// runtime's lease: if the context path is briefly unavailable, an existing
+		// same-process lease may already contain the replacement identity.
+		try {
+			await this.reconcileNewSessionFences(event, ctx);
+		} catch (error) {
+			this.notify(
+				ctx,
+				`agent-scheduler newSessionFenceTransition failed: ${(error as Error).message}`,
+				"error",
+			);
+		}
+		try {
+			await this.publishSessionLease();
+		} catch (error) {
+			this.notify(
+				ctx,
+				`agent-scheduler session observation lease failed: ${(error as Error).message}`,
+				"error",
+			);
+		}
+		// Reconcile before stale-delivery recovery. A prior runtime may have
+		// appended the wake turn and exited before it could stamp the record.
+		try {
+			await this.confirmAppendedWakeups(ctx);
+			await this.recoverStuck();
+		} catch (error) {
+			this.notify(
+				ctx,
+				`agent-scheduler reconcileDeliveries failed: ${(error as Error).message}`,
+				"error",
+			);
+		}
+		// A fork must not inherit an old due wake-up into the cloned conversation.
+		// Every other start reason, including reload, drains overdue records: a
+		// reload can outlast a scheduled continuation and must not strand it.
+		if (event.reason === "fork") {
 			this.suppressOverdueDueAtOrBefore = startedAt - 1;
-			this.safeAsync("recoverStuck", () => this.recoverStuck(), ctx);
 			this.safeAsync("armTimer", () => this.armTimer(ctx), ctx);
 		} else {
-			// startup / new / resume: recover, then defer the overdue drain so the
-			// UI/runtime settles. Drain only schedules due at the session-start
-			// instant, then suppress any leftover overdue and arm.
-			this.safeAsync("recoverStuck", () => this.recoverStuck(), ctx);
+			this.suppressOverdueDueAtOrBefore = undefined;
 			this.drainTimer = setTimeout(() => {
 				this.drainTimer = undefined;
 				this.safeAsync("drainOverdue", async () => {
 					await this.drainOverdue(ctx, startedAt);
-					// Suppress any overdue that the (batched) drain could not deliver.
-					this.suppressOverdueDueAtOrBefore = startedAt;
+					// armTimer immediately picks up anything beyond the bounded drain batch.
 					await this.armTimer(ctx);
 				}, ctx);
 			}, SESSION_START_DRAIN_DELAY_MS);
 		}
 	}
 
-	onSessionShutdown(): void {
+	async onSessionShutdown(): Promise<void> {
+		this.armRevision += 1;
 		this.clearTimer();
 		if (this.drainTimer) {
 			clearTimeout(this.drainTimer);
 			this.drainTimer = undefined;
 		}
+		const leasePath = this.leasePath;
+		this.leasePath = undefined;
+		if (leasePath) await fsp.unlink(leasePath).catch(() => {});
 		this.cwd = undefined;
-		this.sessionStartAt = undefined;
+		this.sessionFile = undefined;
+		this.boundaryBlocked = false;
+		this.pendingConfirmations.clear();
 		this.suppressOverdueDueAtOrBefore = undefined;
 	}
 
@@ -736,9 +1060,40 @@ class SchedulerRuntime {
 		}
 	}
 
-	/** Re-arm the session timer after external state changes (tool/command). */
+	/** Re-read durable state and re-arm after local or external state changes. */
 	rearm(ctx?: ExtensionContext): void {
-		this.safeAsync("armTimer", () => this.armTimer(ctx));
+		if (ctx?.cwd) this.cwd = ctx.cwd;
+		if (ctx) this.sessionFile = sessionFileOf(ctx);
+		this.safeAsync("armTimer", () => this.armTimer(ctx), ctx);
+	}
+
+	/** Ordinary input owns the next run. Do not race it with a due external wake. */
+	onInput(event: { text?: string; source?: string }, ctx: ExtensionContext): void {
+		const ownWake =
+			event.source === "extension" &&
+			[...this.pendingConfirmations.values()].some(
+				(pending) => pending.sent && pending.envelope === event.text,
+			);
+		if (ownWake) return;
+		this.boundaryBlocked = true;
+		this.rearm(ctx);
+	}
+
+	/** The safe delivery boundary: Pi has exhausted retries, compaction and all
+	 *  already queued continuations. A due external record may now start a run. */
+	onAgentSettled(ctx: ExtensionContext): void {
+		this.boundaryBlocked = false;
+		this.safeAsync("settledBoundary", async () => {
+			await this.confirmAppendedWakeups(ctx);
+			await this.drainOverdue(ctx, Date.now());
+			await this.armTimer(ctx);
+		}, ctx);
+	}
+
+	/** `context` runs after the user message_end has been persisted and before
+	 *  the provider request. This is the first deterministic confirmation point. */
+	async onContext(ctx: ExtensionContext): Promise<void> {
+		await this.confirmAppendedWakeups(ctx);
 	}
 
 	/** Fire-and-forget an async operation, surfacing failures via UI. */
@@ -762,6 +1117,48 @@ class SchedulerRuntime {
 		return this.cwd ? normalizeCwdKey(this.cwd) : undefined;
 	}
 
+	private matchesCurrentSession(rec: ScheduleRecord): boolean {
+		const key = this.cwdKey();
+		return Boolean(key && scheduleMatchesSession(rec, key, this.sessionFile));
+	}
+
+	private contextIsIdle(ctx?: ExtensionContext): boolean {
+		if (!ctx || typeof ctx.isIdle !== "function") return true;
+		try {
+			return ctx.isIdle();
+		} catch {
+			return false;
+		}
+	}
+
+	private canInjectAtBoundary(ctx?: ExtensionContext): boolean {
+		return !this.boundaryBlocked && this.contextIsIdle(ctx);
+	}
+
+	private async publishSessionLease(): Promise<void> {
+		if (!this.cwd) return;
+		const dir = sessionLeaseDir();
+		await fsp.mkdir(dir, { recursive: true });
+		const leasePath = join(dir, `${this.leaseId}.json`);
+		const tmp = `${leasePath}.${randomHex(6)}.tmp`;
+		const lease: SchedulerSessionLease = {
+			version: 1,
+			leaseId: this.leaseId,
+			pid: process.pid,
+			cwd: this.cwd,
+			sessionFile: this.sessionFile,
+			updatedAt: Date.now(),
+		};
+		await fsp.writeFile(tmp, JSON.stringify(lease), "utf8");
+		try {
+			await fsp.rename(tmp, leasePath);
+		} catch (error) {
+			await fsp.unlink(tmp).catch(() => {});
+			throw error;
+		}
+		this.leasePath = leasePath;
+	}
+
 	/** True when a dueAt is suppressed for this session. */
 	private isSuppressed(dueAt: number): boolean {
 		return (
@@ -771,6 +1168,160 @@ class SchedulerRuntime {
 	}
 
 	// -- recovery ----------------------------------------------------------
+
+	private async conclusivelyOrphanedFenceIds(store: SchedulerStore): Promise<string[]> {
+		let snapshot: SessionProcessObservationSnapshot;
+		try {
+			snapshot = await this.dependencies.observeSessionProcesses();
+		} catch {
+			return [];
+		}
+		if (snapshot.certainty !== "complete" || !Array.isArray(snapshot.observations)) {
+			return [];
+		}
+		const observations = [...snapshot.observations];
+		if (this.cwd && this.sessionFile) {
+			observations.push({
+				cwd: this.cwd,
+				sessionFile: this.sessionFile,
+				pid: process.pid,
+				liveness: "live",
+			});
+		}
+		const orphaned: string[] = [];
+		for (const rec of Object.values(store.schedules)) {
+			if (rec.status !== "pending") continue;
+			if (Date.now() - rec.createdAt < ORPHAN_FENCE_GRACE_MS) continue;
+			const target = deliveryTargetSessionFile(rec);
+			if (!target) continue;
+			let fileProbe: SessionFileProbe;
+			try {
+				fileProbe = await this.dependencies.probeSessionFile(target);
+			} catch {
+				fileProbe = "unknown";
+			}
+			if (fileProbe !== "missing") continue;
+			const targetKey = normalizeSessionFileKey(target);
+			const matchingObservation = observations.some((observation) => {
+				if (
+					typeof observation?.cwd !== "string" ||
+					typeof observation.sessionFile !== "string"
+				) return false;
+				return normalizeCwdKey(observation.cwd) === rec.originCwdKey &&
+					normalizeSessionFileKey(observation.sessionFile) === targetKey &&
+					observation.liveness !== "dead";
+			});
+			if (!matchingObservation) orphaned.push(rec.id);
+		}
+		return orphaned;
+	}
+
+	/**
+	 * Read and conservatively reconcile orphaned fences. Candidate state is
+	 * re-read and every absence/liveness fact is re-probed under the scheduler
+	 * lock before persistence, so stale unlocked observations cannot retire a
+	 * newly-routable record.
+	 */
+	private async readObservedStore(ctx?: ExtensionContext): Promise<SchedulerStore> {
+		const first = await readStoreRaw();
+		if ((await this.conclusivelyOrphanedFenceIds(first)).length === 0) return first;
+		const { lock: lockPath } = getSchedulerPaths();
+		const result = await withLock(lockPath, async () => {
+			const store = await readStoreRaw();
+			const orphaned = await this.conclusivelyOrphanedFenceIds(store);
+			if (orphaned.length === 0) return { store, expired: [] as string[] };
+			const now = Date.now();
+			for (const id of orphaned) {
+				const rec = store.schedules[id];
+				if (!rec || rec.status !== "pending") continue;
+				const target = deliveryTargetSessionFile(rec);
+				if (!target) continue;
+				rec.status = "failed";
+				rec.failureReason =
+					`session fence expired on store read: target session file is missing (${target}) ` +
+					"and no live session in the origin cwd matches that target";
+				rec.updatedAt = now;
+			}
+			await writeStoreAtomic(store);
+			return { store, expired: orphaned };
+		});
+		if (result.expired.length > 0) {
+			this.notify(
+				ctx,
+				`Expired ${result.expired.length} orphaned session fence(s): ` +
+					result.expired.map((id) => `#${id}`).join(", ") + ".",
+				"warning",
+			);
+		}
+		return result.store;
+	}
+
+	/** On confirmed `/new`, move pending fences off the predecessor path. The
+	 *  lifecycle reason is authoritative even when the predecessor JSONL remains.
+	 *  Prefer the context's replacement identity; if Pi has not exposed it yet,
+	 *  use a replacement already published by this process's scheduler lease.
+	 *  Without either durable replacement source, fail matching records visibly. */
+	private async reconcileNewSessionFences(
+		event: SessionStartEvent,
+		ctx: ExtensionContext,
+	): Promise<void> {
+		const previous = event.reason === "new" ? event.previousSessionFile?.trim() : undefined;
+		if (!previous) return;
+
+		const contextSessionFile = sessionFileOf(ctx)?.trim();
+		const contextReplacement =
+			contextSessionFile &&
+			normalizeSessionFileKey(contextSessionFile) !== normalizeSessionFileKey(previous)
+				? contextSessionFile
+				: undefined;
+		const replacement =
+			contextReplacement ?? await ownLeasedSessionFile(this.cwd, previous);
+		if (replacement) this.sessionFile = replacement;
+		const now = Date.now();
+		const expiredReason =
+			`session fence expired: confirmed new session replaced (${previous}) ` +
+			"but neither the session context nor this process's lease has a durable replacement session file";
+		const transition = await mutateStore((store) => {
+			const retargeted: string[] = [];
+			const expired: string[] = [];
+			for (const rec of Object.values(store.schedules)) {
+				if (rec.status !== "pending") continue;
+				const fence = deliveryTargetSessionFile(rec);
+				if (
+					!fence ||
+					normalizeSessionFileKey(fence) !== normalizeSessionFileKey(previous)
+				) continue;
+				if (replacement) {
+					rec.targetSessionFile = replacement;
+					rec.updatedAt = now;
+					retargeted.push(rec.id);
+				} else {
+					rec.status = "failed";
+					rec.failureReason = expiredReason;
+					rec.updatedAt = now;
+					expired.push(rec.id);
+				}
+			}
+			return { retargeted, expired };
+		});
+
+		if (transition.retargeted.length > 0 && replacement) {
+			this.notify(
+				ctx,
+				`Retargeted ${transition.retargeted.length} pending schedule(s) from predecessor session ` +
+					`${previous} to ${replacement}.`,
+				"info",
+			);
+		}
+		if (transition.expired.length > 0) {
+			const ids = transition.expired.map((id) => `#${id}`).join(", ");
+			this.notify(
+				ctx,
+				`Expired ${transition.expired.length} pending schedule(s) ${ids}: ${expiredReason}.`,
+				"warning",
+			);
+		}
+	}
 
 	/** Mark `delivering` records older than STUCK_DELIVERING_MS as failed. */
 	private async recoverStuck(): Promise<void> {
@@ -801,32 +1352,158 @@ class SchedulerRuntime {
 	 *  transition for each id. */
 	private async drainOverdue(ctx: ExtensionContext, cutoff: number): Promise<void> {
 		const key = this.cwdKey();
-		if (!key) return;
-		const due = await readStore();
+		if (!key || !this.canInjectAtBoundary(ctx)) return;
+		const due = await this.readObservedStore(ctx);
 		const overdue = Object.values(due.schedules)
 			.filter(
-				(r) => r.status === "pending" && r.originCwdKey === key && r.dueAt <= cutoff,
+				(r) =>
+					r.status === "pending" &&
+					scheduleMatchesSession(r, key, this.sessionFile) &&
+					r.dueAt <= cutoff,
 			)
 			.sort((a, b) => a.dueAt - b.dueAt)
 			.slice(0, MAX_DRAIN_BATCH);
+		let queued = 0;
 		for (const rec of overdue) {
-			await this.claimDeliver(rec.id, true);
+			if (!this.canInjectAtBoundary(ctx)) break;
+			if (await this.claimDeliver(rec.id, true, ctx)) {
+				queued += 1;
+				// ExtensionAPI is fire-and-forget, so ctx may still report idle for a
+				// moment. Deliver exactly one wake per settled boundary regardless.
+				break;
+			}
 		}
-		if (overdue.length > 0) {
-			this.notify(ctx, `Delivered ${overdue.length} overdue schedule(s).`, "info");
+		if (queued > 0) {
+			this.notify(ctx, `Queued ${queued} overdue schedule(s) for confirmed delivery.`, "info");
 		}
 	}
 
 	// -- delivery ----------------------------------------------------------
 
-	/** Claim a pending schedule (pending -> delivering) and deliver its message.
-	 *  Claim is atomic and mints a `claimToken`; finalization (delivered/failed)
-	 *  only proceeds when the record is still `delivering` and the token matches. */
-	private async claimDeliver(id: string, overdue: boolean): Promise<void> {
-		const claimToken = randomHex(8);
-		const claimed = await mutateStore((store) => {
+	private messageText(message: unknown): string {
+		if (!message || typeof message !== "object") return "";
+		const content = (message as { content?: unknown }).content;
+		if (typeof content === "string") return content;
+		if (!Array.isArray(content)) return "";
+		return content
+			.filter(
+				(part): part is { type: "text"; text: string } =>
+					Boolean(
+						part &&
+							typeof part === "object" &&
+							(part as { type?: unknown }).type === "text" &&
+							typeof (part as { text?: unknown }).text === "string",
+					),
+			)
+			.map((part) => part.text)
+			.join("\n");
+	}
+
+	/** Finalize only records whose scheduler envelope is already a persisted user
+	 *  entry. sendUserMessage is intentionally fire-and-forget on ExtensionAPI. */
+	private async confirmAppendedWakeups(ctx: ExtensionContext): Promise<void> {
+		let entries: unknown[];
+		try {
+			entries = ctx.sessionManager?.getEntries?.() ?? [];
+		} catch {
+			return;
+		}
+		if (entries.length === 0) return;
+		const observed = new Map<string, number>();
+		for (const entry of entries) {
+			if (!entry || typeof entry !== "object") continue;
+			const candidate = entry as {
+				type?: string;
+				timestamp?: string;
+				message?: { role?: string; timestamp?: number; content?: unknown };
+			};
+			if (candidate.type !== "message" || candidate.message?.role !== "user") continue;
+			const text = this.messageText(candidate.message);
+			if (!text.startsWith("[Agent Scheduler Wake-Up]\n")) continue;
+			const id = /^Schedule: #([^\s(]+)/m.exec(text)?.[1];
+			if (!id) continue;
+			const entryTimestamp = candidate.timestamp ? Date.parse(candidate.timestamp) : Number.NaN;
+			observed.set(
+				id,
+				Math.max(
+					Number.isFinite(entryTimestamp) ? entryTimestamp : 0,
+					typeof candidate.message.timestamp === "number" ? candidate.message.timestamp : 0,
+				),
+			);
+		}
+		if (observed.size === 0) return;
+		const confirmedIds = await mutateStore((store) => {
+			const confirmed: string[] = [];
+			for (const [id, appendedAt] of observed) {
+				const rec = store.schedules[id];
+				if (!rec || rec.status !== "delivering" || !rec.claimToken) continue;
+				const pending = this.pendingConfirmations.get(id);
+				if (pending && pending.claimToken !== rec.claimToken) continue;
+				rec.status = "delivered";
+				rec.deliveredAt = Math.max(Date.now(), appendedAt);
+				rec.updatedAt = rec.deliveredAt;
+				confirmed.push(id);
+			}
+			return confirmed;
+		});
+		for (const id of confirmedIds) this.pendingConfirmations.delete(id);
+	}
+
+	private async failClaim(id: string, claimToken: string, error: unknown): Promise<void> {
+		this.pendingConfirmations.delete(id);
+		await mutateStore((store) => {
 			const rec = store.schedules[id];
-			if (!rec || rec.status !== "pending") return null;
+			if (rec && rec.status === "delivering" && rec.claimToken === claimToken) {
+				rec.status = "failed";
+				rec.failureReason =
+					error instanceof Error && error.message
+						? error.message
+						: String(error ?? "delivery failed");
+				rec.updatedAt = Date.now();
+			}
+		});
+	}
+
+	/** Input can begin while the atomic store claim is awaiting I/O. Return an
+	 *  unsent claim to pending rather than stranding it in delivering. */
+	private async releaseUnsentClaim(
+		id: string,
+		pending: PendingDeliveryConfirmation,
+	): Promise<void> {
+		this.pendingConfirmations.delete(id);
+		await mutateStore((store) => {
+			const rec = store.schedules[id];
+			if (
+				rec &&
+				rec.status === "delivering" &&
+				rec.claimToken === pending.claimToken
+			) {
+				rec.status = "pending";
+				delete rec.claimToken;
+				delete rec.triggeredAt;
+				if (pending.previousAttempt === undefined) delete rec.attempt;
+				else rec.attempt = pending.previousAttempt;
+				if (pending.previousOverdue === undefined) delete rec.overdue;
+				else rec.overdue = pending.previousOverdue;
+				rec.updatedAt = Date.now();
+			}
+		});
+	}
+
+	/** Claim a pending schedule (pending -> delivering), then request injection.
+	 *  The record stays delivering until `context` observes the appended user turn. */
+	private async claimDeliver(
+		id: string,
+		overdue: boolean,
+		ctx?: ExtensionContext,
+	): Promise<boolean> {
+		if (!this.canInjectAtBoundary(ctx)) return false;
+		const claimToken = randomHex(8);
+		const claim = await mutateStore((store) => {
+			const rec = store.schedules[id];
+			if (!rec || rec.status !== "pending" || !this.matchesCurrentSession(rec)) return null;
+			const previousAttempt = rec.attempt;
+			const previousOverdue = rec.overdue;
 			rec.status = "delivering";
 			rec.triggeredAt = Date.now();
 			rec.attempt = (rec.attempt ?? 0) + 1;
@@ -834,89 +1511,106 @@ class SchedulerRuntime {
 			rec.claimToken = claimToken;
 			rec.updatedAt = Date.now();
 			return {
-				id: rec.id,
-				message: rec.message,
-				label: rec.label,
-				dueAt: rec.dueAt,
-				originCwd: rec.originCwd,
-				originCwdKey: rec.originCwdKey,
-				originSessionFile: rec.originSessionFile,
-			} satisfies WakeEnvelopeInput;
+				claimed: {
+					id: rec.id,
+					message: rec.message,
+					label: rec.label,
+					dueAt: rec.dueAt,
+					originCwd: rec.originCwd,
+					originCwdKey: rec.originCwdKey,
+					originSessionFile: rec.originSessionFile,
+					targetSessionFile: rec.targetSessionFile,
+				} satisfies WakeEnvelopeInput,
+				previousAttempt,
+				previousOverdue,
+			};
 		});
-		if (!claimed) return; // already claimed/cancelled/missing
-		const deliveredAt = Date.now();
-		try {
-			const envelope = buildWakeEnvelope(claimed, deliveredAt);
-			// followUp never interrupts an active turn; triggers a turn if idle.
-			// Must settle before we mark delivered. Note: the ExtensionAPI surface
-			// types sendUserMessage as void and the runtime binding may swallow the
-			// rejection, so the failed-on-reject path below is best-effort.
-			await this.pi.sendUserMessage(envelope, { deliverAs: "followUp" });
-		} catch (e) {
-			await mutateStore((store) => {
-				const rec = store.schedules[id];
-				if (rec && rec.status === "delivering" && rec.claimToken === claimToken) {
-					rec.status = "failed";
-					rec.failureReason =
-						e instanceof Error && e.message ? e.message : String(e ?? "delivery failed");
-					rec.updatedAt = Date.now();
-				}
-			});
-			return;
+		if (!claim) return false; // already claimed/cancelled/missing
+		const pending: PendingDeliveryConfirmation = {
+			claimToken,
+			...claim,
+			sent: false,
+		};
+		this.pendingConfirmations.set(id, pending);
+		if (!this.canInjectAtBoundary(ctx)) {
+			await this.releaseUnsentClaim(id, pending);
+			return false;
 		}
-		await mutateStore((store) => {
-			const rec = store.schedules[id];
-			if (rec && rec.status === "delivering" && rec.claimToken === claimToken) {
-				rec.status = "delivered";
-				rec.deliveredAt = Date.now();
-				rec.updatedAt = Date.now();
+
+		const envelope = buildWakeEnvelope(claim.claimed, Date.now());
+		pending.envelope = envelope;
+		pending.sent = true;
+		// Sending this wake consumes the current safe boundary. Keep all other
+		// due records pending until the resulting agent run settles.
+		this.boundaryBlocked = true;
+		try {
+			// ExtensionAPI deliberately returns void here. Do not interpret return
+			// from this fire-and-forget call as delivery acknowledgement.
+			const maybePromise = (
+				this.pi.sendUserMessage as unknown as (
+					content: string,
+					options: { deliverAs: "followUp" },
+				) => unknown
+			)(envelope, { deliverAs: "followUp" });
+			if (maybePromise && typeof (maybePromise as PromiseLike<void>).then === "function") {
+				void Promise.resolve(maybePromise).catch((error) => this.failClaim(id, claimToken, error));
 			}
-		});
+		} catch (error) {
+			await this.failClaim(id, claimToken, error);
+			this.boundaryBlocked = !this.contextIsIdle(ctx);
+			return false;
+		}
+		return true;
 	}
 
 	// -- timer -------------------------------------------------------------
 
 	/** Arm the single session timer at the earliest pending schedule for cwd. */
 	private async armTimer(ctx?: ExtensionContext): Promise<void> {
+		const revision = ++this.armRevision;
 		this.clearTimer();
 		const key = this.cwdKey();
 		if (!key) return;
-		const store = await readStore();
+		const store = await this.readObservedStore(ctx);
+		if (revision !== this.armRevision) return;
 		const earliest = Object.values(store.schedules)
 			.filter(
 				(r) =>
 					r.status === "pending" &&
-					r.originCwdKey === key &&
+					scheduleMatchesSession(r, key, this.sessionFile) &&
 					!this.isSuppressed(r.dueAt),
 			)
 			.sort((a, b) => a.dueAt - b.dueAt)[0];
 		if (!earliest) return;
 		const now = Date.now();
 		const delta = earliest.dueAt - now;
+		// A due record discovered during input/tool work waits for agent_settled.
+		// Do not spin a zero-delay timer while the boundary is blocked.
+		if (delta <= 0 && !this.canInjectAtBoundary(ctx)) return;
 		const delay = delta <= 0 ? 0 : Math.min(delta, MAX_TIMER_MS);
 		this.armedId = earliest.id;
 		this.timer = setTimeout(() => {
-			this.safeAsync("onTimerFire", () => this.onTimerFire(), ctx);
+			this.safeAsync("onTimerFire", () => this.onTimerFire(ctx), ctx);
 		}, delay);
 		// Don't keep the event loop alive solely for a wake-up timer when Pi is
 		// otherwise idle in print/headless modes — but .unref would prevent
 		// delivery in long-running headless runs, so we keep it referenced.
 	}
 
-	private async onTimerFire(): Promise<void> {
+	private async onTimerFire(ctx?: ExtensionContext): Promise<void> {
 		if (this.firing) return;
 		this.firing = true;
 		this.timer = undefined;
 		this.armedId = undefined;
 		try {
 			const key = this.cwdKey();
-			if (!key) return;
-			const store = await readStore();
+			if (!key || !this.canInjectAtBoundary(ctx)) return;
+			const store = await this.readObservedStore(ctx);
 			const earliest = Object.values(store.schedules)
 				.filter(
 					(r) =>
 						r.status === "pending" &&
-						r.originCwdKey === key &&
+						scheduleMatchesSession(r, key, this.sessionFile) &&
 						!this.isSuppressed(r.dueAt),
 				)
 				.sort((a, b) => a.dueAt - b.dueAt)[0];
@@ -927,7 +1621,7 @@ class SchedulerRuntime {
 				await this.armTimer();
 				return;
 			}
-			await this.claimDeliver(earliest.id, false);
+			await this.claimDeliver(earliest.id, false, ctx);
 		} finally {
 			this.firing = false;
 			// Re-arm for the next pending schedule.
@@ -937,20 +1631,27 @@ class SchedulerRuntime {
 
 	// -- tool actions ------------------------------------------------------
 
+	async inspectStore(ctx: ExtensionContext): Promise<SchedulerStore> {
+		this.cwd = ctx.cwd;
+		this.sessionFile = sessionFileOf(ctx);
+		return this.readObservedStore(ctx);
+	}
+
 	async executeTool(
 		params: AgentSchedulerInput,
 		ctx: ExtensionContext,
 	): Promise<{ content: { type: "text"; text: string }[]; details: unknown }> {
-		// Keep cwd fresh even if a tool runs before session_start wired it.
-		if (!this.cwd) this.cwd = ctx.cwd;
+		// Keep routing identity fresh even if a tool runs before session_start wired it.
+		this.cwd = ctx.cwd;
+		this.sessionFile = sessionFileOf(ctx);
 
 		switch (params.action) {
 			case "schedule":
 				return this.actionSchedule(params, ctx);
 			case "list":
-				return this.actionList(params);
+				return this.actionList(params, ctx);
 			case "get":
-				return this.actionGet(params);
+				return this.actionGet(params, ctx);
 			case "cancel":
 				return this.actionCancel(params, ctx);
 			default:
@@ -964,6 +1665,8 @@ class SchedulerRuntime {
 	) {
 		const message = (params.message ?? "").trim();
 		if (!message) return textResult("Error: message is required for schedule.");
+		const target = resolveRequestedTargetSession(params.targetSessionFile, ctx);
+		if (target.error) return textResult(`Error: ${target.error}`);
 		const now = Date.now();
 		let dueAt: number;
 		try {
@@ -995,6 +1698,7 @@ class SchedulerRuntime {
 				originCwdKey,
 				originCwd: ctx.cwd,
 				originSessionFile,
+				targetSessionFile: target.targetSessionFile,
 				createdBy: "tool",
 				updatedAt: now,
 			};
@@ -1012,21 +1716,28 @@ class SchedulerRuntime {
 			`Scheduled #${created.id} for ${iso} (in ${inStr}).` +
 				(params.label ? ` Label: ${JSON.stringify(params.label)}` : "") +
 				`\nMessage: ${message}`,
-			{ id: created.id, dueAt: created.dueAt, label: params.label },
+			{
+				id: created.id,
+				dueAt: created.dueAt,
+				label: params.label,
+				targetSessionFile: target.targetSessionFile,
+			},
 		);
 	}
 
-	private async actionList(params: AgentSchedulerInput) {
+	private async actionList(params: AgentSchedulerInput, ctx: ExtensionContext) {
 		const status = params.status ?? "pending";
 		const scope = params.scope ?? "current";
 		const key = this.cwdKey();
-		const store = await readStore();
+		const store = await this.readObservedStore(ctx);
 		const now = Date.now();
 		let records = Object.values(store.schedules).sort(
 			(a, b) => a.dueAt - b.dueAt,
 		);
 		if (scope === "current" && key) {
-			records = records.filter((r) => r.originCwdKey === key);
+			records = records.filter((r) =>
+				scheduleMatchesSession(r, key, this.sessionFile),
+			);
 		}
 		if (status !== "all") {
 			records = records.filter((r) => r.status === status);
@@ -1038,10 +1749,10 @@ class SchedulerRuntime {
 		return textResult(lines.join("\n"), { count: records.length });
 	}
 
-	private async actionGet(params: AgentSchedulerInput) {
+	private async actionGet(params: AgentSchedulerInput, ctx: ExtensionContext) {
 		const idInput = params.id?.trim();
 		if (!idInput) return textResult("Error: id is required for get.");
-		const store = await readStore();
+		const store = await this.readObservedStore(ctx);
 		const resolved = resolveScheduleId(store, idInput);
 		if ("error" in resolved) return textResult(`Error: ${resolved.error}`);
 		const rec = store.schedules[resolved.id];
@@ -1053,6 +1764,7 @@ class SchedulerRuntime {
 				`cwd: ${rec.originCwd ?? rec.originCwdKey}`,
 				`created: ${new Date(rec.createdAt).toISOString()}`,
 				rec.originSessionFile ? `origin session: ${rec.originSessionFile}` : "",
+				rec.targetSessionFile ? `target session: ${rec.targetSessionFile}` : "",
 				rec.createdBy ? `created by: ${rec.createdBy}` : "",
 				rec.triggeredAt ? `triggered: ${new Date(rec.triggeredAt).toISOString()}` : "",
 				rec.deliveredAt ? `delivered: ${new Date(rec.deliveredAt).toISOString()}` : "",
@@ -1111,18 +1823,38 @@ function textResult(
 // Extension factory
 // ---------------------------------------------------------------------------
 
-export default function agentScheduler(pi: ExtensionAPI): void {
-	const runtime = new SchedulerRuntime(pi);
+function registerAgentScheduler(
+	pi: ExtensionAPI,
+	resolvedDependencies: ResolvedSchedulerDependencies,
+): void {
+	const runtime = new SchedulerRuntime(pi, resolvedDependencies);
 
 	// session_start: capture cwd, recover stuck deliveries, then drain/arm per
 	// the start reason (see onSessionStart). Never start the timer in factory.
 	pi.on("session_start", async (event, ctx) => {
-		runtime.onSessionStart(event, ctx);
+		await runtime.onSessionStart(event, ctx);
 	});
 
 	// session_shutdown: clear the session-scoped timer. Persisted state survives.
 	pi.on("session_shutdown", async () => {
-		runtime.onSessionShutdown();
+		await runtime.onSessionShutdown();
+	});
+
+	// Another process can insert a schedule while this runtime has no timer for
+	// it. Input discovers that state but reserves the current run for the input;
+	// agent_settled is the only busy->idle injection boundary. `context` confirms
+	// that a scheduler wake user turn was actually appended before finalization.
+	pi.on("input", async (event, ctx) => {
+		runtime.onInput(event, ctx);
+	});
+	pi.on("turn_end", async (_event, ctx) => {
+		runtime.rearm(ctx);
+	});
+	pi.on("context", async (_event, ctx) => {
+		await runtime.onContext(ctx);
+	});
+	pi.on("agent_settled", async (_event, ctx) => {
+		runtime.onAgentSettled(ctx);
 	});
 
 	// LLM-callable tool.
@@ -1132,8 +1864,9 @@ export default function agentScheduler(pi: ExtensionAPI): void {
 		description:
 			"Schedule future agent wake-ups. Actions: schedule (create a future " +
 			"user message via exactly one of at/delaySeconds/delayMinutes/delayHours/" +
-			"delayDays + message), list, get, cancel. Schedule ids accept unique " +
-			"prefixes for get/cancel. Schedules are scoped to the cwd where created.",
+			"delayDays + message, optionally targetSessionFile), list, get, cancel. " +
+			"Schedule ids accept unique prefixes for get/cancel. Explicit targets, or the " +
+			"origin session as fallback, route to one Pi window; legacy records with neither remain cwd-scoped.",
 		promptSnippet: "Schedule delayed agent wake-ups that re-inject a user message later",
 		promptGuidelines: [
 			"Use agent_scheduler to wake yourself up later to check on long-running work " +
@@ -1146,22 +1879,30 @@ export default function agentScheduler(pi: ExtensionAPI): void {
 	});
 
 	// /schedule-agent <delay> <message>  e.g. /schedule-agent 10m check the download
+	// Optional prefix: --target-session <session-file|current>
 	// Also: /schedule-agent 2h -- check the download
 	//       /schedule-agent at 2026-06-20T12:00:00Z check the download
 	//       /schedule-agent at 2026-06-20 12:00 -- check the download
 	pi.registerCommand("schedule-agent", {
 		description:
-			"Schedule a future agent wake-up. Forms: /schedule-agent <delay> <message>, " +
+			"Schedule a future agent wake-up. Prefix any form with --target-session " +
+			"<session-file|current>. Forms: /schedule-agent <delay> <message>, " +
 			"/schedule-agent <delay> -- <message>, /schedule-agent at <iso> <message>, " +
 			"/schedule-agent at <date> <time> [--] <message>. Delays like 10m, 2h, 1d, 30s.",
 		handler: async (args, ctx) => {
 			const parsed = parseScheduleArgs(args);
 			if (!parsed) {
 				ctx.ui.notify(
-					"Usage: /schedule-agent <delay> <message> | <delay> -- <message> | " +
-						"at <iso> <message> | at <date> <time> [--] <message>",
+					"Usage: /schedule-agent [--target-session <session-file|current>] " +
+						"<delay> <message> | <delay> -- <message> | at <iso> <message> | " +
+						"at <date> <time> [--] <message>",
 					"warning",
 				);
+				return;
+			}
+			const target = resolveRequestedTargetSession(parsed.targetSessionFile, ctx);
+			if (target.error) {
+				ctx.ui.notify(target.error, "error");
 				return;
 			}
 			const now = Date.now();
@@ -1189,6 +1930,7 @@ export default function agentScheduler(pi: ExtensionAPI): void {
 					originCwdKey,
 					originCwd: ctx.cwd,
 					originSessionFile,
+					targetSessionFile: target.targetSessionFile,
 					createdBy: "slash",
 					updatedAt: now,
 				};
@@ -1212,13 +1954,16 @@ export default function agentScheduler(pi: ExtensionAPI): void {
 		description: "List pending schedules (or /schedules all for every status/cwd)",
 		handler: async (args, ctx) => {
 			const wantAll = args.trim() === "all";
-			const store = await readStore();
+			const store = await runtime.inspectStore(ctx);
 			const now = Date.now();
 			const key = normalizeCwdKey(ctx.cwd);
+			const currentSessionFile = sessionFileOf(ctx);
 			let records = Object.values(store.schedules).sort((a, b) => a.dueAt - b.dueAt);
 			if (!wantAll) {
 				records = records.filter(
-					(r) => r.status === "pending" && r.originCwdKey === key,
+					(r) =>
+						r.status === "pending" &&
+						scheduleMatchesSession(r, key, currentSessionFile),
 				);
 			}
 			if (records.length === 0) {
@@ -1265,3 +2010,12 @@ export default function agentScheduler(pi: ExtensionAPI): void {
 		},
 	});
 }
+
+export function createAgentSchedulerExtension(
+	dependencies: SchedulerDependencies = {},
+): (pi: ExtensionAPI) => void {
+	const resolvedDependencies = resolveSchedulerDependencies(dependencies);
+	return (pi) => registerAgentScheduler(pi, resolvedDependencies);
+}
+
+export default createAgentSchedulerExtension();

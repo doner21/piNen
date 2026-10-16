@@ -81,7 +81,7 @@ async function testCanary() {
     const tool = loadOrchestrateTool();
     const result = await tool.execute(
       "SHAPE_CANARY:independent-replication",
-      { paradigm: "independent-replication", preflight: false, cwd: tmp, task: "SHAPE_CANARY:independent-replication" },
+      { paradigm: "independent-replication", supervision: "off", preflight: false, cwd: tmp, task: "SHAPE_CANARY:independent-replication" },
       undefined, () => {}, { cwd: tmp },
     );
     const md = result.content?.[0]?.text || result.markdown || "";
@@ -118,7 +118,7 @@ async function driveShape(params, env, laneBLines) {
     const tool = loadOrchestrateTool();
     const result = await tool.execute(
       "test-ir",
-      { task, paradigm: "independent-replication", preflight: false, cwd: tmp, maxSubagents: 12, ...params },
+      { task, paradigm: "independent-replication", supervision: "off", preflight: false, cwd: tmp, maxSubagents: 12, ...params },
       undefined, () => {}, { cwd: tmp },
     );
     const calls = fs.existsSync(logPath)

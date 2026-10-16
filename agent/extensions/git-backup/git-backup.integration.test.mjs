@@ -4,8 +4,10 @@ import { randomBytes } from "node:crypto";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createJiti } from "jiti";
+import { createRequire } from "node:module";
 
+const require = createRequire(import.meta.url);
+const { createJiti } = require("C:/Users/you/AppData/Roaming/npm/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti.cjs");
 const jiti = createJiti(import.meta.url, { interopDefault: true });
 const { DEFAULT_CONFIG, configForRepository, normalizeConfig, pathMatchesDeny, runGitBackup } = await jiti.import("./core.ts");
 

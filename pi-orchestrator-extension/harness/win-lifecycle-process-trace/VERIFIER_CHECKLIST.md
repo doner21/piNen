@@ -8,9 +8,9 @@
 
 ## Verifier Directive
 
-> Verifier must **FAIL CLOSED** if any fail condition below is met.
-> Verifier must **NOT SKIP** any check.
-> Verifier must **CITE SPECIFIC EVIDENCE** (file, line, field) for every conclusion.
+> Verifier must **FAIL CLOSED** if any fail condition below is met.  
+> Verifier must **NOT SKIP** any check.  
+> Verifier must **CITE SPECIFIC EVIDENCE** (file, line, field) for every conclusion.  
 > Verifier must **DISTINGUISH** observed evidence from inferred relationships and HYPOTHESIS.
 
 ---

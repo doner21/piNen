@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowImportingTsExtensions": true,
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": ["node"],
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": [
+    "src/next/**/*.ts",
+    "src/action-evidence.ts",
+    "src/executor-recovery/budget-estimator.ts",
+    "src/worker-execution-constraints.ts",
+    "src/worker-no-output-monitor.ts",
+    "src/worker-monitor-bootstrap.ts",
+    "src/substrate.ts",
+    "src/index.ts"
+  ]
+}

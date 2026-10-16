@@ -36,6 +36,8 @@ import {
   type SubagentResult,
 } from "../substrate";
 
+import { GENERIC_EXECUTOR_SHAPE_EXECUTION } from "../supervision";
+
 import type {
   OrchestrationShape,
   OrchestrationShapeContext,
@@ -71,6 +73,7 @@ export const winConsoleSpawnRootCauseShape: OrchestrationShape = {
     "executor instruments and delivers candidate fix via DeepSeek V4 Pro, " +
     "verifier falsifiably judges with GPT-5.5. Three finite phases, no " +
     "broad rewrites.",
+  execution: GENERIC_EXECUTOR_SHAPE_EXECUTION,
   run: runWinConsoleSpawnRootCause,
 };
 

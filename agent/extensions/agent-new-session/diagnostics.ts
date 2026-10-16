@@ -57,6 +57,23 @@ export interface NewSessionDiagnostics {
 const NEW_SESSION_CONFIRMATION = "session_shutdown:new";
 const DIAGNOSTICS_FILE = "agent-new-session-diagnostics.json";
 
+export interface WriteDiagnosticsOptions {
+	/** Start a new request generation instead of inheriting terminal state. */
+	resetForRequest?: boolean;
+}
+
+/** Serialize writes from this extension instance so older async writes cannot
+ * land after newer ones. The file remains shared across Pi processes, so the
+ * request-generation checks below also reject stale cross-process updates. */
+let diagnosticsWriteQueue: Promise<void> = Promise.resolve();
+
+function requestEpoch(requestId: string | undefined): number | undefined {
+	const match = /^new-(\d+)(?:-|$)/.exec(requestId ?? "");
+	if (!match) return undefined;
+	const value = Number(match[1]);
+	return Number.isFinite(value) ? value : undefined;
+}
+
 /**
  * Resolve diagnostics independently of the active project cwd. Relative
  * PI_HOME values are anchored to the OS user home, never the working directory.
@@ -105,10 +122,22 @@ function rawTextContainsConfirmation(raw: string): boolean {
  * Write to the canonical Pi-home document. `cwd` is provenance only and is
  * deliberately ignored when selecting the storage path.
  */
-export async function writeDiagnostics(
+export function writeDiagnostics(
 	patch: Partial<NewSessionDiagnostics> & { attempts?: number; cwd?: string; executeCommandAvailable?: boolean },
 	cwd: string,
+	options: WriteDiagnosticsOptions = {},
 ): Promise<void> {
+	const operation = diagnosticsWriteQueue.then(() => writeDiagnosticsOnce(patch, cwd, options));
+	diagnosticsWriteQueue = operation.catch(() => {});
+	return operation;
+}
+
+async function writeDiagnosticsOnce(
+	patch: Partial<NewSessionDiagnostics> & { attempts?: number; cwd?: string; executeCommandAvailable?: boolean },
+	cwd: string,
+	options: WriteDiagnosticsOptions,
+): Promise<void> {
+	let tmpPath: string | undefined;
 	try {
 		const diagPath = resolveCanonicalNewSessionDiagnosticsPath();
 		const dir = dirname(diagPath);
@@ -131,29 +160,85 @@ export async function writeDiagnostics(
 			};
 		}
 
-		const merged: NewSessionDiagnostics = { ...existing, ...patch };
-		if (patch.executeEntries && existing.executeEntries) {
-			merged.executeEntries = [...existing.executeEntries, ...patch.executeEntries].slice(-20);
-		} else if (existing.executeEntries && !patch.executeEntries) {
-			merged.executeEntries = existing.executeEntries;
-		}
-		if (patch.tickLog && existing.tickLog) {
-			merged.tickLog = [...existing.tickLog, ...patch.tickLog].slice(-80);
-		} else if (existing.tickLog && !patch.tickLog) {
-			merged.tickLog = existing.tickLog;
+		const differentRequest = Boolean(
+			patch.requestId && existing.requestId && patch.requestId !== existing.requestId,
+		);
+		const patchEpoch = requestEpoch(patch.requestId);
+		const existingEpoch = requestEpoch(existing.requestId);
+		const staleDifferentRequest =
+			differentRequest &&
+			!options.resetForRequest &&
+			patchEpoch !== undefined &&
+			existingEpoch !== undefined &&
+			patchEpoch < existingEpoch;
+		const newerDifferentRequest =
+			differentRequest &&
+			patchEpoch !== undefined &&
+			existingEpoch !== undefined &&
+			patchEpoch > existingEpoch;
+		const resetForRequest = options.resetForRequest || newerDifferentRequest;
+
+		let merged: NewSessionDiagnostics;
+		if (staleDifferentRequest) {
+			// An older Pi process finished after a newer request started. Keep only
+			// its bounded audit entry; never let it confirm/fail the newer request.
+			merged = { ...existing };
+			if (patch.executeEntries) {
+				merged.executeEntries = [
+					...(existing.executeEntries ?? []),
+					...patch.executeEntries,
+				].slice(-20);
+			}
+		} else {
+			const base: NewSessionDiagnostics = resetForRequest
+				? {
+					phase: "idle",
+					attempts: 0,
+					cwd,
+					executeCommandAvailable: patch.executeCommandAvailable ?? false,
+					executeEntries: existing.executeEntries,
+				}
+				: existing;
+			merged = { ...base, ...patch };
+			if (patch.executeEntries && base.executeEntries) {
+				merged.executeEntries = [...base.executeEntries, ...patch.executeEntries].slice(-20);
+			} else if (base.executeEntries && !patch.executeEntries) {
+				merged.executeEntries = base.executeEntries;
+			}
+			if (!resetForRequest) {
+				if (patch.tickLog && base.tickLog) {
+					merged.tickLog = [...base.tickLog, ...patch.tickLog].slice(-80);
+				} else if (base.tickLog && !patch.tickLog) {
+					merged.tickLog = base.tickLog;
+				}
+			}
 		}
 
 		const confirmationObserved =
-			recoveredConfirmation ||
-			merged.newSessionConfirmed === true ||
-			merged.confirmedBy === NEW_SESSION_CONFIRMATION;
+			!resetForRequest &&
+			(recoveredConfirmation ||
+				merged.newSessionConfirmed === true ||
+				merged.confirmedBy === NEW_SESSION_CONFIRMATION);
 		applyCanonicalDefaults(merged, confirmationObserved);
 
-		const tmpPath = resolve(dir, `.agent-new-session-diagnostics.tmp-${randomUUID().slice(0, 8)}`);
+		tmpPath = resolve(dir, `.agent-new-session-diagnostics.tmp-${randomUUID().slice(0, 8)}`);
 		await fsp.writeFile(tmpPath, JSON.stringify(merged, null, 2), "utf8");
-		await fsp.rename(tmpPath, diagPath);
+		try {
+			await fsp.rename(tmpPath, diagPath);
+			tmpPath = undefined;
+		} catch (renameError) {
+			// Windows antivirus/indexing and competing Pi processes can briefly
+			// reject replacement renames. copyFile still replaces the complete
+			// destination and the finally block removes the source temp file.
+			await fsp.copyFile(tmpPath, diagPath);
+			await fsp.unlink(tmpPath);
+			tmpPath = undefined;
+			void renameError;
+		}
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
 		process.stderr.write(`[agent-new-session] writeDiagnostics FAILED: ${msg}\n`);
+	} finally {
+		if (tmpPath) await fsp.unlink(tmpPath).catch(() => {});
 	}
 }

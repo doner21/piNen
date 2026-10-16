@@ -54,14 +54,15 @@ try {
 
   process.chdir(projectA);
   await writeDiagnostics({
-    requestId: "cwd-a",
+    requestId: "new-100-cwd-a",
     phase: "polling",
+    requested: 100,
     attempts: 1,
     cwd: projectA,
     executeCommandAvailable: true,
     executeEntries: executeEntries(100, 15, projectA),
     tickLog: tickLog(100, 70),
-  }, projectA);
+  }, projectA, { resetForRequest: true });
 
   let diagnostics = JSON.parse(await readFile(canonicalPath, "utf8"));
   assert.equal(diagnostics.cwd, projectA, "cwd provenance must be retained");
@@ -70,8 +71,11 @@ try {
 
   process.chdir(projectB);
   await writeDiagnostics({
-    requestId: "cwd-b",
+    requestId: "new-200-cwd-b",
     phase: "done",
+    requested: 200,
+    confirmedAt: 210,
+    executeCommandDurationMs: 10,
     attempts: 2,
     cwd: projectB,
     executeCommandAvailable: true,
@@ -79,15 +83,16 @@ try {
     confirmedBy: "session_shutdown:new",
     executeEntries: executeEntries(200, 10, projectB),
     tickLog: tickLog(200, 20),
-  }, projectB);
+  }, projectB, { resetForRequest: true });
 
   diagnostics = JSON.parse(await readFile(canonicalPath, "utf8"));
-  assert.equal(diagnostics.requestId, "cwd-b", "second cwd must merge into the canonical document");
+  assert.equal(diagnostics.requestId, "new-200-cwd-b", "second request must replace the canonical generation");
   assert.equal(diagnostics.cwd, projectB, "latest cwd provenance must be retained");
-  assert.equal(diagnostics.executeEntries.length, 20, "executeEntries cap must remain 20");
-  assert.equal(diagnostics.tickLog.length, 80, "tickLog cap must remain 80");
+  assert.equal(diagnostics.executeEntries.length, 20, "executeEntries audit cap must remain 20 across generations");
+  assert.equal(diagnostics.tickLog.length, 20, "tickLog must be scoped to the current request");
 
   await writeDiagnostics({
+    requestId: "new-200-cwd-b",
     phase: "failed",
     cwd: projectB,
     executeCommandRejected: true,
@@ -107,6 +112,41 @@ try {
   assert.equal("timeout" in diagnostics, false);
   assert.equal("error" in diagnostics, false);
 
+  await writeDiagnostics({
+    requestId: "new-300-cwd-b",
+    phase: "polling",
+    requested: 300,
+    scheduled: 300,
+    attempts: 0,
+    cwd: projectB,
+    executeCommandAvailable: true,
+  }, projectB, { resetForRequest: true });
+
+  diagnostics = JSON.parse(await readFile(canonicalPath, "utf8"));
+  assert.equal(diagnostics.requestId, "new-300-cwd-b");
+  assert.equal(diagnostics.phase, "polling", "a new request must not inherit prior success");
+  assert.equal(diagnostics.newSessionConfirmed, false);
+  assert.equal("confirmedBy" in diagnostics, false);
+  assert.equal("confirmedAt" in diagnostics, false);
+  assert.equal("executeCommandDurationMs" in diagnostics, false);
+  assert.equal("tickLog" in diagnostics, false, "a new request must not inherit prior ticks");
+
+  await writeDiagnostics({
+    requestId: "new-200-cwd-b",
+    phase: "done",
+    confirmedAt: 400,
+    newSessionConfirmed: true,
+    confirmedBy: "session_shutdown:new",
+    cwd: projectB,
+    executeCommandAvailable: true,
+  }, projectB);
+
+  diagnostics = JSON.parse(await readFile(canonicalPath, "utf8"));
+  assert.equal(diagnostics.requestId, "new-300-cwd-b", "an older process cannot replace the current request");
+  assert.equal(diagnostics.phase, "polling", "an older confirmation cannot confirm the current request");
+  assert.equal(diagnostics.newSessionConfirmed, false);
+  assert.equal("confirmedBy" in diagnostics, false);
+
   const canonicalDirEntries = await readdir(dirname(canonicalPath));
   assert.deepEqual(canonicalDirEntries, ["agent-new-session-diagnostics.json"], "atomic temp files must not remain");
   assert.deepEqual(await readdir(projectA), [], "project A must remain untouched");
@@ -120,6 +160,19 @@ try {
 
   assert.match(indexSource, /writeDiagnostics as writeCanonicalDiagnostics/,
     "index.ts must use the tested production writer");
+  assert.match(indexSource, /resetForRequest:\s*true/,
+    "each new request must explicitly reset request-scoped diagnostics");
+  assert.match(indexSource,
+    /sendUserMessage\.call\(pi, commandText, \{ expandPromptTemplates: true \}\)/,
+    "new-session dispatch must use Pi's supported command-expansion API");
+  assert.doesNotMatch(indexSource, /if \(!executeCommandAvailable\)/,
+    "new-session execution must not be gated on the private core patch");
+  assert.doesNotMatch(indexSource, /pi\.executeCommand is not available/,
+    "new-session guidance must not depend on the obsolete private bridge");
+  assert.doesNotMatch(indexSource, /const defaultKickoff\s*=/,
+    "session replacement must not create an unsolicited default LLM turn");
+  assert.doesNotMatch(indexSource, /await\s+sessionCtx\.sendUserMessage/,
+    "session replacement must never await a new-session LLM turn");
   assert.doesNotMatch(helperSource, /process\.cwd\s*\(/,
     "storage helper must never fall back to process.cwd()");
   assert.doesNotMatch(helperSource, /resolve\s*\(\s*cwd\s*,\s*["']agent["']\s*\)/,
@@ -141,10 +194,15 @@ try {
     tempFilesRemaining: false,
     recordedCwd: diagnostics.cwd,
     executeEntriesCount: diagnostics.executeEntries.length,
-    tickLogCount: diagnostics.tickLog.length,
+    tickLogCount: diagnostics.tickLog?.length ?? 0,
     confirmationDominance: true,
+    requestGenerationIsolation: true,
+    staleCrossProcessConfirmationRejected: true,
+    awaitedKickoffRemoved: true,
     defaultUserHomeResolution: true,
     relativePiHomeAnchoredToUserHome: true,
+    publicCommandDispatch: true,
+    privateCorePatchRequired: false,
     staticGuidanceAssertions: true,
     cleanup: "performed in finally",
   }));

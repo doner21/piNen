@@ -74,7 +74,11 @@ function makeTempGitRepo() {
 
 async function runScenario(task, { env = {}, params = {}, cwd } = {}) {
   const workDir = cwd ?? makeTempGitRepo();
-  const logPath = path.join(workDir, "fake-pi-log.jsonl");
+  // The fake transport log is harness telemetry, not a product-workspace
+  // effect. Keep it outside cwd so verify-only effect snapshots see only the
+  // verifier's actual workspace behavior.
+  const logRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-orchestrate-fake-log-"));
+  const logPath = path.join(logRoot, "fake-pi-log.jsonl");
   process.env.PI_CLI_PATH = path.join(__dirname, "fake-pi.cjs");
   process.env.FAKE_PI_LOG = logPath;
   for (const key of SCENARIO_ENV_KEYS) delete process.env[key];
@@ -84,7 +88,7 @@ async function runScenario(task, { env = {}, params = {}, cwd } = {}) {
     const tool = loadOrchestrateTool();
     const result = await tool.execute(
       "test-judgment-hardening",
-      { task, cwd: workDir, ...params },
+      { task, cwd: workDir, supervision: "off", ...params },
       undefined,
       () => {},
       { cwd: workDir },
@@ -94,6 +98,7 @@ async function runScenario(task, { env = {}, params = {}, cwd } = {}) {
     return { result, calls, workDir };
   } finally {
     for (const key of SCENARIO_ENV_KEYS) delete process.env[key];
+    fs.rmSync(logRoot, { recursive: true, force: true });
   }
 }
 
@@ -173,6 +178,11 @@ async function testVerifyOnlyParadigm() {
   assert.ok(workCalls.every((call) => call.agentName === "reviewer"),
     `verify-only must spawn only verifier agents, saw: ${workCalls.map((c) => c.agentName).join(", ")}`);
   assert.ok(workCalls.length >= 1, "at least one verifier must be spawned");
+  for (const call of workCalls) {
+    assert.deepEqual(call.tools.split(","), ["read", "grep", "find", "ls", "bash"], "verify-only reviewer receives evidence tools plus bash for machine checks");
+    assert.equal(call.noTools, false, "verify-only reviewer must retain evidence inspection tools");
+    assert.equal(call.noExtensions, true, "verify-only reviewer cannot load extension tools");
+  }
 }
 
 // ── 3. Retry targeting (F2): only the failed task re-runs ──────────────────

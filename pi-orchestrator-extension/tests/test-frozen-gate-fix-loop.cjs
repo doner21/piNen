@@ -80,7 +80,7 @@ async function testCanary() {
     const tool = loadOrchestrateTool();
     const result = await tool.execute(
       "SHAPE_CANARY:frozen-gate-fix-loop",
-      { paradigm: "frozen-gate-fix-loop", preflight: false, cwd: tmp, task: "SHAPE_CANARY:frozen-gate-fix-loop" },
+      { paradigm: "frozen-gate-fix-loop", supervision: "off", preflight: false, cwd: tmp, task: "SHAPE_CANARY:frozen-gate-fix-loop" },
       undefined, () => {}, { cwd: tmp },
     );
     const md = result.content?.[0]?.text || result.markdown || "";
@@ -117,7 +117,7 @@ async function driveShape(taskExtra, params, env) {
     const tool = loadOrchestrateTool();
     const result = await tool.execute(
       "test-fgfl",
-      { task, paradigm: "frozen-gate-fix-loop", preflight: false, cwd: tmp, maxSubagents: 12, ...params },
+      { task, paradigm: "frozen-gate-fix-loop", supervision: "off", preflight: false, cwd: tmp, maxSubagents: 12, ...params },
       undefined, () => {}, { cwd: tmp },
     );
     const calls = fs.existsSync(logPath)
@@ -176,7 +176,7 @@ async function driveShapeSpecFileOnly(env) {
     const tool = loadOrchestrateTool();
     const result = await tool.execute(
       "test-fgfl-spec",
-      { task, paradigm: "frozen-gate-fix-loop", preflight: false, cwd: tmp, maxSubagents: 12 },
+      { task, paradigm: "frozen-gate-fix-loop", supervision: "off", preflight: false, cwd: tmp, maxSubagents: 12 },
       undefined, () => {}, { cwd: tmp },
     );
     const calls = fs.existsSync(logPath)

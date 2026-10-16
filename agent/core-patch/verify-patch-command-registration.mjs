@@ -21,11 +21,10 @@
  *        /pi-core-new-session-patch-apply
  *        /pi-core-new-session-patch-verify
  *
- *   3. The extension does NOT use `pi.sendUserMessage('/command')` as a
- *      slash-command dispatch bridge (design invariant).
+ *   3. A successful apply reloads extensions so the durable public command
+ *      bridge becomes active without pretending dist/core patched the bundle.
  *
- *   4. The extension does NOT call any live-reload mechanism from within
- *      the patch commands.
+ *   4. The extension never exits or restarts the Pi process.
  *
  *   5. The underlying shared patcher (`reapply-pi-core-patch.mjs`) is
  *      reachable and its `check` command runs (read-only).
@@ -35,8 +34,8 @@
  * Constraints
  * -----------
  *   - Read-only: never writes to installed Pi core files.
- *   - Never triggers a live reload or restart.
- *   - Never uses pi.sendUserMessage('/command').
+ *   - Never exits or restarts the Pi process.
+ *   - Allows only the explicit post-apply extension reload.
  *   - Runnable with plain Node.js (no Pi runtime needed).
  *   - Produces clear PASS/FAIL output with an explicit exit code.
  *
@@ -109,36 +108,16 @@ const ALL_EXPECTED = [
  */
 const FORBIDDEN_PATTERNS = [
   [
-    /sendUserMessage\s*\(\s*["'`]\//,
-    'pi.sendUserMessage(\'/command\') — slash-command dispatch bridge is forbidden (see UPSTREAM_REQUEST.md §2)',
-  ],
-  [
-    /sendUserMessage\s*\(\s*["'`]\/reload/,
-    'pi.sendUserMessage(\'/reload\') — patcher must never trigger reload via sendUserMessage',
-  ],
-  [
-    /sendUserMessage\s*\(\s*["'`]\/agent-reload-runtime/,
-    'pi.sendUserMessage(\'/agent-reload-runtime\') — patcher must never trigger reload via sendUserMessage',
-  ],
-  [
-    /sendUserMessage\s*\(\s*["'`]\/agent-new-session/,
-    'pi.sendUserMessage(\'/agent-new-session\') — patcher must never trigger new-session via sendUserMessage',
-  ],
-  [
-    /\bctx\.reload\s*\(/,
-    'ctx.reload() — patch commands must never trigger live reload',
-  ],
-  [
     /\bpi\.reload\s*\(/,
-    'pi.reload() — patch commands must never trigger live reload',
+    'pi.reload() — reload must use the command context',
   ],
   [
     /executeCommand\s*\(\s*["'`]\/?(?:reload|agent-reload-runtime|agent-new-session)/,
-    'executeCommand("/reload" or bridge command) — patch commands must not trigger reload/new-session',
+    'private executeCommand bridge — patch commands must use supported APIs',
   ],
   [
     /process\.exit\s*\(/,
-    'process.exit() — extension code (running inside Pi) must not call process.exit',
+    'process.exit() — extension code (running inside Pi) must not exit the host',
   ],
 ];
 
@@ -488,7 +467,9 @@ function verifySafetyInvariants() {
     extSource.includes("shared") ||
     extSource.includes("same");
   const hasSharedRunner = extSource.includes("reapply-pi-core-patch.mjs");
-  const hasNoLiveReloadCalls = !/\b(?:ctx|pi)\.reload\s*\(/.test(extSource) &&
+  const hasPostApplyReload =
+    /action\s*===\s*["']apply["'][\s\S]*result\.code\s*===\s*0[\s\S]*await\s+ctx\.reload\s*\(\)/.test(extSource);
+  const hasNoPrivateDispatch =
     !/executeCommand\s*\(\s*["'`]\/?(?:reload|agent-reload-runtime|agent-new-session)/.test(extSource);
 
   if (!hasNotify) allOk = fail("Extension uses notify for user feedback");
@@ -507,23 +488,25 @@ function verifySafetyInvariants() {
     );
   else ok("Extension shells out to shared patcher runner");
 
-  if (!hasNoLiveReloadCalls) {
-    allOk = fail("Extension does not call live reload/new-session mechanisms");
+  if (!hasPostApplyReload) {
+    allOk = fail("Successful apply automatically reloads extensions");
   } else {
-    ok("Extension does not call live reload/new-session mechanisms");
+    ok("Successful apply automatically reloads extensions");
   }
 
-  // Check that the extension tells users to manually reload after apply
-  const hasManualReloadMsg =
-    extSource.includes("manually run") ||
-    extSource.includes("manually `/reload`") ||
-    extSource.includes("reload or restart");
-  if (!hasManualReloadMsg) {
-    allOk = fail(
-      "Extension instructs user to manually reload/restart after apply"
-    );
+  if (!hasNoPrivateDispatch) {
+    allOk = fail("Extension does not invoke the private executeCommand bridge");
   } else {
-    ok("Extension instructs user to manually reload/restart after apply");
+    ok("Extension does not invoke the private executeCommand bridge");
+  }
+
+  const documentsPublicBridge =
+    extSource.includes("expandPromptTemplates: true") &&
+    extSource.includes("dist/bundle/cli.js");
+  if (!documentsPublicBridge) {
+    allOk = fail("Extension explains bundled CLI and public command dispatch");
+  } else {
+    ok("Extension explains bundled CLI and public command dispatch");
   }
 
   // Patcher invariants
@@ -609,7 +592,37 @@ function verifyPiCoreStructure() {
 
   ok(`Pi package root resolved: ${piRoot}`);
 
-  // Check the three target files exist
+  // Pi 0.84.3+ launches a bundle. Verify the real CLI entrypoint supports the
+  // public command-expansion transport and do not mistake modular dist/core
+  // sentinels for proof that the active CLI has pi.executeCommand.
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(piRoot, "package.json"), "utf8"));
+    const cliEntry = typeof pkg.bin === "string" ? pkg.bin : pkg.bin?.pi;
+    if (cliEntry !== "dist/bundle/cli.js") {
+      console.log(`  [WARN] Active CLI entrypoint is ${cliEntry ?? "unknown"}, not dist/bundle/cli.js`);
+    } else {
+      ok("Active Pi CLI entrypoint: dist/bundle/cli.js");
+      const chunksDir = path.join(piRoot, "dist", "bundle", "chunks");
+      const chunkText = fs.readdirSync(chunksDir)
+        .filter((name) => name.endsWith(".js"))
+        .map((name) => fs.readFileSync(path.join(chunksDir, name), "utf8"))
+        .join("\n");
+      if (!chunkText.includes("expandPromptTemplates")) {
+        allOk = fail("Bundled CLI exposes expandPromptTemplates command dispatch");
+      } else {
+        ok("Bundled CLI exposes expandPromptTemplates command dispatch");
+      }
+      if (chunkText.includes("runtime.executeCommand")) {
+        console.log("  [WARN] Bundled CLI unexpectedly contains the private executeCommand patch");
+      } else {
+        ok("Verification does not confuse modular patch with bundled runtime");
+      }
+    }
+  } catch (error) {
+    allOk = fail("Inspect active Pi CLI bundle", error instanceof Error ? error.message : String(error));
+  }
+
+  // Check the legacy modular target files exist
   const targetFiles = [
     "dist/core/extensions/loader.js",
     "dist/core/extensions/runner.js",
@@ -676,7 +689,7 @@ function printSummary(phaseResults) {
   log("Both exit 0 and exit 1 are considered non-failure for this verification.");
   log("");
   log("This is a read-only verification. No Pi core files were modified.");
-  log("No live reload was triggered. No sendUserMessage was called.");
+  log("No live reload, process restart, or command dispatch was triggered by this test.");
 
   return overallPass;
 }

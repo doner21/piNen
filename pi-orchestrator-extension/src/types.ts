@@ -19,6 +19,33 @@ import type { LoadedRunState } from "./run-state";
 // ── OrchestrationShape interface ───────────────────────────────────────────
 
 /**
+ * Host-visible execution risk. `read-only` is the only classification that may
+ * bypass task-boundary supervision. Both executor-bearing and mutating shapes must
+ * either advertise a supported host protocol or fail closed unless the caller
+ * explicitly selects legacy `supervision: "off"` execution.
+ */
+export type ShapeExecutionClassification = "read-only" | "executor-bearing" | "mutating";
+
+/** Stable identity of the host-owned task-boundary protocol. */
+export type HostSupervisionProtocolId = "host-task-boundary-v1";
+
+/**
+ * Capability advertised by a shape. Adapter ids identify the deterministic
+ * bridge that translates a shape's lifecycle to the shared host protocol;
+ * they are persisted so a resumed run cannot silently switch adapters.
+ */
+export interface ShapeSupervisionProtocol {
+  protocolId: HostSupervisionProtocolId;
+  adapterId: string;
+  adapterVersion: 1;
+}
+
+export interface ShapeExecutionContract {
+  classification: ShapeExecutionClassification;
+  supervision?: ShapeSupervisionProtocol;
+}
+
+/**
  * Every orchestration shape must implement this interface.
  *
  * Shapes are registered in the shape registry and selected via the
@@ -30,6 +57,12 @@ export interface OrchestrationShape {
   name: string;
   /** Human-readable description shown when listing available shapes. */
   description: string;
+  /**
+   * Explicit execution/supervision capability. Optional only while historical
+   * shapes are migrated: the shared resolver treats omission as unknown and
+   * fail-closed, never as read-only. New registrations must provide it.
+   */
+  execution?: ShapeExecutionContract;
   /** Execute the orchestration using only substrate primitives. */
   run(context: OrchestrationShapeContext): Promise<OrchestrationShapeResult>;
 }
@@ -66,7 +99,33 @@ export interface OrchestrationShapeResult {
 
 // ── Shared parameter types ─────────────────────────────────────────────────
 
+export interface FrozenTestAuthorizationEntrypoint {
+  path: string;
+  sha256: string;
+  bytes: number;
+  source: "package-test-script";
+}
+
+export interface FrozenTestAuthorizationPolicy {
+  schemaVersion: 1;
+  authority: "run-admission-owner-task";
+  workspaceRealPath: string;
+  packageJsonSha256: string | null;
+  ownerTaskSha256: string;
+  existingEntrypoints: FrozenTestAuthorizationEntrypoint[];
+  approvedDynamicScopes: string[];
+  allowedNodeOptions: string[];
+  policyHash: string;
+}
+
 /** Normalized parameters, produced before any shape is invoked. */
+export interface WorkerExecutionConstraints {
+  /** Reject worker bash calls that supply any own `timeout` argument key. */
+  noForceKill: boolean;
+  /** Immutable run-scoped authority captured before the first worker. */
+  testAuthorization?: FrozenTestAuthorizationPolicy;
+}
+
 export interface NormalizedParams {
   task: string;
   plannerAgent: string;
@@ -91,11 +150,15 @@ export interface NormalizedParams {
   maxSubagents: number;
   maxSubagentsExplicit: boolean;
   cwd: string;
+  /** Caller-declared read-only evidence roots retained across role recovery. */
+  externalEvidenceRoots?: string[];
   allowLocalModel: boolean;
   /** Natural-language orchestration controls detected from the task text. */
   orchestrationControls: NaturalLanguageOrchestrationControls;
   /** Orchestration paradigm to use (defaults to plan-execute-verify). */
   paradigm?: string;
+  /** Host-owned execution policy. Omission at API intake normalizes to visible-main. */
+  supervision: "visible-main" | "off";
   /**
    * Hard-gate mode (F1): "advisory" (default) demotes text-shape heuristics
    * to warnings and lets the verifier verdict gate, escalating only on
@@ -106,6 +169,8 @@ export interface NormalizedParams {
   hardGates: HardGatesMode;
   /** Run 1-token provider health pings before spawning subagents (F5). */
   preflight: boolean;
+  /** Frozen, opt-in constraints enforced inside each isolated worker process. */
+  workerExecutionConstraints: WorkerExecutionConstraints;
   /** Optional per-role fallback routes for graceful degradation (F5). */
   plannerFallbackModel?: string;
   plannerFallbackProvider?: string;

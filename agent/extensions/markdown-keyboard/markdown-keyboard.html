@@ -1,0 +1,567 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Markdown Type Foundry</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --ink: #f4efe2;
+    --muted: #9fa89b;
+    --panel: #151a19;
+    --line: #46544d;
+    --key-edge: #708077;
+    --amber: #efb04b;
+    --green: #8bd49c;
+    --blue: #73a6d8;
+    --red: #f07178;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    overflow: hidden;
+    background:
+      linear-gradient(90deg, transparent 49.7%, #ffffff05 50%, transparent 50.3%),
+      radial-gradient(circle at 25% 0%, #34443b 0, #151a19 38%, #090c0b 100%);
+    color: var(--ink);
+    font-family: Georgia, "Times New Roman", serif;
+  }
+  main {
+    width: min(930px, 97vw);
+    height: 100vh;
+    margin: 0 auto;
+    display: grid;
+    grid-template-rows: auto 210px auto auto auto;
+    align-content: center;
+    gap: 10px;
+    padding: 12px 0;
+  }
+  header { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 20px; }
+  h1 { margin: 0; font-size: 24px; letter-spacing: .02em; font-weight: 600; }
+  .eyebrow {
+    margin-bottom: 3px;
+    color: var(--amber);
+    font: 700 10px/1.2 Consolas, monospace;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+  }
+  .header-right { min-width: 360px; text-align: right; }
+  .constraint-status {
+    margin-bottom: 3px;
+    color: var(--red);
+    font: 700 12px/1.2 Consolas, monospace;
+    letter-spacing: .07em;
+  }
+  .path {
+    max-width: 470px;
+    color: var(--muted);
+    font: 11px/1.4 Consolas, monospace;
+    text-align: right;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .source-wrap { position: relative; }
+  #source {
+    height: 210px;
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    padding: 17px 20px 34px;
+    border: 1px solid #607067;
+    border-radius: 10px;
+    background: #0d1110e8;
+    box-shadow: inset 0 2px 18px #0009, 0 12px 35px #0005;
+    color: #f5f0e4;
+    font: 18px/1.42 Consolas, "Courier New", monospace;
+    scrollbar-color: #5e6c64 #111614;
+  }
+  .caret {
+    display: inline-block;
+    width: 0;
+    height: 1.18em;
+    border-left: 3px solid var(--amber);
+    vertical-align: -.2em;
+    animation: blink 1s steps(1) infinite;
+  }
+  .selection {
+    color: #0a1110;
+    background: #9fd5bd;
+    border-radius: 2px;
+    box-shadow: 0 0 0 1px #c7f4de40;
+  }
+  @keyframes blink { 50% { opacity: .18; } }
+  .source-badge {
+    position: absolute;
+    right: 12px;
+    bottom: 9px;
+    padding: 3px 7px;
+    border-radius: 4px;
+    background: #1c241f;
+    color: var(--green);
+    font: 10px Consolas, monospace;
+    letter-spacing: .05em;
+  }
+  .edit-deck {
+    padding: 7px 9px;
+    border: 1px solid #3f4c46;
+    border-radius: 10px;
+    background: #111613cc;
+  }
+  .edit-row { display: flex; justify-content: center; gap: 5px; margin: 4px 0; }
+  button.edit-key {
+    min-width: 72px;
+    height: 35px;
+    padding: 0 9px;
+    border: 1px solid #61746a;
+    border-bottom-width: 3px;
+    border-radius: 6px;
+    background: linear-gradient(#29352f, #1e2723);
+    color: #dce8df;
+    font: 700 11px Consolas, monospace;
+    cursor: pointer;
+    user-select: none;
+  }
+  button.edit-key.nav { color: #b8d8f2; border-color: #55748c; }
+  button.edit-key.destructive { color: #ffc5c5; border-color: #805b5b; }
+  button.edit-key.active, button.edit-key:active {
+    transform: translateY(2px);
+    border-bottom-width: 1px;
+    background: #7c5427;
+    box-shadow: 0 0 14px #efb04b70;
+  }
+  button.edit-key.unavailable { opacity: .35; }
+  .keyboard {
+    padding: 8px 10px 9px;
+    border: 1px solid #46534d;
+    border-radius: 12px;
+    background: linear-gradient(145deg, #202824, #131816);
+    box-shadow: 0 18px 46px #0008;
+  }
+  .row { display: flex; justify-content: center; gap: 5px; margin: 4px 0; }
+  button.key {
+    position: relative;
+    width: 51px;
+    height: 42px;
+    flex: 0 0 auto;
+    border: 1px solid var(--key-edge);
+    border-bottom-width: 4px;
+    border-radius: 7px;
+    background: linear-gradient(#3a463f, #28312d);
+    color: var(--ink);
+    box-shadow: 0 3px 0 #111, inset 0 1px #ffffff14;
+    font: 700 15px Consolas, monospace;
+    cursor: pointer;
+    transition: transform .045s, border-width .045s, background .08s, box-shadow .08s;
+    user-select: none;
+  }
+  button.key .shift-glyph {
+    position: absolute;
+    top: 3px;
+    left: 6px;
+    color: #a9b2ac;
+    font: 8px Consolas, monospace;
+  }
+  button.key .base-glyph { position: absolute; right: 7px; bottom: 5px; }
+  button.key.active, button.key:active {
+    transform: translateY(3px);
+    border-bottom-width: 1px;
+    background: linear-gradient(#b9782f, #80501e);
+    box-shadow: 0 0 20px #efb04b80;
+  }
+  button.key.modifier-on {
+    border-color: var(--amber);
+    color: #16100a;
+    background: var(--amber);
+  }
+  button.key.missing {
+    border-color: #b85f5f;
+    background: repeating-linear-gradient(135deg, #241b1b, #241b1b 5px, #3b2222 5px, #3b2222 10px);
+    color: #e18b8b;
+    box-shadow: 0 3px 0 #111, inset 0 0 0 2px #f0717830, 0 0 18px #f0717840;
+  }
+  button.key.missing::after {
+    content: 'MISSING';
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    color: #ff9c9c;
+    font: 800 8px/1 Consolas, monospace;
+    letter-spacing: .04em;
+    background: #190d0d80;
+    pointer-events: none;
+  }
+  button.w-tab { width: 76px; }
+  button.w-caps { width: 91px; }
+  button.w-enter { width: 107px; }
+  button.w-shift { width: 123px; }
+  button.w-back { width: 99px; }
+  button.w-ctrl { width: 83px; }
+  button.w-space { width: 406px; }
+  button.w-clear { width: 110px; color: #ffc2c2; border-color: #805656; }
+  .statusbar {
+    display: grid;
+    grid-template-columns: auto auto 1fr auto;
+    gap: 12px;
+    align-items: center;
+    color: var(--muted);
+    font: 10px/1.3 Consolas, monospace;
+  }
+  .saved { color: var(--green); }
+  .cursor-status { color: var(--blue); }
+  .error { color: var(--red); }
+  #hash { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <div class="eyebrow">Character-bound authorship · editable state</div>
+      <h1>Markdown Type Foundry</h1>
+    </div>
+    <div class="header-right">
+      <div id="constraintStatus" class="constraint-status">CALIBRATING MISSING KEY…</div>
+      <div id="path" class="path">Connecting to document…</div>
+    </div>
+  </header>
+
+  <section class="source-wrap" aria-label="Markdown document">
+    <div id="source" role="textbox" aria-label="Markdown source"></div>
+    <div id="sourceBadge" class="source-badge">0 CHARACTERS</div>
+  </section>
+
+  <section class="edit-deck" aria-label="Editing and cursor controls">
+    <div class="edit-row">
+      <button class="edit-key" data-command="undo">↶ Undo</button>
+      <button class="edit-key" data-command="redo">Redo ↷</button>
+      <button class="edit-key" data-command="select-all">Select all</button>
+      <button class="edit-key" data-command="collapse">Deselect</button>
+      <button class="edit-key nav" data-command="doc-home">Doc start</button>
+      <button class="edit-key nav" data-command="home">Home</button>
+      <button class="edit-key nav" data-command="up">↑ Up</button>
+      <button class="edit-key nav" data-command="end">End</button>
+      <button class="edit-key nav" data-command="doc-end">Doc end</button>
+      <button class="edit-key destructive" data-command="delete">Delete</button>
+    </div>
+    <div class="edit-row">
+      <button class="edit-key destructive" data-command="backspace-word">⌫ Word</button>
+      <button class="edit-key nav" data-command="word-left">← Word</button>
+      <button class="edit-key nav" data-command="left">← Left</button>
+      <button class="edit-key nav" data-command="down">↓ Down</button>
+      <button class="edit-key nav" data-command="right">Right →</button>
+      <button class="edit-key nav" data-command="word-right">Word →</button>
+      <button class="edit-key nav" data-command="page-up">Page ↑</button>
+      <button class="edit-key nav" data-command="page-down">Page ↓</button>
+      <button class="edit-key destructive" data-command="delete-word">Del Word</button>
+    </div>
+  </section>
+
+  <section class="keyboard" aria-label="Full Markdown virtual keyboard">
+    <div class="row" id="numberRow"></div>
+    <div class="row" id="topRow"></div>
+    <div class="row" id="homeRow"></div>
+    <div class="row" id="bottomRow"></div>
+    <div class="row" id="spaceRow"></div>
+  </section>
+
+  <footer class="statusbar">
+    <span id="status" class="saved">FILE READY</span>
+    <span id="cursorStatus" class="cursor-status">LINE 1 · COL 1</span>
+    <span id="hash">SHA256 —</span>
+    <span id="sequence">ACTION 0</span>
+  </footer>
+</main>
+<script>
+const source = document.getElementById('source');
+const status = document.getElementById('status');
+const cursorStatus = document.getElementById('cursorStatus');
+const pathLabel = document.getElementById('path');
+const constraintStatus = document.getElementById('constraintStatus');
+const badge = document.getElementById('sourceBadge');
+const hashLabel = document.getElementById('hash');
+const sequenceLabel = document.getElementById('sequence');
+let shifted = false;
+let controlled = false;
+let writeChain = Promise.resolve();
+let latestConstraintRotatedAt = Number.NEGATIVE_INFINITY;
+
+const rows = {
+  numberRow: [
+    ['`','~'], ['1','!'], ['2','@'], ['3','#'], ['4','$'], ['5','%'], ['6','^'],
+    ['7','&'], ['8','*'], ['9','('], ['0',')'], ['-','_'], ['=','+'], ['BACKSPACE',null,'w-back']
+  ],
+  topRow: [
+    ['TAB',null,'w-tab'], ['q','Q'], ['w','W'], ['e','E'], ['r','R'], ['t','T'], ['y','Y'],
+    ['u','U'], ['i','I'], ['o','O'], ['p','P'], ['[','{'], [']','}'], ['\\','|']
+  ],
+  homeRow: [
+    ['SHIFT',null,'w-caps'], ['a','A'], ['s','S'], ['d','D'], ['f','F'], ['g','G'], ['h','H'],
+    ['j','J'], ['k','K'], ['l','L'], [';',':'], ["'",'"'], ['ENTER',null,'w-enter']
+  ],
+  bottomRow: [
+    ['SHIFT',null,'w-shift'], ['z','Z'], ['x','X'], ['c','C'], ['v','V'], ['b','B'], ['n','N'],
+    ['m','M'], [',','<'], ['.','>'], ['/','?'], ['SHIFT',null,'w-shift']
+  ],
+  spaceRow: [
+    ['CTRL',null,'w-ctrl'], ['CLEAR',null,'w-clear'], ['SPACE',null,'w-space'], ['CTRL',null,'w-ctrl']
+  ]
+};
+
+function displayGlyph(value) {
+  if (value === 'SPACE') return 'Space';
+  if (value === 'ENTER') return 'Enter ↵';
+  if (value === 'BACKSPACE') return 'Backspace ⌫';
+  if (value === 'SHIFT') return 'Shift ⇧';
+  if (value === 'CTRL') return 'Ctrl';
+  if (value === 'TAB') return 'Tab ⇥';
+  if (value === 'CLEAR') return 'Clear file';
+  return value;
+}
+
+function makeKey([base, upper, widthClass]) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = `key ${widthClass || ''}`.trim();
+  button.dataset.base = base;
+  if (upper) button.dataset.shift = upper;
+  button.setAttribute('aria-label', ['SHIFT','CTRL'].includes(base) ? base : `Key ${displayGlyph(base)}`);
+  if (upper && base.length === 1) {
+    button.innerHTML = `<span class="shift-glyph"></span><span class="base-glyph"></span>`;
+    button.querySelector('.shift-glyph').textContent = upper;
+    button.querySelector('.base-glyph').textContent = base;
+  } else {
+    button.textContent = displayGlyph(base);
+  }
+  button.addEventListener('click', event => handleKey(button, event));
+  return button;
+}
+
+for (const [rowId, keys] of Object.entries(rows)) {
+  const row = document.getElementById(rowId);
+  keys.forEach(key => row.appendChild(makeKey(key)));
+}
+
+document.querySelectorAll('[data-command]').forEach(button => {
+  button.addEventListener('click', event => handleEditCommand(button, event));
+});
+
+function flash(button) {
+  button.classList.add('active');
+  setTimeout(() => button.classList.remove('active'), 120);
+}
+
+function setShift(next) {
+  shifted = next;
+  document.querySelectorAll('[data-base="SHIFT"]').forEach(button => button.classList.toggle('modifier-on', shifted));
+}
+
+function setControl(next) {
+  controlled = next;
+  document.querySelectorAll('[data-base="CTRL"]').forEach(button => button.classList.toggle('modifier-on', controlled));
+}
+
+function consumeModifiers() {
+  setShift(false);
+  setControl(false);
+}
+
+async function request(path, body) {
+  const response = await fetch(path, {
+    method: body ? 'POST' : 'GET',
+    headers: body ? {'Content-Type':'application/json'} : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+    cache: 'no-store'
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    const error = new Error(payload.error || `${response.status}`);
+    error.payload = payload;
+    throw error;
+  }
+  return payload;
+}
+
+function textNode(value) { return document.createTextNode(value); }
+
+function renderSource(documentState) {
+  source.replaceChildren();
+  const content = documentState.content;
+  const start = documentState.selectionStart;
+  const end = documentState.selectionEnd;
+  let focusTarget;
+  const caret = document.createElement('span');
+  caret.className = 'caret';
+  caret.setAttribute('aria-label', 'Cursor');
+  caret.textContent = '\u200b';
+  if (start === end) {
+    source.append(textNode(content.slice(0, documentState.cursor)), caret, textNode(content.slice(documentState.cursor)));
+    focusTarget = caret;
+  } else {
+    const selection = document.createElement('span');
+    selection.className = 'selection';
+    selection.textContent = content.slice(start, end);
+    if (documentState.cursor === start) {
+      source.append(textNode(content.slice(0, start)), caret, selection, textNode(content.slice(end)));
+    } else {
+      source.append(textNode(content.slice(0, start)), selection, caret, textNode(content.slice(end)));
+    }
+    focusTarget = caret;
+  }
+  requestAnimationFrame(() => focusTarget.scrollIntoView({block:'nearest', inline:'nearest'}));
+}
+
+function renderConstraint(documentState) {
+  const constraint = documentState.constraint || {};
+  const rotatedAt = Number(constraint.rotatedAt || 0);
+  if (rotatedAt < latestConstraintRotatedAt) return;
+  latestConstraintRotatedAt = rotatedAt;
+  const blocked = String(constraint.blockedLetter || '').toLowerCase();
+  const remaining = Math.max(0, Number(constraint.remainingMs || 0)) / 1000;
+  document.querySelectorAll('button.key[data-base]').forEach(button => {
+    const isLetter = /^[a-z]$/.test(button.dataset.base || '');
+    const missing = isLetter && button.dataset.base === blocked;
+    button.classList.toggle('missing', missing);
+    if (missing) button.setAttribute('aria-label', `Letter ${blocked.toUpperCase()} is missing right now`);
+    else button.setAttribute('aria-label', ['SHIFT','CTRL'].includes(button.dataset.base) ? button.dataset.base : `Key ${displayGlyph(button.dataset.base)}`);
+  });
+  if (blocked) {
+    constraintStatus.textContent = `${blocked.toUpperCase()} MISSING · ${remaining.toFixed(1)}s · ROTATION ${Number(constraint.rotationIndex) + 1}`;
+    constraintStatus.title = `Run ${constraint.runId || ''}`;
+  }
+}
+
+function renderDocument(documentState) {
+  renderConstraint(documentState);
+  renderSource(documentState);
+  pathLabel.textContent = documentState.path;
+  pathLabel.title = documentState.path;
+  const selected = documentState.selectedCount ? ` · ${documentState.selectedCount} SELECTED` : '';
+  const constraint = documentState.constraintName ? ` · ${documentState.constraintName.toUpperCase()}` : '';
+  badge.textContent = `${documentState.charCount} CHARACTERS · ${documentState.byteCount} BYTES${selected}${constraint}`;
+  cursorStatus.textContent = `LINE ${documentState.line} · COL ${documentState.column} · POS ${documentState.cursor}`;
+  hashLabel.textContent = `SHA256 ${documentState.sha256}`;
+  sequenceLabel.textContent = `ACTION ${documentState.sequence}`;
+  status.textContent = documentState.contentChanged ? 'SAVED TO DISK' : 'CURSOR STATE';
+  status.className = documentState.contentChanged ? 'saved' : 'cursor-status';
+  const undo = document.querySelector('[data-command="undo"]');
+  const redo = document.querySelector('[data-command="redo"]');
+  undo.classList.toggle('unavailable', !documentState.canUndo);
+  redo.classList.toggle('unavailable', !documentState.canRedo);
+  undo.setAttribute('aria-disabled', String(!documentState.canUndo));
+  redo.setAttribute('aria-disabled', String(!documentState.canRedo));
+}
+
+function enqueueOperation(operation) {
+  status.textContent = operation.action === 'move' ? 'MOVING…' : 'EDITING…';
+  status.className = '';
+  writeChain = writeChain
+    .then(() => request('/api/edit', {...operation, _physicalEvent:true}))
+    .then(renderDocument)
+    .catch(error => {
+      if (error.payload?.code === 'CHARACTER_UNAVAILABLE') {
+        const letter = String(error.payload.character || '?').toUpperCase();
+        status.textContent = `KEY FAILURE · LETTER ${letter} IS MISSING RIGHT NOW`;
+        if (error.payload.state) renderConstraint(error.payload.state);
+      } else {
+        status.textContent = `OPERATION FAILED · ${error.message}`;
+      }
+      status.className = 'error';
+      console.error(error);
+    });
+}
+
+function move(direction, unit='character') {
+  enqueueOperation({action:'move', direction, unit, extend:shifted});
+  consumeModifiers();
+}
+
+function handleEditCommand(button, event) {
+  if (!event.isTrusted) {
+    status.textContent = 'SYNTHETIC CLICK REFUSED · USE THE VISIBLE POINTER';
+    status.className = 'error';
+    return;
+  }
+  flash(button);
+  const command = button.dataset.command;
+  const commands = {
+    'undo': {action:'undo'},
+    'redo': {action:'redo'},
+    'select-all': {action:'select_all'},
+    'collapse': {action:'collapse_selection'},
+    'backspace-word': {action:'backspace', word:true},
+    'delete-word': {action:'delete', word:true},
+    'delete': {action:'delete', word:controlled},
+  };
+  if (commands[command]) {
+    enqueueOperation(commands[command]);
+    consumeModifiers();
+    return;
+  }
+  const moves = {
+    'doc-home':['home','document'], 'home':['home','line'], 'up':['up','character'],
+    'end':['end','line'], 'doc-end':['end','document'], 'word-left':['left','word'],
+    'left':['left',controlled ? 'word':'character'], 'down':['down','character'],
+    'right':['right',controlled ? 'word':'character'], 'word-right':['right','word'],
+    'page-up':['up','page'], 'page-down':['down','page']
+  };
+  const [direction, unit] = moves[command];
+  move(direction, unit);
+}
+
+function handleKey(button, event) {
+  if (!event.isTrusted) {
+    status.textContent = 'SYNTHETIC CLICK REFUSED · USE THE VISIBLE POINTER';
+    status.className = 'error';
+    return;
+  }
+  const base = button.dataset.base;
+  flash(button);
+  if (base === 'SHIFT') { setShift(!shifted); return; }
+  if (base === 'CTRL') { setControl(!controlled); return; }
+  if (base === 'CLEAR') {
+    if (confirm('Clear the Markdown file? This can be undone with Undo.')) enqueueOperation({action:'clear'});
+    consumeModifiers();
+    return;
+  }
+  if (base === 'BACKSPACE') {
+    enqueueOperation({action:'backspace', word:controlled});
+    consumeModifiers();
+    return;
+  }
+  if (controlled) {
+    const ctrlActions = {
+      'a': {action:'select_all'},
+      'z': shifted ? {action:'redo'} : {action:'undo'},
+      'y': {action:'redo'}
+    };
+    if (ctrlActions[base]) enqueueOperation(ctrlActions[base]);
+    else {
+      status.textContent = `CTRL+${base.toUpperCase()} IS NOT ASSIGNED`;
+      status.className = 'error';
+    }
+    consumeModifiers();
+    return;
+  }
+  let character;
+  if (base === 'SPACE') character = ' ';
+  else if (base === 'ENTER') character = '\n';
+  else if (base === 'TAB') character = '\t';
+  else character = shifted && button.dataset.shift ? button.dataset.shift : base;
+  consumeModifiers();
+  enqueueOperation({action:'insert', character});
+}
+
+request('/api/document').then(renderDocument).catch(error => {
+  status.textContent = `CONNECTION FAILED · ${error.message}`;
+  status.className = 'error';
+});
+setInterval(() => {
+  request('/api/document').then(renderConstraint).catch(() => {});
+}, 125);
+</script>
+</body>
+</html>

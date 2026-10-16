@@ -1,9 +1,13 @@
 # Telegram ↔ Pi Active-Session Integration — Intake
 
+## 2026-10-01 opt-in multi-session candidate
+
+The historical intake below describes legacy mode. The owner's replacement brief is `C:/Users/you/ssi-improvements/prompts/telegram-multi-session-brief-2026-10-01.md`. With `TELEGRAM_PI_MODE=topics` or an approved non-secret deployment profile, the new single-router design supersedes active-session claims, per-session polling, heartbeat-based daemon fallback, stored-token setup and takeover. Existing injection/photo helpers and non-secret tool actions are reused. Router tokens are environment-only. The daemon delegates to `forum-router.mjs`, not a fallback Pi process. Every session gets its own forum topic; parent-session rotation inherits the binding; offline messages are refused. See `C:/Users/you/telegramupgrade/README.md` for tests and setup. Source installation and subsequent real activation were separately approved by the owner while P7 is inactive. No running Pi window is reloaded/restarted. The approved initial transition must prove the old loop's actual request/batch drain before new polling; a stop-tool acknowledgement or shared `polling:false` file alone does not prove drain.
+
 ## Original prompt
 
 > Implement a secure Telegram ↔ Pi active-session integration under
-> `~\.pi`. Telegram should be able to message the active PiNen/Pi
+> `C:\Users\you\.pi`. Telegram should be able to message the active PiNen/Pi
 > TUI session view (not only a default headless instance). Telegram-origin
 > messages must appear visibly in the session as user messages. Pi assistant
 > replies for Telegram-origin prompts should be sent back to Telegram. The user

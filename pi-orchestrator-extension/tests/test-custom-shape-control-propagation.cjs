@@ -59,6 +59,7 @@ async function run() {
     const tool = loadRegisteredOrchestrateTool();
     const controls = {
       paradigm: "preregistered-concurrency-spike",
+      supervision: "off",
       task: "Exercise the registered bespoke shape control path without modifying project files.",
       cwd: tmp,
       preflight: false,

@@ -1,9 +1,9 @@
 {
-  "defaultModel": "gpt-5.6-luna",
+  "defaultModel": "gpt-6.1-sol",
   "defaultProvider": "openai-codex",
   "defaultThinkingLevel": "high",
-  "hideThinkingBlock": false,
-  "lastChangelogVersion": "0.80.6",
+  "hideThinkingBlock": true,
+  "lastChangelogVersion": "0.87.1",
   "packages": [
     "../pi-orchestrator-extension",
     "npm:pi-mcp-adapter",

@@ -14,6 +14,7 @@ const os = require("node:os");
 const path = require("node:path");
 const Module = require("node:module");
 
+require("./fixtures/legacy-offline.cjs")();
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const PI_PACKAGE_ROOT = path.join(
   os.homedir(),
@@ -155,6 +156,7 @@ function testValidationAndBoundaries(tempRoot) {
   assert.equal(valid.phases.length, 2);
   const canaryResolved = {
     workflow: valid,
+    execution: dynamic.DYNAMIC_WORKFLOW_EXECUTION,
     provenance: {
       sourcePath: "fixture",
       scope: "user",
@@ -360,7 +362,7 @@ async function testSameProcessBuildExecuteAndPinnedResume(tempRoot, installedBef
 
   const built = await tool.execute(
     "dynamic-builder",
-    { task: JSON.stringify(builderSpec), paradigm: "shape-builder", preflight: false, cwd, maxSubagents: 4 },
+    { task: JSON.stringify(builderSpec), paradigm: "shape-builder", supervision: "off", preflight: false, cwd, maxSubagents: 4 },
     undefined,
     () => {},
     { cwd },
@@ -392,6 +394,7 @@ async function testSameProcessBuildExecuteAndPinnedResume(tempRoot, installedBef
     {
       task: "Exercise the newly built workflow now.",
       paradigm: "same-process-runtime",
+      supervision: "off",
       preflight: false,
       cwd,
       maxSubagents: 4,
@@ -463,6 +466,95 @@ async function testSameProcessBuildExecuteAndPinnedResume(tempRoot, installedBef
   assert.equal(nativeCanary.details.status, "pass");
   assert.equal(nativeCanary.details.canary, true);
   assert.equal(nativeCanary.details.spawnedCount, 0);
+
+  // Visible-main effect contracts are derived from the pinned phase metadata,
+  // not the inherited top-level task prose. A verifier audit may therefore
+  // prove an already-correct artifact without a ceremonial mutation.
+  writeWorkflow(projectRoot, workflow("conditional-noop-audit", {
+    phases: [{
+      id: "audit",
+      role: "verifier",
+      agentName: "reviewer",
+      prompt: "Perform this VERIFICATION-ONLY orchestration: audit the fixture and, if necessary, correct it. Do not modify an already-correct artifact.",
+      expectedOutput: "A grounded verification report confirming whether correction was necessary.",
+      dependsOn: [],
+      route: { role: "verifier" },
+    }],
+    maxSubagents: 1,
+    maxConcurrency: 1,
+    terminationCondition: "Stop after the audit.",
+  }));
+  const auditPlan = await tool.execute(
+    "dynamic-visible-audit-plan",
+    { task: "Audit and, if necessary, correct the already-valid fixture.", paradigm: "conditional-noop-audit", preflight: false, cwd },
+    undefined,
+    () => {},
+    { cwd },
+  );
+  const auditSettled = await tool.execute(
+    "dynamic-visible-audit-execute",
+    { action: "continue", runId: auditPlan.details.runId, approvalToken: auditPlan.details.approvalToken },
+    undefined,
+    () => {},
+    { cwd },
+  );
+  assert.equal(auditSettled.details.status, "awaiting_supervisor");
+  assert.equal(auditSettled.details.checkpoint.taskId, "dynamic-1-audit");
+  assert.equal(auditSettled.details.checkpoint.outcome, "pass", "the worker's own PASS is the checkpoint outcome");
+  assert.deepEqual(auditSettled.details.checkpoint.effectChanges, [], "a correct conditional audit is a legitimate no-op");
+  assert.equal(JSON.parse(auditSettled.details.executor.output).overall, "pass", "the no-op is backed by a successful grounded audit result");
+  const auditTerminal = await tool.execute(
+    "dynamic-visible-audit-verify",
+    { action: "continue", runId: auditPlan.details.runId, approvalToken: auditSettled.details.approvalToken },
+    undefined,
+    () => {},
+    { cwd },
+  );
+  assert.equal(auditTerminal.details.terminalOutcome, "pass");
+  assert.ok(auditTerminal.details.findings.every((finding) => finding.evidence.length > 0), "final approval records machine evidence for the grounded no-op");
+
+  // Conversely, authoritative phase instructions that explicitly promise
+  // implementation keep a no-content advisory when the fake worker writes no
+  // bytes, but the settled worker is still presented to the supervisor rather
+  // than converted into a host exception.
+  writeWorkflow(projectRoot, workflow("mandatory-write", {
+    phases: [{
+      id: "implement",
+      role: "executor",
+      agentName: "coder",
+      prompt: "Implement the fixture and write artifact.txt with the required content.",
+      expectedOutput: "A completed implementation with artifact.txt materialized.",
+      dependsOn: [],
+      route: { role: "executor" },
+    }],
+    maxSubagents: 1,
+    maxConcurrency: 1,
+    terminationCondition: "Stop after implementation.",
+  }));
+  const writePlan = await tool.execute(
+    "dynamic-visible-write-plan",
+    { task: "Implement the mandatory artifact.", paradigm: "mandatory-write", predictedWriteSet: "artifact.txt", preflight: false, cwd },
+    undefined,
+    () => {},
+    { cwd },
+  );
+  const writeRejected = await tool.execute(
+    "dynamic-visible-write-execute",
+    { action: "continue", runId: writePlan.details.runId, approvalToken: writePlan.details.approvalToken },
+    undefined,
+    () => {},
+    { cwd },
+  );
+  assert.equal(writeRejected.details.status, "awaiting_supervisor");
+  assert.equal(writeRejected.details.checkpoint.outcome, "settled");
+  assert.equal(writeRejected.details.error, undefined, "zero effects do not become NO_CONTENT_PROGRESS errors");
+  const rejectedState = JSON.parse(fs.readFileSync(path.join(runsRoot, writePlan.details.runId, "supervision.json"), "utf8"));
+  assert.equal(rejectedState.audit.noProgress, true);
+  assert.equal(rejectedState.tasks[0].expectsFileChange, true, "host-generated dynamic plan makes its phase effect declaration explicit");
+  assert.deepEqual(rejectedState.tasks[0].predictedWriteSet, ["artifact.txt"], "mandatory-write advisory preserves the frozen write set");
+  assert.equal(rejectedState.runtime.cursor.nextTaskIndex, 1, "settled no-op advances only after the supervisor sees the advisory");
+  assert.equal(fs.existsSync(path.join(cwd, "artifact.txt")), false);
+  assert.equal(fs.readdirSync(cwd).some((name) => name.toLowerCase() === "nul"), false, "neither no-op path needs an accidental nul mutation");
 
   assert.equal(fingerprintInstalledPi(), installedBefore, "dynamic workflow tests must not modify installed/global Pi package files");
 }

@@ -154,6 +154,7 @@ async function testProposeShapeWithFakePi() {
       {
         task: "Create a non-invasive diagnostic harness for tracing Windows Pi process creation across cold start, reload, and new-session lifecycles. Include action markers and correlation windows.",
         paradigm: "win-lifecycle-process-trace",
+        supervision: "off",
         preflight: false,
         cwd: tempDir,
         maxSubagents: 6,
@@ -238,6 +239,7 @@ async function testVerifierFailWithExitCodeZero() {
       {
         task: "Create a non-invasive diagnostic harness for tracing Windows Pi process creation across cold start, reload, and new-session lifecycles.",
         paradigm: "win-lifecycle-process-trace",
+        supervision: "off",
         preflight: false,
         cwd: tempDir,
         maxSubagents: 6,
@@ -336,6 +338,7 @@ async function testVerifierPassStillWorks() {
       {
         task: "Create a non-invasive diagnostic harness for tracing Windows Pi process creation across cold start, reload, and new-session lifecycles.",
         paradigm: "win-lifecycle-process-trace",
+        supervision: "off",
         preflight: false,
         cwd: tempDir,
         maxSubagents: 6,
@@ -381,6 +384,7 @@ async function testDefaultsModelRouting() {
       {
         task: "Create a non-invasive diagnostic harness for tracing Windows Pi process creation across cold start, reload, and new-session lifecycles.",
         paradigm: "win-lifecycle-process-trace",
+        supervision: "off",
         preflight: false,
         cwd: tempDir,
         maxSubagents: 6,
@@ -417,6 +421,7 @@ async function testEmptyVerifierFailsClosed() {
       {
         task: "Create a non-invasive diagnostic harness for tracing Windows Pi process creation across cold start, reload, and new-session lifecycles.",
         paradigm: "win-lifecycle-process-trace",
+        supervision: "off",
         preflight: false,
         cwd: tempDir,
         maxSubagents: 6,
@@ -469,6 +474,7 @@ async function testUnparseableVerifierFailsClosed() {
       {
         task: "Create a non-invasive diagnostic harness for tracing Windows Pi process creation across cold start, reload, and new-session lifecycles.",
         paradigm: "win-lifecycle-process-trace",
+        supervision: "off",
         preflight: false,
         cwd: tempDir,
         maxSubagents: 6,
@@ -544,6 +550,7 @@ async function testTextPassVerifierFailsClosed() {
       {
         task: "Create a non-invasive diagnostic harness for tracing Windows Pi process creation.",
         paradigm: "win-lifecycle-process-trace",
+        supervision: "off",
         preflight: false,
         cwd: tempDir,
         maxSubagents: 6,
@@ -618,6 +625,7 @@ async function testWrappedJsonPassVerifierFailsClosed() {
       {
         task: "Create a non-invasive diagnostic harness for tracing Windows Pi process creation.",
         paradigm: "win-lifecycle-process-trace",
+        supervision: "off",
         preflight: false,
         cwd: tempDir,
         maxSubagents: 6,
@@ -690,6 +698,7 @@ async function testVerifierUnknownJsonCausesFail() {
       {
         task: "Create a non-invasive diagnostic harness for tracing Windows Pi process creation.",
         paradigm: "win-lifecycle-process-trace",
+        supervision: "off",
         preflight: false,
         cwd: tempDir,
         maxSubagents: 6,
@@ -752,6 +761,7 @@ async function testVerifierInconclusiveJsonCausesFail() {
       {
         task: "Create a non-invasive diagnostic harness for tracing Windows Pi process creation.",
         paradigm: "win-lifecycle-process-trace",
+        supervision: "off",
         preflight: false,
         cwd: tempDir,
         maxSubagents: 6,
@@ -851,6 +861,7 @@ async function testVerifierPromptEvidenceBlockInFakePi() {
       {
         task: "Create a non-invasive diagnostic harness for tracing Windows Pi process creation across cold start, reload, and new-session lifecycles.",
         paradigm: "win-lifecycle-process-trace",
+        supervision: "off",
         preflight: false,
         cwd: tempDir,
         maxSubagents: 6,
@@ -921,6 +932,7 @@ async function testVerifierFailsWhenEvidenceBlockMissing() {
       {
         task: "Create a non-invasive diagnostic harness for tracing Windows Pi process creation.",
         paradigm: "win-lifecycle-process-trace",
+        supervision: "off",
         preflight: false,
         cwd: tempDir,
         maxSubagents: 6,

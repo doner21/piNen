@@ -28,6 +28,8 @@ import {
   type SubagentResult,
 } from "../substrate";
 
+import { GENERIC_EXECUTOR_SHAPE_EXECUTION } from "../supervision";
+
 import type {
   OrchestrationShape,
   OrchestrationShapeContext,
@@ -96,6 +98,7 @@ export const multiVerifyVoteShape: OrchestrationShape = {
     "Planner → executor waves → multiple verifiers (odd count) → majority vote. " +
     "Each verifier independently judges pass/fail; majority determines the outcome. " +
     "Uses only substrate primitives — a sibling to plan-execute-verify, not a wrapper.",
+  execution: GENERIC_EXECUTOR_SHAPE_EXECUTION,
   run: runMultiVerifyVote,
 };
 

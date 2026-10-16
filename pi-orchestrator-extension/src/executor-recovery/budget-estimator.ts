@@ -1,281 +1,241 @@
+import { estimateTokens } from "@earendil-works/pi-coding-agent";
+
 /**
- * Layer RX-B — Pre-Spawn Budget Estimator
- * =======================================
- * Proactive context-budget estimation to prevent executor context exhaustion
- * BEFORE spawning. Shared resolveModelContextLimit() is the single source of
- * truth for model context-window sizes, consumed by both budget estimation and
- * adaptive task sizing.
+ * Pre-spawn worker admission against the complete launcher assembly.
  *
- * Lifecycle:
- *   1. resolveModelContextLimit()   — shared model→token-limit lookup
- *   2. estimateExecutorContextBudget() — pre-spawn saturation estimate
- *   3. computeAdaptiveTaskSizeCap() — model-aware word cap for task splitting
+ * Pi's public estimateTokens() is a chars/4 estimate, not a tokenizer or an
+ * exact provider count. Admission therefore reports it honestly and applies a
+ * fixed host uncertainty margin plus a framing/tool allowance. The complete
+ * SDK-assembled system prompt, final user prompt, and active tool schemas are
+ * all measured; no binding text or evidence is removed to make a request fit.
  */
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Types
-// ═══════════════════════════════════════════════════════════════════════════
-
-/** Risk level produced by the pre-spawn budget estimator. */
 export type BudgetRiskLevel = "SAFE" | "AT_RISK" | "CRITICAL";
-
-/** Recommendation for the orchestrator after budget estimation. */
 export type BudgetRecommendation = "PROCEED" | "SPLIT_BEFORE_SPAWN" | "REDUCE_SCOPE";
 
-/**
- * Complete pre-spawn context budget estimate.
- *
- * Produced by estimateExecutorContextBudget() and consumed by the tiered
- * recovery system (executeExecutorTaskWithRecovery) to decide whether a
- * task can be dispatched as-is or must be split / reduced before dispatch.
- */
+export const DEFAULT_REPLY_RESERVE_TOKENS = 16_384;
+export const ADMISSION_ESTIMATE_MARGIN_PERCENT = 25;
+export const ADMISSION_FRAMING_ALLOWANCE_TOKENS = 4_096;
+export const ADMISSION_MEASUREMENT_METHOD = "pi-estimateTokens-with-fixed-host-allowances" as const;
+
+export interface PromptSectionEstimate {
+  name: "completeSystemPrompt" | "userPrompt" | "activeToolSchemas";
+  chars: number;
+  utf8Bytes: number;
+  /** Pi estimateTokens() result; an estimate, not an exact tokenizer count. */
+  estimatedTokens: number;
+}
+
 export interface ContextBudget {
-  /** Prompt character count (task text + system prompt + intake snippet). */
+  /** Characters across the complete measured system/user/tool sections. */
   promptChars: number;
-  /** Heuristic token count (chars / 3.5). */
+  /** UTF-8 bytes across measured sections, retained as diagnostics only. */
+  promptUtf8Bytes: number;
+  /** Margin-adjusted input estimate used for admission. */
   estimatedPromptTokens: number;
-  /** The model's documented context-window limit in tokens. */
+  /** Alias that makes the admission quantity explicit to new callers. */
+  admissionInputTokens: number;
+  /** Sum of Pi's per-section estimates before host allowances. */
+  baseEstimatedInputTokens: number;
   maxAgentContextTokens: number;
-  /** Saturation percent: (estimatedPromptTokens / maxAgentContextTokens) * 100. */
   saturationPercent: number;
-  /** Discrete risk bucket derived from saturationPercent and thresholds. */
   risk: BudgetRiskLevel;
-  /** Actionable recommendation for the orchestrator. */
   recommendation: BudgetRecommendation;
-  /** Total overhead-padding tokens reserved for agent thinking + tool output. */
+  /** Total host allowance: uncertainty margin, framing allowance, and reply reserve. */
   reservedOverheadTokens: number;
-  /** Tokens remaining after prompt and overhead reservation. */
   usableBudgetTokens: number;
+  measurementMethod: typeof ADMISSION_MEASUREMENT_METHOD;
+  measurementCaveat: string;
+  sections: PromptSectionEstimate[];
+  marginPercent: number;
+  estimateMarginTokens: number;
+  framingAllowanceTokens: number;
+  replyReserveTokens: number;
+  modelOutputCapabilityTokens: number;
+  availableInputTokens: number;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Model Context Limit Lookup (shared single source of truth)
-// ═══════════════════════════════════════════════════════════════════════════
-
 /**
- * Resolve the documented context-window token limit for a given model or
- * provider/model string. This is the **single shared lookup** consumed by
- * both pre-spawn budget estimation and adaptive task sizing.
- *
- * Known models with explicit limits:
- *   - DeepSeek V4 / V4 Pro      → 128 000 tokens
- *   - GPT 5.5 / Codex            → 200 000 tokens
- *   - Claude 3.5 Sonnet / Opus   → 200 000 tokens
- *   - Gemma 4 (200k)             → 200 000 tokens
- *   - DeepSeek V3, R1            → 128 000 tokens
- *   - GPT-4o, GPT-4-turbo        → 128 000 tokens
- *
- * @param modelId  Optional model identifier (can be a full model string).
- *                 Falls back to 200 000 if unrecognized (conservative default).
- * @returns        Context window size in tokens.
- */
-export function resolveModelContextLimit(modelId?: string): number {
-  if (!modelId) return 200_000; // conservative default
-
-  const lowered = modelId.toLowerCase();
-
-  // ── DeepSeek family: 128k ──────────────────────────────────────────
-  if (
-    lowered.includes("deepseek") &&
-    (lowered.includes("v4") || lowered.includes("v3") || lowered.includes("r1") || lowered.includes("chat"))
-  ) {
-    return 128_000;
-  }
-  // Legacy deepseek models — default 128k
-  if (lowered.includes("deepseek")) return 128_000;
-
-  // ── GPT 5.x / Codex: 200k ──────────────────────────────────────────
-  if (lowered.includes("gpt-5") || lowered.includes("gpt5") || lowered.includes("codex")) {
-    return 200_000;
-  }
-
-  // ── GPT-4 family: 128k (except gpt-4-32k which we map conservatively) ──
-  if (lowered.includes("gpt-4")) {
-    if (lowered.includes("32k")) return 32_000;
-    return 128_000;
-  }
-
-  // ── Claude family: 200k ────────────────────────────────────────────
-  if (lowered.includes("claude-3") || lowered.includes("claude-3.5") || lowered.includes("claude-4")) {
-    return 200_000;
-  }
-  // Claude Opus / Sonnet generic
-  if (lowered.includes("claude")) return 200_000;
-
-  // ── Gemma: 200k for the 200k variant, otherwise 128k ───────────────
-  if (lowered.includes("gemma")) {
-    if (lowered.includes("200k")) return 200_000;
-    return 128_000;
-  }
-
-  // ── Gemini: 1M+ for latest, conservative 200k for others ───────────
-  if (lowered.includes("gemini")) return 200_000;
-
-  // ── Mistral / Mixtral: 128k ────────────────────────────────────────
-  if (lowered.includes("mistral") || lowered.includes("mixtral")) return 128_000;
-
-  // ── Llama 3: 128k ──────────────────────────────────────────────────
-  if (lowered.includes("llama")) return 128_000;
-
-  // ── Pi default: 200k ───────────────────────────────────────────────
-  return 200_000;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Budget Estimation
-// ═══════════════════════════════════════════════════════════════════════════
-
-/**
- * Options for estimateExecutorContextBudget().
- */
-export interface BudgetEstimateOptions {
-  /** Override the model context limit (uses resolveModelContextLimit by default). */
-  modelContextLimit?: number;
-  /**
-   * Saturation threshold for AT_RISK classification (percent, default 50).
-   * Above this but below criticalThreshold → AT_RISK.
-   */
-  riskThreshold?: number;
-  /**
-   * Saturation threshold for CRITICAL classification (percent, default 65).
-   * Above this → CRITICAL.
-   */
-  criticalThreshold?: number;
-  /**
-   * Overhead multiplier: what fraction of the context limit to reserve for
-   * agent thinking, tool output accumulation, and framework scaffolding
-   * (default 0.35 = 35%).
-   */
-  overheadFraction?: number;
-}
-
-const DEFAULT_RISK_THRESHOLD = 50;
-const DEFAULT_CRITICAL_THRESHOLD = 65;
-const DEFAULT_OVERHEAD_FRACTION = 0.35;
-
-/**
- * Estimate how much of the executor agent's context window a task prompt
- * will consume, and produce a risk/recommendation.
- *
- * This runs BEFORE the executor is spawned so the orchestrator can split
- * or reduce scope proactively instead of relying on recovery after failure.
- *
- * @param promptChars   Total character count of the prompt that will be sent
- *                      to the executor (task + system prompt + intake relevant).
- * @param modelId       Optional model/provider identifier for context-limit lookup.
- * @param options       Optional overrides for thresholds and overhead fraction.
- * @returns             A ContextBudget with risk level and recommendation.
+ * Legacy diagnostic API retained for historical shapes. It is intentionally
+ * non-authoritative and never recommends a pre-spawn split; the complete
+ * launcher admission below owns spawn decisions.
  */
 export function estimateExecutorContextBudget(
   promptChars: number,
-  modelId?: string,
-  options?: BudgetEstimateOptions,
+  _legacyModelId?: string,
+  _legacyOptions?: { criticalThreshold?: number },
 ): ContextBudget {
-  const riskThreshold = options?.riskThreshold ?? DEFAULT_RISK_THRESHOLD;
-  const criticalThreshold = options?.criticalThreshold ?? DEFAULT_CRITICAL_THRESHOLD;
-  const overheadFraction = options?.overheadFraction ?? DEFAULT_OVERHEAD_FRACTION;
-
-  const maxAgentContextTokens =
-    options?.modelContextLimit ?? resolveModelContextLimit(modelId);
-
-  const estimatedPromptTokens = Math.ceil(promptChars / 3.5);
-  const saturationPercent = Math.round(
-    (estimatedPromptTokens / maxAgentContextTokens) * 100,
-  );
-
-  const reservedOverheadTokens = Math.ceil(maxAgentContextTokens * overheadFraction);
-  const usableBudgetTokens = Math.max(
-    0,
-    maxAgentContextTokens - estimatedPromptTokens - reservedOverheadTokens,
-  );
-
-  let risk: BudgetRiskLevel;
-  let recommendation: BudgetRecommendation;
-
-  if (saturationPercent >= criticalThreshold) {
-    risk = "CRITICAL";
-    recommendation = "SPLIT_BEFORE_SPAWN";
-  } else if (saturationPercent >= riskThreshold) {
-    risk = "AT_RISK";
-    recommendation = "PROCEED"; // proceed but recovery system monitors
-  } else {
-    risk = "SAFE";
-    recommendation = "PROCEED";
-  }
-
   return {
     promptChars,
-    estimatedPromptTokens,
-    maxAgentContextTokens,
-    saturationPercent,
-    risk,
-    recommendation,
-    reservedOverheadTokens,
-    usableBudgetTokens,
+    promptUtf8Bytes: Math.max(0, promptChars),
+    estimatedPromptTokens: Math.max(0, promptChars),
+    admissionInputTokens: Math.max(0, promptChars),
+    baseEstimatedInputTokens: Math.max(0, promptChars),
+    maxAgentContextTokens: Number.MAX_SAFE_INTEGER,
+    saturationPercent: 0,
+    risk: "SAFE",
+    recommendation: "PROCEED",
+    reservedOverheadTokens: 0,
+    usableBudgetTokens: Number.MAX_SAFE_INTEGER,
+    measurementMethod: ADMISSION_MEASUREMENT_METHOD,
+    measurementCaveat: "Legacy character diagnostic only; not an exact token count.",
+    sections: [],
+    marginPercent: 0,
+    estimateMarginTokens: 0,
+    framingAllowanceTokens: 0,
+    replyReserveTokens: 0,
+    modelOutputCapabilityTokens: 0,
+    availableInputTokens: Number.MAX_SAFE_INTEGER,
   };
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Adaptive Task Size Cap
-// ═══════════════════════════════════════════════════════════════════════════
-
-/**
- * Options for computeAdaptiveTaskSizeCap().
- */
-export interface AdaptiveSizeOptions {
-  /**
-   * Fraction of the context limit allocated for the task description itself
-   * (default 0.40 = 40%).
-   */
-  taskBudgetFraction?: number;
-  /**
-   * Minimum word count for the cap (default 60). Prevents tasks from being
-   * split into trivially small fragments.
-   */
-  minWords?: number;
-  /**
-   * Maximum word count for the cap (default 500). Prevents runaway task
-   * sizes even on models with huge context windows.
-   */
-  maxWords?: number;
+/** Historical task splitting is disabled; complete launcher admission supersedes it. */
+export function computeAdaptiveTaskSizeCap(_legacyModelId?: string): number {
+  return Number.MAX_SAFE_INTEGER;
 }
 
-const DEFAULT_TASK_BUDGET_FRACTION = 0.40;
-const DEFAULT_MIN_WORDS = 60;
-const DEFAULT_MAX_WORDS = 500;
+export interface WorkerPromptCapacityInput {
+  /** Exact user prompt sent to the child. */
+  prompt: string;
+  /** Pi's fully assembled prompt, including context files, skills and role text. */
+  completeSystemPrompt: string;
+  /** Exact active tool definitions from the assembled Pi session. */
+  toolSchemas: unknown;
+  /** Context window from the exact launcher-selected Model. */
+  contextWindow: number;
+  /** Maximum output capability from that same configured Model. */
+  maxOutputTokens: number;
+  modelId?: string;
+  bindingSection?: string;
+}
+
+function estimateTextSection(
+  name: PromptSectionEstimate["name"],
+  text: string,
+): PromptSectionEstimate {
+  const estimatedTokens = estimateTokens({
+    role: "user",
+    content: text,
+    timestamp: 0,
+  });
+  if (!Number.isSafeInteger(estimatedTokens) || estimatedTokens < 0) {
+    throw new Error(
+      `BINDING_PROMPT_CAPACITY_UNRESOLVED: Pi estimateTokens returned invalid estimated tokens for ${name}: ${String(estimatedTokens)}.`,
+    );
+  }
+  return {
+    name,
+    chars: text.length,
+    utf8Bytes: Buffer.byteLength(text, "utf8"),
+    estimatedTokens,
+  };
+}
+
+function serializeToolSchemas(toolSchemas: unknown): string {
+  try {
+    const serialized = JSON.stringify(toolSchemas);
+    if (serialized === undefined) {
+      throw new Error("serialization produced undefined");
+    }
+    return serialized;
+  } catch (error) {
+    throw new Error(
+      `BINDING_PROMPT_CAPACITY_UNRESOLVED: active tool schemas could not be serialized for estimation: ${error instanceof Error ? error.message : String(error)}.`,
+    );
+  }
+}
+
+function formatSectionDiagnostics(sections: PromptSectionEstimate[]): string {
+  return sections
+    .map((section) =>
+      `${section.name}=${section.estimatedTokens} estimated token(s) ` +
+      `(${section.chars} chars, ${section.utf8Bytes} UTF-8 bytes)`,
+    )
+    .join("; ");
+}
 
 /**
- * Compute an adaptive word cap for executor task descriptions based on the
- * actual model context limit.
+ * Refuse before spawn when the complete margin-adjusted estimate plus a
+ * realistic reply reserve exceeds the configured context window.
  *
- * Uses resolveModelContextLimit() (the shared lookup) so both the pre-spawn
- * budget estimator and the task sizing logic derive their numbers from the
- * same source. The formula:
- *
- *   usableTokens = (contextLimit * taskBudgetFraction) - (contextLimit * 0.35)
- *   safeTokens   = max(500, usableTokens)
- *   words        = ceil(safeTokens * 0.75)
- *   clamped      = clamp(words, minWords, maxWords)
- *
- * Where 0.35 is the overhead reservation and 0.75 is the token-to-word
- * heuristic ratio.
- *
- * @param modelId   Optional model/provider identifier for context-limit lookup.
- * @param options   Optional overrides for budget fraction and word bounds.
- * @returns         Word cap for task descriptions.
+ * Policy (fixed, not tuned per prompt):
+ *   E = sum(Pi estimateTokens(section))
+ *   admissionInput = E + ceil(E * 25%) + 4096
+ *   replyReserve = min(model.maxTokens, 16384)
  */
-export function computeAdaptiveTaskSizeCap(
-  modelId?: string,
-  options?: AdaptiveSizeOptions,
-): number {
-  const limit = resolveModelContextLimit(modelId);
-  const taskBudgetFraction = options?.taskBudgetFraction ?? DEFAULT_TASK_BUDGET_FRACTION;
-  const minWords = options?.minWords ?? DEFAULT_MIN_WORDS;
-  const maxWords = options?.maxWords ?? DEFAULT_MAX_WORDS;
+export function assertWorkerPromptFitsCapacity(input: WorkerPromptCapacityInput): ContextBudget {
+  if (!Number.isSafeInteger(input.contextWindow) || input.contextWindow <= 0) {
+    throw new Error(`BINDING_PROMPT_CAPACITY_UNRESOLVED: invalid launcher contextWindow ${String(input.contextWindow)}.`);
+  }
+  if (!Number.isSafeInteger(input.maxOutputTokens) || input.maxOutputTokens < 0) {
+    throw new Error(`BINDING_PROMPT_CAPACITY_UNRESOLVED: invalid launcher maxTokens ${String(input.maxOutputTokens)}.`);
+  }
 
-  const usableTokens = Math.ceil(limit * taskBudgetFraction) - Math.ceil(limit * 0.35);
-  const safeTokens = Math.max(500, usableTokens);
-  const words = Math.ceil(safeTokens * 0.75);
+  const toolSchemasText = serializeToolSchemas(input.toolSchemas);
+  const sections = [
+    estimateTextSection("completeSystemPrompt", input.completeSystemPrompt),
+    estimateTextSection("userPrompt", input.prompt),
+    estimateTextSection("activeToolSchemas", toolSchemasText),
+  ];
+  const baseEstimatedInputTokens = sections.reduce((sum, section) => sum + section.estimatedTokens, 0);
+  if (!Number.isSafeInteger(baseEstimatedInputTokens)) {
+    throw new Error("BINDING_PROMPT_CAPACITY_UNRESOLVED: summed input estimate is not a safe integer.");
+  }
 
-  return Math.min(Math.max(words, minWords), maxWords);
+  const estimateMarginTokens = Math.ceil(
+    baseEstimatedInputTokens * ADMISSION_ESTIMATE_MARGIN_PERCENT / 100,
+  );
+  const admissionInputTokens = baseEstimatedInputTokens
+    + estimateMarginTokens
+    + ADMISSION_FRAMING_ALLOWANCE_TOKENS;
+  if (!Number.isSafeInteger(admissionInputTokens)) {
+    throw new Error("BINDING_PROMPT_CAPACITY_UNRESOLVED: margin-adjusted input estimate is not a safe integer.");
+  }
+
+  const replyReserveTokens = Math.min(input.maxOutputTokens, DEFAULT_REPLY_RESERVE_TOKENS);
+  const availableInputTokens = Math.max(0, input.contextWindow - replyReserveTokens);
+  const promptChars = sections.reduce((sum, section) => sum + section.chars, 0);
+  const promptUtf8Bytes = sections.reduce((sum, section) => sum + section.utf8Bytes, 0);
+  const saturationPercent = Math.round((admissionInputTokens / input.contextWindow) * 100);
+  const risk: BudgetRiskLevel = admissionInputTokens > availableInputTokens
+    ? "CRITICAL"
+    : saturationPercent >= 80 ? "AT_RISK" : "SAFE";
+  const budget: ContextBudget = {
+    promptChars,
+    promptUtf8Bytes,
+    estimatedPromptTokens: admissionInputTokens,
+    admissionInputTokens,
+    baseEstimatedInputTokens,
+    maxAgentContextTokens: input.contextWindow,
+    saturationPercent,
+    risk,
+    recommendation: risk === "CRITICAL" ? "REDUCE_SCOPE" : "PROCEED",
+    reservedOverheadTokens: estimateMarginTokens + ADMISSION_FRAMING_ALLOWANCE_TOKENS + replyReserveTokens,
+    usableBudgetTokens: Math.max(0, availableInputTokens - admissionInputTokens),
+    measurementMethod: ADMISSION_MEASUREMENT_METHOD,
+    measurementCaveat:
+      "Estimated with Pi estimateTokens, not an exact tokenizer/provider count; the host adds a fixed 25% uncertainty margin and 4096-token framing/tool allowance.",
+    sections,
+    marginPercent: ADMISSION_ESTIMATE_MARGIN_PERCENT,
+    estimateMarginTokens,
+    framingAllowanceTokens: ADMISSION_FRAMING_ALLOWANCE_TOKENS,
+    replyReserveTokens,
+    modelOutputCapabilityTokens: input.maxOutputTokens,
+    availableInputTokens,
+  };
+
+  if (admissionInputTokens > availableInputTokens) {
+    const section = input.bindingSection ?? "binding owner instructions and acceptance criteria";
+    throw new Error(
+      `BINDING_PROMPT_CAPACITY_REFUSED: section ${JSON.stringify(section)} does not fit configured ` +
+      `${input.modelId ?? "default"} capacity with the complete Pi prompt and active tool schemas. ` +
+      `Estimated input for admission ${admissionInputTokens} token(s), available input ${availableInputTokens}; ` +
+      `sections: ${formatSectionDiagnostics(sections)}; base estimate ${baseEstimatedInputTokens}, ` +
+      `${ADMISSION_ESTIMATE_MARGIN_PERCENT}% uncertainty margin ${estimateMarginTokens}, ` +
+      `${ADMISSION_FRAMING_ALLOWANCE_TOKENS} framing/tool allowance, ${replyReserveTokens} reply reserve ` +
+      `(model output capability ${input.maxOutputTokens}). This is an estimate, not an exact tokenizer/provider count. ` +
+      "No worker was spawned and no binding text was truncated.",
+    );
+  }
+  return budget;
 }

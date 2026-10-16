@@ -307,7 +307,9 @@ check("Contains atomic write (tmpPath + rename)", source.includes("tmpPath") && 
 check("Contains stderr logging on failure", source.includes("process.stderr.write"));
 check("Contains RELOAD_CONFIRMATION constant", source.includes('RELOAD_CONFIRMATION'));
 check("Contains randomUUID import", source.includes('randomUUID'));
-check("Contains 'diagnostics-reporting-fix' in header", source.includes('diagnostics-reporting-fix'));
+check("Contains bundled-runtime public dispatch fix in header", source.includes('bundled-runtime fix'));
+check("Uses public expanded command dispatch", source.includes('expandPromptTemplates: true'));
+check("Does not gate tool execution on executeCommand availability", !source.includes('if (!executeCommandAvailable)'));
 check("writeDiagnostics _cwd parameter documented as ignored",
   source.includes('IGNORED') && source.includes('canonical path'));
 check("resetToIdle does NOT clear reloadConfirmed",

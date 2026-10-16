@@ -10,15 +10,61 @@
  * See ABORT-RESUME-DESIGN.md for the full design.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import type { SubagentResult } from "./substrate";
+import { refreshLiveStatus, type LiveStatusOptions } from "./live-status";
+import { observeHostPublication } from "./host-publications";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
 export type PhaseStatus = "done" | "detached" | "pending" | "ambiguous-completion";
+
+/** Shared durable cursor used by generic host-owned task-boundary adapters. */
+export type GenericSupervisionStage = "plan" | "executor-task" | "verifier" | "terminal";
+
+export interface GenericSupervisionProtocolIdentity {
+  protocolId: "host-task-boundary-v1";
+  adapterId: string;
+  adapterVersion: 1;
+}
+
+export interface GenericSupervisionCursor {
+  schemaVersion: 1;
+  identity: GenericSupervisionProtocolIdentity;
+  stage: GenericSupervisionStage;
+  /** Zero-based task position to dispatch after the next host approval. */
+  nextTaskIndex: number;
+  completedTaskIds: string[];
+  currentTaskId?: string;
+  lastCheckpointId?: string;
+}
+
+/**
+ * Optional binding on historical run state. Its absence is intentionally
+ * accepted for backward compatibility, but is never evidence that a resumed
+ * executor-bearing shape is safe to run without an explicit policy decision.
+ */
+export interface HistoricalSupervisionBinding {
+  schemaVersion: 1;
+  mode: "visible-main" | "off";
+  classification: "read-only" | "executor-bearing" | "mutating";
+  identity?: GenericSupervisionProtocolIdentity;
+  cursor?: GenericSupervisionCursor;
+}
 
 export type TerminalNoRetryCode =
   | "AMBIGUOUS_COMPLETION"
@@ -66,6 +112,8 @@ export interface RunStateFile {
    * possibly changed source artifact.
    */
   dynamicWorkflow?: Record<string, unknown>;
+  /** Durable supervision identity/cursor for generic and historical resume. */
+  supervision?: HistoricalSupervisionBinding;
 }
 
 export interface SurvivorManifest {
@@ -112,9 +160,24 @@ export function runDirFor(runId: string): string {
   return path.join(runsRootDir(), runId);
 }
 
+function safePhaseName(name: string): string {
+  return name.replace(/[^a-zA-Z0-9._-]/g, "_") || "subagent";
+}
+
 function phaseFileName(index: number, name: string): string {
-  const safe = name.replace(/[^a-zA-Z0-9._-]/g, "_");
-  return `phase-${index}-${safe}.json`;
+  return `phase-${index}-${safePhaseName(name)}.json`;
+}
+
+/** Raw streaming stdout/stderr evidence for a phase, written before settlement. */
+export function phaseLogPathFor(runId: string, index: number, name: string): string {
+  if (!Number.isSafeInteger(index) || index < 0) throw new Error("Phase log index must be a non-negative safe integer.");
+  return path.join(runDirFor(runId), `phase-${index}-${safePhaseName(name)}.log`);
+}
+
+/** Incremental heartbeat and terminal-result sidecar for a launched phase. */
+export function phaseResultPathFor(runId: string, index: number, name: string): string {
+  if (!Number.isSafeInteger(index) || index < 0) throw new Error("Phase result index must be a non-negative safe integer.");
+  return path.join(runDirFor(runId), `phase-${index}-${safePhaseName(name)}.result.json`);
 }
 
 function survivorFileName(index: number, name: string): string {
@@ -130,6 +193,53 @@ function terminalStateFileName(index: number, name: string): string {
 function terminalCandidateFileName(index: number, name: string): string {
   const safe = name.replace(/[^a-zA-Z0-9._-]/g, "_");
   return `terminal-no-retry-${index}-${safe}.candidate.json`;
+}
+
+/**
+ * Durably replace a JSON file without exposing a partially written checkpoint.
+ * The sibling temporary file is flushed before rename; directory fsync is best
+ * effort because Windows does not permit opening every directory as a file.
+ */
+export function atomicWriteJsonSync(filePath: string, value: unknown): void {
+  observeHostPublication([filePath], () => atomicWriteJsonUnobserved(filePath, value));
+}
+
+function atomicWriteJsonUnobserved(filePath: string, value: unknown): void {
+  const target = path.resolve(filePath);
+  const parent = path.dirname(target);
+  mkdirSync(parent, { recursive: true });
+  const serialized = JSON.stringify(value, null, 2);
+  if (serialized === undefined) throw new Error(`Cannot atomically write non-JSON value to ${target}.`);
+  const bytes = `${serialized}\n`;
+  const temporary = path.join(
+    parent,
+    `.${path.basename(target)}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  );
+  let fileDescriptor: number | undefined;
+  try {
+    fileDescriptor = openSync(temporary, "wx", 0o600);
+    writeFileSync(fileDescriptor, bytes, "utf8");
+    fsyncSync(fileDescriptor);
+    closeSync(fileDescriptor);
+    fileDescriptor = undefined;
+    renameSync(temporary, target);
+    try {
+      const directoryDescriptor = openSync(parent, "r");
+      try {
+        fsyncSync(directoryDescriptor);
+      } finally {
+        closeSync(directoryDescriptor);
+      }
+    } catch {
+      // Best effort on platforms (notably Windows) that reject directory fsync.
+    }
+  } catch (error) {
+    if (fileDescriptor !== undefined) {
+      try { closeSync(fileDescriptor); } catch {}
+    }
+    try { unlinkSync(temporary); } catch {}
+    throw error;
+  }
 }
 
 export function survivorResultFileName(index: number, name: string): string {
@@ -154,9 +264,11 @@ export class RunStateStore {
     params: Record<string, unknown>,
     phaseNames: string[],
     dynamicWorkflow?: Record<string, unknown>,
+    supervision?: HistoricalSupervisionBinding,
   ): RunStateStore {
     const runDir = runDirFor(runId);
     mkdirSync(runDir, { recursive: true });
+    if (supervision) validateHistoricalSupervisionBinding(supervision, `run ${runId}`);
     const state: RunStateFile = {
       runId,
       paradigm,
@@ -165,6 +277,7 @@ export class RunStateStore {
       params,
       phases: phaseNames.map((name, index) => ({ index, name, status: "pending" as PhaseStatus })),
       ...(dynamicWorkflow ? { dynamicWorkflow } : {}),
+      ...(supervision ? { supervision: structuredClone(supervision) } : {}),
     };
     const store = new RunStateStore(runDir, state);
     store.persist();
@@ -172,10 +285,11 @@ export class RunStateStore {
   }
 
   /** Load a previously persisted run (throws with a clear message when absent). */
-  static load(runId: string): LoadedRunState {
+  static load(runId: string, options: LiveStatusOptions = {}): LoadedRunState {
     const runDir = runDirFor(runId);
     const stateFile = path.join(runDir, "state.json");
     if (!existsSync(stateFile)) {
+      if (existsSync(runDir)) { try { refreshLiveStatus(runDir, { ...options, observationError: "state.json: missing" }); } catch {} }
       throw new Error(
         `Resume state not found for run "${runId}" (expected ${stateFile}). ` +
           `Known runs: ${listKnownRuns().slice(0, 10).join(", ") || "(none)"}.`,
@@ -185,9 +299,15 @@ export class RunStateStore {
     try {
       parsed = JSON.parse(readFileSync(stateFile, "utf8"));
     } catch (error) {
+      try { refreshLiveStatus(runDir, { ...options, observationError: `state.json: ${error instanceof Error ? error.message : String(error)}` }); } catch {}
       throw new Error(`Run state ${stateFile} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
     }
-    const state = validateLoadedRunState(parsed, runId, stateFile);
+    let state: RunStateFile;
+    try { state = validateLoadedRunState(parsed, runId, stateFile); }
+    catch (error) {
+      try { refreshLiveStatus(runDir, { ...options, observationError: `state.json: ${error instanceof Error ? error.message : String(error)}` }); } catch {}
+      throw error;
+    }
     const checkpoints = new Map<number, SubagentResult>();
     const survivors = new Map<number, SurvivorManifest>();
     const terminalStates = new Map<number, TerminalNoRetryState>();
@@ -211,6 +331,7 @@ export class RunStateStore {
         } catch {}
       }
     }
+    refreshLiveStatus(runDir, options);
     return { state, checkpoints, survivors, terminalStates, runDir };
   }
 
@@ -224,13 +345,42 @@ export class RunStateStore {
     return this.state.runId;
   }
 
+  /** Atomically pin or advance the supervision binding on an existing run. */
+  bindSupervision(binding: HistoricalSupervisionBinding): void {
+    validateHistoricalSupervisionBinding(binding, `run ${this.state.runId}`);
+    const existing = this.state.supervision;
+    if (existing) {
+      if (existing.mode !== binding.mode || existing.classification !== binding.classification) {
+        throw new Error("Refusing to change the supervision mode/classification of an existing run.");
+      }
+      if (Boolean(existing.identity) !== Boolean(binding.identity) || (existing.identity && binding.identity && (
+        existing.identity.protocolId !== binding.identity.protocolId ||
+        existing.identity.adapterId !== binding.identity.adapterId ||
+        existing.identity.adapterVersion !== binding.identity.adapterVersion
+      ))) {
+        throw new Error("Refusing to change the supervision protocol/adapter identity of an existing run.");
+      }
+      if (existing.cursor && binding.cursor) {
+        if (binding.cursor.nextTaskIndex < existing.cursor.nextTaskIndex) {
+          throw new Error("Refusing to move the generic supervision cursor backwards.");
+        }
+        const completed = new Set(binding.cursor.completedTaskIds);
+        if (existing.cursor.completedTaskIds.some((taskId) => !completed.has(taskId))) {
+          throw new Error("Refusing to remove completed tasks from the generic supervision cursor.");
+        }
+      }
+    }
+    this.state.supervision = structuredClone(binding);
+    this.persist();
+  }
+
   checkpointPhase(index: number, name: string, result: SubagentResult): void {
-    writeFileSync(path.join(this.runDir, phaseFileName(index, name)), JSON.stringify(result, null, 2), "utf8");
+    atomicWriteJsonSync(path.join(this.runDir, phaseFileName(index, name)), result);
     this.setStatus(index, name, "done");
   }
 
   markDetached(index: number, name: string, manifest: SurvivorManifest): void {
-    writeFileSync(path.join(this.runDir, survivorFileName(index, name)), JSON.stringify(manifest, null, 2), "utf8");
+    atomicWriteJsonSync(path.join(this.runDir, survivorFileName(index, name)), manifest);
     this.setStatus(index, name, "detached");
   }
 
@@ -238,7 +388,7 @@ export class RunStateStore {
     let candidateResultFile = state.candidateResultFile;
     if (candidate) {
       candidateResultFile = candidateResultFile ?? this.terminalCandidatePath(index, name);
-      writeFileSync(candidateResultFile, JSON.stringify(candidate, null, 2), "utf8");
+      atomicWriteJsonSync(candidateResultFile, candidate);
     }
     const payload: TerminalNoRetryState = {
       ...state,
@@ -248,7 +398,7 @@ export class RunStateStore {
       runId: this.state.runId,
       ...(candidateResultFile ? { candidateResultFile } : {}),
     };
-    writeFileSync(path.join(this.runDir, terminalStateFileName(index, name)), JSON.stringify(payload, null, 2), "utf8");
+    atomicWriteJsonSync(path.join(this.runDir, terminalStateFileName(index, name)), payload);
     this.setStatus(index, name, "ambiguous-completion");
     return payload;
   }
@@ -283,7 +433,8 @@ export class RunStateStore {
 
   private persist(): void {
     mkdirSync(this.runDir, { recursive: true });
-    writeFileSync(path.join(this.runDir, "state.json"), JSON.stringify(this.state, null, 2), "utf8");
+    atomicWriteJsonSync(path.join(this.runDir, "state.json"), this.state);
+    refreshLiveStatus(this.runDir);
   }
 }
 
@@ -329,7 +480,53 @@ function validateLoadedRunState(value: unknown, expectedRunId: string, stateFile
   if (state.dynamicWorkflow !== undefined && (!state.dynamicWorkflow || typeof state.dynamicWorkflow !== "object" || Array.isArray(state.dynamicWorkflow))) {
     throw new Error(`Run state ${stateFile} has invalid dynamic workflow provenance.`);
   }
+  if (state.supervision !== undefined) validateHistoricalSupervisionBinding(state.supervision, stateFile);
   return state as RunStateFile;
+}
+
+function validateHistoricalSupervisionBinding(value: unknown, label: string): asserts value is HistoricalSupervisionBinding {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`Run state ${label} has invalid supervision metadata.`);
+  const binding = value as Partial<HistoricalSupervisionBinding>;
+  if (
+    binding.schemaVersion !== 1 ||
+    (binding.mode !== "visible-main" && binding.mode !== "off") ||
+    !new Set(["read-only", "executor-bearing", "mutating"]).has(String(binding.classification))
+  ) {
+    throw new Error(`Run state ${label} has invalid supervision metadata.`);
+  }
+  if (binding.identity !== undefined) validateProtocolIdentity(binding.identity, label);
+  if (binding.cursor !== undefined) {
+    const cursor = binding.cursor as Partial<GenericSupervisionCursor>;
+    if (
+      !cursor || typeof cursor !== "object" || Array.isArray(cursor) ||
+      cursor.schemaVersion !== 1 ||
+      !new Set(["plan", "executor-task", "verifier", "terminal"]).has(String(cursor.stage)) ||
+      !Number.isSafeInteger(cursor.nextTaskIndex) || Number(cursor.nextTaskIndex) < 0 ||
+      !Array.isArray(cursor.completedTaskIds) || cursor.completedTaskIds.some((id) => typeof id !== "string" || !id.trim()) ||
+      new Set(cursor.completedTaskIds).size !== cursor.completedTaskIds.length ||
+      (cursor.currentTaskId !== undefined && (typeof cursor.currentTaskId !== "string" || !cursor.currentTaskId.trim())) ||
+      (cursor.lastCheckpointId !== undefined && (typeof cursor.lastCheckpointId !== "string" || !cursor.lastCheckpointId.trim()))
+    ) {
+      throw new Error(`Run state ${label} has an invalid generic supervision cursor.`);
+    }
+    validateProtocolIdentity(cursor.identity, label);
+    if (binding.identity && JSON.stringify(binding.identity) !== JSON.stringify(cursor.identity)) {
+      throw new Error(`Run state ${label} has mismatched supervision cursor identity.`);
+    }
+  }
+}
+
+function validateProtocolIdentity(value: unknown, label: string): asserts value is GenericSupervisionProtocolIdentity {
+  const identity = value as Partial<GenericSupervisionProtocolIdentity> | undefined;
+  if (
+    !identity || typeof identity !== "object" || Array.isArray(identity) ||
+    identity.protocolId !== "host-task-boundary-v1" ||
+    identity.adapterVersion !== 1 ||
+    typeof identity.adapterId !== "string" ||
+    !/^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/.test(identity.adapterId)
+  ) {
+    throw new Error(`Run state ${label} has an invalid supervision protocol identity.`);
+  }
 }
 
 export function listKnownRuns(): string[] {

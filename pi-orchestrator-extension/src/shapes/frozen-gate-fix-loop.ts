@@ -62,6 +62,8 @@ import {
   type DeterministicPhaseOutput,
 } from "../deterministic-phase";
 
+import { GENERIC_EXECUTOR_SHAPE_EXECUTION } from "../supervision";
+
 import type {
   OrchestrationShape,
   OrchestrationShapeContext,
@@ -111,6 +113,7 @@ export const frozenGateFixLoopShape: OrchestrationShape = {
     "sha256 (no LLM) before and after each executor fix (tamper-proof), spawns an executor to fix " +
     "EXACTLY the enumerated findings, then an independent verifier with fail-closed JSON parsing; " +
     "retries bounded on verifier FAIL (default maxRetries 2). The spec-file input pattern is preferred.",
+  execution: GENERIC_EXECUTOR_SHAPE_EXECUTION,
   run: runFrozenGateFixLoop,
 };
 
@@ -819,7 +822,7 @@ function terminalNoRetryReport(
     : Math.max(spawnGuard.spawned, terminalState.spawnedCount ?? 1);
   return failReport(
     isWriteSetTerminal
-      ? writeSetFailureHeadline(terminalState.code)
+      ? writeSetFailureHeadline(terminalState.code as "WRITE_SET_VIOLATION" | "WRITE_SET_UNOBSERVABLE")
       : "Mutating phase completed ambiguously after terminal assistant/transport error (no retry).",
     isWriteSetTerminal
       ? `Terminal no-retry state ${terminalState.code}: ${terminalState.errorMessage}\n` +

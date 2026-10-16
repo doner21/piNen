@@ -20,4 +20,8 @@ useDefault = true
     "README.md",
     "pi-orchestrator-extension/README.md",
     "pi-orchestrator-extension/PARADIGMS.md",
+    # redaction tests use deliberate fake credentials
+    "pi-orchestrator-extension/tests/test-2026-09-17-action-evidence.cjs",
+    "pi-orchestrator-extension/tests/test-2026-09-21-no-output.cjs",
+    "pi-orchestrator-extension/tests/test-2026-09-21-no-output-fresh3.cjs",
   ]

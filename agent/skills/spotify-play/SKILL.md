@@ -96,7 +96,7 @@ Procedure:
 3. Run the bundled clean-start script with the playlist URI, URL, ID, or name and the selected device:
 
 ```bash
-node ~/.pi/agent/skills/spotify-play/scripts/clean_playlist_start.mjs "<playlist>" --device "<device-name-or-id>"
+node C:/Users/you/.pi/agent/skills/spotify-play/scripts/clean_playlist_start.mjs "<playlist>" --device "<device-name-or-id>"
 ```
 
 4. Inspect the script JSON result:

@@ -18,6 +18,8 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { mergeCommandTimes, commandTimesFromHostResults, formatCommandTimes, summarizeCommandTimes, type CommandTimes } from "../command-times";
+import { getCommandTimesForRun } from "../substrate";
 import { readFileSync, existsSync } from "node:fs";
 import {
   SpawnGuard,
@@ -52,6 +54,7 @@ import {
 } from "../executor-recovery/splitter";
 
 import { buildRecoveryMetadata } from "../executor-recovery/metadata";
+import { createRoleRecoveryRequest, runRoleWithRecovery, observeRoleReadOnlyLaunch, type RoleRecoveryStage } from "../role-recovery";
 
 import {
   resolveGateDecision,
@@ -62,6 +65,9 @@ import {
   type TaskEffectEvidence,
   type ToolCallSummary,
 } from "../judgment";
+
+import { PEV_SHAPE_EXECUTION } from "../supervision";
+import { captureContentSignatureSnapshot, diffContentSignatureSnapshots, type ContentSignatureSnapshot } from "../write-set";
 
 import type {
   OrchestrationShape,
@@ -120,13 +126,20 @@ interface ExecutorOutput {
   contextExhaustionSignal?: boolean;
   /** Pre-execution git snapshot captured before this executor was spawned. */
   preExecSnapshot?: GitSnapshot;
+  /** Settled observation prevents later tasks being attributed to this task. */
+  postExecSnapshot?: GitSnapshot;
+  /** Ordered recovery windows retain observed changes even when later reverted. */
+  effectSnapshots?: Array<{ before: GitSnapshot; after: GitSnapshot }>;
   /** Parsed output suffix contract from the executor response (Change 3). */
   outputSuffix?: ExecutorOutputSuffix;
   /** Effect evidence: tool-call telemetry for this task's subagent(s) (F1). */
   toolCalls?: ToolCallSummary;
+  commandTimes?: CommandTimes;
   /** Effect evidence: worktree files changed during this task's window (F1). */
   filesChanged?: number;
   changedFiles?: string[];
+  /** Partial counts are lower bounds, never proof of zero effects. */
+  effectObservation?: { status: "complete" | "partial" | "unknown" };
 }
 
 /**
@@ -135,7 +148,7 @@ interface ExecutorOutput {
  * determine exactly what the executor changed on disk.
  */
 interface GitSnapshot {
-  /** Whether git is available and the snapshot was captured successfully. */
+  /** Whether byte-level observation was captured (git display may be unavailable). */
   success: boolean;
   /** ISO-8601 timestamp of the snapshot capture. */
   timestamp: string;
@@ -143,6 +156,8 @@ interface GitSnapshot {
   files: Array<{ status: string; path: string }>;
   /** Raw git status --short output for debugging / fallback. */
   rawStatus: string;
+  /** Content, including already-dirty files, at this observation boundary. */
+  contentSnapshot?: ContentSignatureSnapshot;
 }
 
 /**
@@ -150,14 +165,16 @@ interface GitSnapshot {
  * Represents files the executor created, modified, or deleted.
  */
 interface GitDiff {
-  /** Total number of files that changed (new + modified + deleted). */
+  /** Observed count; only complete observation can prove this is the total. */
   filesChanged: number;
   /** Files that appear in the post-snapshot but not in the pre-snapshot. */
   newFiles: string[];
-  /** Files whose status changed between pre- and post-snapshot. */
+  /** Files whose bytes changed between pre- and post-snapshot. */
   modifiedFiles: string[];
   /** Files that were in the pre-snapshot but are gone in the post-snapshot. */
   deletedFiles: string[];
+  /** Missing historical content snapshots cannot establish zero changes. */
+  effectObservation?: { status: "complete" | "partial" | "unknown" };
 }
 
 /**
@@ -323,6 +340,7 @@ export const planExecuteVerifyShape: OrchestrationShape = {
     "Classic planner → executor waves → verifier control flow. " +
     "Default paradigm for /orchestrate. Supports retries with failure feedback, " +
     "deterministic model routing checks, and auto-raised spawn ceilings.",
+  execution: PEV_SHAPE_EXECUTION,
   run: runPlanExecuteVerify,
 };
 
@@ -1015,7 +1033,7 @@ function buildPlanningPrompt(
   failureReasons: string[],
 ): string {
   const retryBlock = failureReasons.length
-    ? `\nPrevious verifier failure reasons to address deterministically:\n${failureReasons.map((reason) => `- ${reason}`).join("\n")}\n`
+    ? `\nPrevious verifier failure reasons to address deterministically (host context, not new owner criteria):\nROLE_RECOVERY_PLANNING_CONTEXT:\n${JSON.stringify(failureReasons)}\n`
     : "";
   return `Plan the following task for executor subagents. Return JSON if possible, exactly shaped as:\n{"tasks":[{"id":"...","description":"...","dependsOn":[],"agent":"coder","role":"...","model":"...","provider":"...","outputType":"file_change|validation|analysis"}],"notes":"..."}\n\nINTAKE CONTRACT:\n${formatIntakeForPrompt(intake)}\n\nRules:\n- Keep task IDs stable and simple (task-1, task-2, ...).\n- Make each description self-contained.\n- Do not execute the task.\n- Carry forward all intake constraints, invariants, success criteria, failure criteria, and executor output contract into the task descriptions/notes.\n- If model routing requirements exist in intake, treat them as essential orchestrator constraints, not executor work.\n- Honor intake.orchestration_controls from natural language: maxSubagents/concurrency/looping are already normalized by the orchestrator, while requested runtime-role counts and perspectives must shape the plan.\n- If orchestration_controls.researcherCount is set, create that many research tasks assigned to agent "researcher" unless doing so would violate a hard constraint. Give each researcher a distinct perspective when perspectiveCount/perspectives are present.\n- If routing_requirements contains a runtime role such as "researcher", matching tasks must use agent "researcher" and may include the exact model/provider fields from that routing requirement for clarity. These are routing hints for the orchestrator, not work for the executor to perform.\n- If the task cannot be safely split and no runtime-role count is requested, return one task.\n- **Task-size cap**: each executor task description MUST be under ~200 words. Tasks exceeding this should be split into multiple smaller tasks. Small tasks ensure executor subagents have enough context budget to use write/edit/bash tools and produce actual file artifacts rather than text reports.\n- An executor task that only describes/analyzes and never touches files is NOT sufficient for CREATE or IMPLEMENT work — the verifier will check for actual file artifacts.\n- **OUTPUT TYPE CLASSIFICATION (REQUIRED)**: Every task MUST include an "outputType" field set to one of: "file_change" (task must produce disk artifacts — use write/edit/bash), "validation" (task checks/inspects existing state), or "analysis" (task produces reasoning only). The orchestrator enforces this contract pre-verifier. Tasks containing CREATE, IMPLEMENT, BUILD, MODIFY, ADD, WRITE, GENERATE, EDIT, CHANGE, FIX, or REFACTOR keywords MUST use "file_change". Tasks containing VERIFY, VALIDATE, CHECK, CONFIRM, TEST, ASSESS, INSPECT, or AUDIT keywords should use "validation". All others should use "analysis".\n- **ANTI-ESCAPE-CLAUSE RULE**: Task descriptions MUST NOT contain escape clauses such as "or repair", "or verify", "or validate", "or confirm", "if already done", "check if exists", "already implemented", "just check", "simply check", or "no changes needed". These phrases give executors permission to skip actual work. An implementation task that says "implement or repair X" will cause the executor to check if X exists and report "already done." Instead, write: "implement X" or "repair X" — never both with "or." If two distinct actions are needed, use two separate tasks. Do not use conditional language ("if", "already", "check if") in file_change task descriptions — be imperative and unconditional.\n\nPlanner-named runtime roles (Way 1):\n- Each task can optionally specify "agent" (the agent name to spawn for this task), "role" (a semantic hint like "code-reviewer" or "architect"), "model" (per-task model override), and "provider" (per-task provider override).\n- If "agent" names an unknown agent (not loaded from defaults or ~/.pi/agent/agents), the orchestrator falls back to the default executor agent silently.\n- Per-task "model"/"provider" are subject to the same local-model rejection and spawn ceiling as role-level overrides. They take precedence over the role-level executorModel/executorProvider but are still clamped through substrate caps.\n- Use "role" only as a hint — the orchestrator routes tasks by "agent", not by "role".\n- Omit "agent", "role", "model", and "provider" when the default executor and role-level configuration are sufficient.\n\nAttempt: ${attempt}${retryBlock}`;
 }
@@ -1065,7 +1083,7 @@ function buildVerificationPrompt(
   const artifactBlock = artifactText
     ? `\n\n${artifactText}`
     : "";
-  return `Verify the orchestration result against the intake contract.\n\nINTAKE CONTRACT:\n${formatIntakeForPrompt(intake)}\n\nPlan:\n${JSON.stringify(plan, null, 2)}\n\nExecutor outputs:\n${JSON.stringify(outputs, null, 2)}\n\nModel routing evidence/configuration supplied by orchestrator:\n${routingEvidence}${artifactBlock}\n\nReturn JSON exactly and only in this shape:\n{"status":"pass"|"fail","reasons":["..."]}\n\nUse status "pass" only if the plan, outputs, and supplied routing evidence/configuration satisfy the intake success criteria and do not violate any constraints, invariants, or failure criteria. Use "fail" with concrete reasons for missing, unclear, or incorrect work.\n\nFILE ARTIFACT VERIFICATION RULE: If any executor task description contains CREATE, IMPLEMENT, BUILD, MODIFY, ADD, WRITE, or GENERATE (case-insensitive), the executor output MUST reference actual file artifacts (files created, modified, or edited). A text-only response that describes what was done without mentioning any specific files created/modified is INSUFFICIENT — treat it as FAIL with reason "no file artifacts produced for implementation task". The ARTIFACT EVIDENCE block (if present) shows what files actually changed on disk — use it as ground truth, overriding any text claims.`;
+  return `Verify the orchestration result against the intake contract.\n\nINTAKE CONTRACT:\n${formatIntakeForPrompt(intake)}\n\nPlan:\n${JSON.stringify(plan, null, 2)}\n\nExecutor outputs:\n${JSON.stringify(outputs, null, 2)}\n\nHOST-OWNED COMMAND TIMING (measurements, not worker claims):\n${JSON.stringify(commandTimesFromHostResults(outputs))}\n\nModel routing evidence/configuration supplied by orchestrator:\n${routingEvidence}${artifactBlock}\n\nReturn JSON exactly and only in this shape:\n{"status":"pass"|"fail","reasons":["..."]}\n\nUse status "pass" only if the plan, outputs, and supplied routing evidence/configuration satisfy the intake success criteria and do not violate any constraints, invariants, or failure criteria. Use "fail" with concrete reasons for missing, unclear, or incorrect work.\n\nFILE ARTIFACT VERIFICATION RULE: If any executor task description contains CREATE, IMPLEMENT, BUILD, MODIFY, ADD, WRITE, or GENERATE (case-insensitive), the executor output MUST reference actual file artifacts (files created, modified, or edited). A text-only response that describes what was done without mentioning any specific files created/modified is INSUFFICIENT — treat it as FAIL with reason "no file artifacts produced for implementation task". The ARTIFACT EVIDENCE block (if present) shows what files actually changed on disk — use it as ground truth, overriding any text claims.`;
 }
 
 // ── Parsing ─────────────────────────────────────────────────────────────────
@@ -1374,20 +1392,31 @@ async function spawnChecked(
   modelOverride: RoleModelOverride | undefined,
   evidenceContext?: { taskId?: string; semanticRole?: string },
 ): Promise<SubagentResult> {
-  // Substrate guarantee: SpawnGuard enforces the monotonic ceiling.
-  const spawned = state.spawnGuard.reserve();
-  onProgress?.(
-    `Spawning subagent ${agentName} (${spawned}/${state.spawnGuard.cap}) in ${params.cwd}`,
-  );
-  const result = await spawnSubagent(agentName, task, {
-    agents,
-    cwd: params.cwd,
-    allowLocalModel: params.allowLocalModel,
-    signal,
-    inheritedModel,
-    onProgress,
-    modelOverride,
-  });
+  const role = routingRole === "planner" || routingRole === "verifier" ? routingRole : undefined;
+  const launch = async (prompt: string, _stage: RoleRecoveryStage = "initial", _index = 0, planning = false): Promise<SubagentResult> => {
+    // Every follow-on passes the same guard and complete launcher admission.
+    const spawned = state.spawnGuard.reserve();
+    const name = planning ? params.plannerAgent : agentName;
+    onProgress?.(`Spawning subagent ${name} (${spawned}/${state.spawnGuard.cap}) in ${params.cwd}`);
+    const timedPrompt = role === "verifier" && !planning ? `${prompt}\n\nHOST-OWNED COMMAND TIMING (measurements, not worker claims):\n${JSON.stringify(getCommandTimesForRun())}` : prompt;
+    const operation = () => spawnSubagent(name, timedPrompt, {
+      agents, cwd: params.cwd, allowLocalModel: params.allowLocalModel, signal, inheritedModel, onProgress,
+      modelOverride: planning ? toModelOverride(params.plannerModel, params.plannerProvider) : modelOverride,
+      readOnly: planning,
+      verifier: role === "verifier" && !planning,
+      ...(role ? { recoverableRole: planning ? "planner" as const : role } : {}),
+      workerExecutionConstraints: params.workerExecutionConstraints,
+      commandTimingContext: { role: planning ? "planner" : role ?? "executor", stage: _stage },
+    });
+    return role ? observeRoleReadOnlyLaunch(params.cwd, params.externalEvidenceRoots ?? [], operation) : operation();
+  };
+  const request = role ? createRoleRecoveryRequest({ role, prompt: task, acceptanceCriteria: state.intake?.successCriteria, allowReplan: params.paradigm !== "verify-only" }) : undefined;
+  const result = request ? await runRoleWithRecovery(request, {
+    launch: (prompt, stage, index) => launch(prompt, stage, index),
+    launchPlanner: (prompt, stage, index) => launch(prompt, stage, index, true),
+    canLaunch: () => state.spawnGuard.wouldFit(1), signal, onProgress,
+  }) : await launch(task);
+  if (result.roleRecovery) state.recoveryLog?.push(`Role recovery ${role}: terminal validated after ${result.roleRecovery.steps.map(step => `${step.stage}/${step.outcome}`).join(", ")}.`);
   const routingEvidence: RoutingEvidence = {
     phaseRole: routingRole,
     agentName: result.agentName,
@@ -1428,6 +1457,7 @@ function buildFinalResult(
     `**Task:** ${params.task}`,
     `**Attempts:** ${state.attempt}`,
     `**Subagents spawned:** ${state.spawnGuard.spawned}/${state.spawnGuard.cap}`,
+    formatCommandTimes(mergeCommandTimes(getCommandTimesForRun(), commandTimesFromHostResults(state))),
     "",
     "## Intake contract",
     state.intake
@@ -1533,6 +1563,8 @@ function buildDetails(
     status,
     params: { ...params, task: truncateWithNotice(params.task, MAX_DETAIL_TEXT_CHARS, "task") },
     hardGates: params.hardGates,
+    commandTimes: mergeCommandTimes(getCommandTimesForRun(), commandTimesFromHostResults(state)),
+    commandTimingSummary: summarizeCommandTimes(mergeCommandTimes(getCommandTimesForRun(), commandTimesFromHostResults(state))),
     gateWarnings: state.gateWarnings.map((warning) =>
       truncateWithNotice(warning, MAX_DETAIL_TEXT_CHARS, "gate warning"),
     ),
@@ -1779,26 +1811,32 @@ function describeTerminationSource(
  * Capture a git status snapshot before the executor spawns.
  * This snapshot acts as the baseline for post-execution diff comparison.
  *
- * Returns a GitSnapshot with success=false when git is unavailable;
- * callers should skip git-dependent gates gracefully in that case.
+ * Git status is retained for prompt context; byte snapshots determine effects.
+ * Unavailable content observation is explicit, not a zero-change snapshot.
  */
 function capturePreExecutionGitSnapshot(cwd: string): GitSnapshot {
   const timestamp = new Date().toISOString();
+  let contentSnapshot: ContentSignatureSnapshot;
+  try {
+    contentSnapshot = captureContentSignatureSnapshot(cwd);
+  } catch (error) {
+    return { success: false, timestamp, files: [], rawStatus: `content observation unavailable: ${String(error)}` };
+  }
   try {
     const result = spawnSync("git", ["-C", cwd, "status", "--short"], {
-      timeout: 10000,
       encoding: "utf8",
       windowsHide: true,
     });
     if (result.status !== 0 || result.error) {
       return {
-        success: false,
+        success: true,
         timestamp,
         files: [],
+        contentSnapshot,
         rawStatus: `git status failed (exit ${result.status ?? "error"}): ${result.stderr?.trim() ?? result.error?.message ?? "unknown"}`,
       };
     }
-    const rawStatus = result.stdout?.trim() ?? "";
+    const rawStatus = result.stdout?.trimEnd() ?? "";
     const files: Array<{ status: string; path: string }> = [];
     if (rawStatus) {
       for (const line of rawStatus.split("\n").filter(Boolean)) {
@@ -1808,60 +1846,42 @@ function capturePreExecutionGitSnapshot(cwd: string): GitSnapshot {
         if (path) files.push({ status, path });
       }
     }
-    return { success: true, timestamp, files, rawStatus };
+    return { success: true, timestamp, files, rawStatus, contentSnapshot };
   } catch (err) {
     return {
-      success: false,
+      success: true,
       timestamp,
       files: [],
+      contentSnapshot,
       rawStatus: `git capture error: ${String(err)}`,
     };
   }
 }
 
 /**
- * Compute a structured diff between a pre-execution and post-execution
- * git snapshot. Only files appearing or changing after the pre-snapshot
- * count as executor changes.
- *
- * Pre-existing dirty state (files already modified before spawn) is
- * captured in the pre-snapshot and excluded from the executor diff.
+ * Compare bytes across the executor window, not git status-line changes.
+ * Unchanged pre-existing dirt is excluded; further edits to it are counted.
+ * Omitted paths cannot prove creation/deletion, but observed positives survive.
  */
 function computePostExecutionDiff(
   before: GitSnapshot,
   after: GitSnapshot,
 ): GitDiff {
-  if (!before.success || !after.success) {
-    return { filesChanged: 0, newFiles: [], modifiedFiles: [], deletedFiles: [] };
+  const pre = before.contentSnapshot, post = after.contentSnapshot;
+  if (!pre || !post) {
+    return { filesChanged: 0, newFiles: [], modifiedFiles: [], deletedFiles: [], effectObservation: { status: "unknown" } };
   }
-
-  const beforePaths = new Set(before.files.map((f) => f.path));
-  const afterPaths = new Set(after.files.map((f) => f.path));
-  const beforeMap = new Map(before.files.map((f) => [f.path, f.status]));
-  const afterMap = new Map(after.files.map((f) => [f.path, f.status]));
-
-  const newFiles: string[] = [];
-  const modifiedFiles: string[] = [];
-  const deletedFiles: string[] = [];
-
-  for (const path of afterPaths) {
-    if (!beforePaths.has(path)) {
-      newFiles.push(path);
-    } else if (beforeMap.get(path) !== afterMap.get(path)) {
-      modifiedFiles.push(path);
-    }
-  }
-  for (const path of beforePaths) {
-    if (!afterPaths.has(path)) {
-      deletedFiles.push(path);
-    }
-  }
-
+  const omitted = [...pre.omitted, ...post.omitted];
+  const changes = diffContentSignatureSnapshots(pre, post).filter((change) =>
+    !omitted.some((entry) => change.path === entry.path || change.path.startsWith(`${entry.path.replace(/\/$/, "")}/`))
+    && !(change.kind === "added" && pre.truncated)
+    && !(change.kind === "deleted" && post.truncated));
   return {
-    filesChanged: newFiles.length + modifiedFiles.length + deletedFiles.length,
-    newFiles,
-    modifiedFiles,
-    deletedFiles,
+    filesChanged: changes.length,
+    newFiles: changes.filter((change) => change.kind === "added").map((change) => change.path),
+    modifiedFiles: changes.filter((change) => change.kind === "modified").map((change) => change.path),
+    deletedFiles: changes.filter((change) => change.kind === "deleted").map((change) => change.path),
+    effectObservation: { status: pre.truncated || post.truncated || omitted.some((entry) => entry.reason !== "excluded") ? "partial" : "complete" },
   };
 }
 
@@ -2365,7 +2385,7 @@ function collectArtifactEvidence(
   }
 
   // ── Per-task git diff against pre-execution snapshots (Change 1 + 5) ──
-  if (preExecSnapshots && preExecSnapshots.size > 0 && gitAvailable) {
+  if (preExecSnapshots && preExecSnapshots.size > 0) {
     const postSnapshotFiles: Array<{ status: string; path: string }> = [];
     const postStatus = diskStatus;
     if (postStatus && !postStatus.startsWith("(")) {
@@ -2375,15 +2395,35 @@ function collectArtifactEvidence(
         if (path) postSnapshotFiles.push({ status, path });
       }
     }
+    const currentContent = capturePreExecutionGitSnapshot(cwd).contentSnapshot;
     for (const [taskId, preSnapshot] of preExecSnapshots) {
-      if (!preSnapshot.success) continue;
-      const diff = computePostExecutionDiff(preSnapshot, {
+      const output = executorOutputs.find((output) => output.taskId === taskId);
+      const settledSnapshot = output?.postExecSnapshot;
+      const windows = output?.effectSnapshots ?? [{ before: preSnapshot, after: settledSnapshot ?? {
         success: true,
         timestamp: new Date().toISOString(),
         files: postSnapshotFiles,
         rawStatus: postStatus,
+        contentSnapshot: currentContent,
+      } }];
+      const diffs = windows.map(({ before, after }) => computePostExecutionDiff(before, after));
+      const newFiles = [...new Set(diffs.flatMap(diff => diff.newFiles))];
+      const modifiedFiles = [...new Set(diffs.flatMap(diff => diff.modifiedFiles))];
+      const deletedFiles = [...new Set(diffs.flatMap(diff => diff.deletedFiles))];
+      // Gaps or a mismatched first boundary cannot prove an exhaustive task
+      // observation, even when every individual window was readable.
+      const continuous = windows.every((window, index) => {
+        const preceding = index === 0 ? preSnapshot : windows[index - 1].after;
+        return preceding.contentSnapshot !== undefined && window.before.contentSnapshot !== undefined
+          && JSON.stringify(preceding.contentSnapshot) === JSON.stringify(window.before.contentSnapshot);
       });
-      perTaskDiffs.set(taskId, diff);
+      const complete = continuous && diffs.length > 0 && diffs.every(diff => diff.effectObservation?.status === "complete")
+        && (!output?.effectObservation || output.effectObservation.status === "complete");
+      perTaskDiffs.set(taskId, {
+        filesChanged: new Set([...newFiles, ...modifiedFiles, ...deletedFiles]).size,
+        newFiles, modifiedFiles, deletedFiles,
+        effectObservation: { status: complete ? "complete" : diffs.some(diff => diff.effectObservation?.status !== "unknown") ? "partial" : "unknown" },
+      });
     }
   }
 
@@ -2399,10 +2439,11 @@ function collectArtifactEvidence(
       for (const f of diff.deletedFiles) allDel.add(f);
     }
     combinedDiff = {
-      filesChanged: allNew.size + allMod.size + allDel.size,
+      filesChanged: new Set([...allNew, ...allMod, ...allDel]).size,
       newFiles: [...allNew],
       modifiedFiles: [...allMod],
       deletedFiles: [...allDel],
+      effectObservation: { status: [...perTaskDiffs.values()].every((diff) => diff.effectObservation?.status === "complete") ? "complete" : "partial" },
     };
   }
 
@@ -2455,6 +2496,7 @@ function collectArtifactEvidence(
       fileClaims,
       hardGateFailures: [],
       outputTypeViolations: [],
+      escapeClauseViolations: [],
     });
     for (const v of violations) {
       outputTypeViolations.push(`Task ${output.taskId}: ${v}`);
@@ -2487,7 +2529,7 @@ function collectArtifactEvidence(
     }
 
     // Cross-reference suffix file claims against git ground truth
-    if (taskDiff && gitAvailable) {
+    if (taskDiff && gitAvailable && taskDiff.effectObservation?.status === "complete") {
       const gitDiffFiles = [
         ...taskDiff.newFiles.map((f) => f.toLowerCase()),
         ...taskDiff.modifiedFiles.map((f) => f.toLowerCase()),
@@ -2610,7 +2652,7 @@ function collectArtifactEvidence(
     parts.push(`- Per-task git diff (${perTaskDiffs.size} task(s) with pre-spawn snapshots):`);
     for (const [taskId, diff] of perTaskDiffs) {
       parts.push(
-        `  - ${taskId}: ${diff.filesChanged} file(s) changed ` +
+        `  - ${taskId}: ${diff.effectObservation?.status === "complete" || diff.filesChanged > 0 ? diff.filesChanged : "unknown"} file(s) changed (${diff.effectObservation?.status ?? "unknown"}) ` +
         `(new=${diff.newFiles.length}, mod=${diff.modifiedFiles.length}, del=${diff.deletedFiles.length})`,
       );
       if (diff.newFiles.length > 0) {
@@ -2627,7 +2669,7 @@ function collectArtifactEvidence(
     // Combined diff summary
     if (perTaskDiffs.size > 1) {
       parts.push(
-        `- Combined diff (deduplicated): ${combinedDiff.filesChanged} unique file(s) changed ` +
+        `- Combined diff (deduplicated): ${combinedDiff.effectObservation?.status === "complete" || combinedDiff.filesChanged > 0 ? combinedDiff.filesChanged : "unknown"} unique file(s) changed (${combinedDiff.effectObservation?.status}) ` +
         `(new=${combinedDiff.newFiles.length}, mod=${combinedDiff.modifiedFiles.length}, del=${combinedDiff.deletedFiles.length})`,
       );
     }
@@ -2690,7 +2732,11 @@ function collectArtifactEvidence(
     ? [...perTaskDiffs.values()].some((d) => d.filesChanged > 0)
     : combinedDiff.filesChanged > 0;
 
-  if (hasImplementationTask && !anyDiffChanges) {
+  const completeDiffObservation = perTaskDiffs.size > 0
+    && [...perTaskDiffs.values()].every((diff) => diff.effectObservation?.status === "complete");
+  if (hasImplementationTask && !completeDiffObservation) {
+    hardGateFailures.push("EXECUTOR DIFF OBSERVATION UNAVAILABLE: content evidence is unknown or partial; observed mutations remain recorded, but absence of changes is not proven.");
+  } else if (hasImplementationTask && !anyDiffChanges) {
     if (!hardGateFailures.some((f) => f.includes("git diff"))) {
       hardGateFailures.push(
         "EXECUTOR DIFF GATE FAILURE: Pre/post-spawn git diff shows ZERO executor-attributable file changes " +
@@ -2737,7 +2783,7 @@ function isImplementationTask(task: PlanTask | ExecutorOutput): boolean {
  * Returns human-readable failure reasons that the orchestrator loop
  * uses to decide auto-retry/replanning (Hypothesis C).
  */
-function detectExecutorOutputQualityFailures(
+export function detectExecutorOutputQualityFailures(
   executorOutputs: ExecutorOutput[],
   artifactEvidence?: ArtifactEvidence,
 ): string[] {
@@ -2745,6 +2791,16 @@ function detectExecutorOutputQualityFailures(
 
   for (const output of executorOutputs) {
     const text = output.output?.trim() ?? "";
+
+    // Structured exhaustion always wins, including after an exit-0 process.
+    if (output.truncated || output.contextExhaustionSignal) {
+      failures.push(
+        `${output.taskId}: structured context exhaustion or truncation signal.`,
+      );
+      continue;
+    }
+
+    // Empty output is not a complete settlement even if the process exited 0.
     if (!text) {
       failures.push(
         `${output.taskId}: empty executor output — no content returned.`,
@@ -2754,67 +2810,69 @@ function detectExecutorOutputQualityFailures(
       continue;
     }
 
-    // ── Truncation signals ────────────────────────────────────────────
-    const truncationSignals: RegExp[] = [
-      /\b(?:truncated|cut off|too long|exceeded)\b/i,
-      /\.\.\.\s*$/m, // trailing ellipsis at end of output (mid-sentence cutoff)
-      /(?:content|output|response)\s+(?:has been|was)\s+truncated/i,
-    ];
-    let hasTruncationSignal = false;
-    for (const signal of truncationSignals) {
-      if (signal.test(text)) {
+    // An exit-0, non-empty result is a complete host-observed terminal
+    // settlement. Only incomplete/nonzero transport may fall back to prose
+    // heuristics; ordinary reports often discuss truncated external logs.
+    const terminallySettled = output.exitCode === 0;
+    if (!terminallySettled) {
+      const truncationSignals: RegExp[] = [
+        /\b(?:truncated|cut off|too long)\b/i,
+        /\b(?:context(?: window| length| limit)?|token(?: budget| limit)?|output limit)\b[^\r\n.]{0,80}\b(?:exceeded|exhausted|reached)\b/i,
+        /\b(?:ran out of|out of)\s+(?:context|tokens?)\b/i,
+        /\.\.\.\s*$/m,
+        /(?:content|output|response)\s+(?:has been|was)\s+truncated/i,
+        /\b(?:transport|stream|connection)\b[^\r\n.]{0,80}\b(?:ended|closed|failed|lost|interrupted)\b[^\r\n.]{0,80}\b(?:before|without)\b[^\r\n.]{0,40}\b(?:completion|complete|final|result)\b/i,
+      ];
+      if (truncationSignals.some((signal) => signal.test(text))) {
         failures.push(
           `${output.taskId}: truncation signal detected — "${text.slice(-120).replace(/\n/g, "\\n")}".`,
         );
         output.truncated = true;
         output.contextExhaustionSignal = true;
-        hasTruncationSignal = true;
-        break;
+        continue;
       }
-    }
-    if (hasTruncationSignal) continue;
 
-    // ── Mid-sentence cutoff (no sentence terminator at end) ────────────
-    const sentenceEnders = /[.?!}\])"'\n]/;
-    if (!sentenceEnders.test(text.slice(-1)) && text.length > 100) {
-      failures.push(
-        `${output.taskId}: possible mid-sentence cutoff — output ends with "${text.slice(-80).replace(/\n/g, "\\n")}".`,
-      );
-      output.truncated = true;
-    }
+      // Content-shape fallbacks apply only when terminal transport did not
+      // settle successfully; they cannot override an authoritative result.
+      const sentenceEnders = /[.?!}\])"'\n]/;
+      if (!sentenceEnders.test(text.slice(-1)) && text.length > 100) {
+        failures.push(
+          `${output.taskId}: possible mid-sentence cutoff — output ends with "${text.slice(-80).replace(/\n/g, "\\n")}".`,
+        );
+        output.truncated = true;
+      }
 
-    // ── Unclosed JSON code fences ─────────────────────────────────────
-    const jsonFenceCount = (text.match(/```json/g) ?? []).length;
-    const closeFenceCount = (text.match(/```/g) ?? []).length;
-    if (jsonFenceCount > 0 && closeFenceCount < jsonFenceCount * 2) {
-      failures.push(
-        `${output.taskId}: unclosed JSON code fence — likely truncated.`,
-      );
-      output.truncated = true;
-    }
+      const jsonFenceCount = (text.match(/```json/g) ?? []).length;
+      const closeFenceCount = (text.match(/```/g) ?? []).length;
+      if (jsonFenceCount > 0 && closeFenceCount < jsonFenceCount * 2) {
+        failures.push(
+          `${output.taskId}: unclosed JSON code fence — likely truncated.`,
+        );
+        output.truncated = true;
+      }
 
-    // ── Unclosed JSON object/array near end ────────────────────────────
-    const lastOpenBrace = text.lastIndexOf("{");
-    const lastCloseBrace = text.lastIndexOf("}");
-    const lastOpenBracket = text.lastIndexOf("[");
-    const lastCloseBracket = text.lastIndexOf("]");
-    if (
-      lastOpenBrace > lastCloseBrace &&
-      lastOpenBrace > text.length - 300
-    ) {
-      failures.push(
-        `${output.taskId}: unclosed JSON object near end of output — likely truncated.`,
-      );
-      output.truncated = true;
-    }
-    if (
-      lastOpenBracket > lastCloseBracket &&
-      lastOpenBracket > text.length - 300
-    ) {
-      failures.push(
-        `${output.taskId}: unclosed JSON array near end of output — likely truncated.`,
-      );
-      output.truncated = true;
+      const lastOpenBrace = text.lastIndexOf("{");
+      const lastCloseBrace = text.lastIndexOf("}");
+      const lastOpenBracket = text.lastIndexOf("[");
+      const lastCloseBracket = text.lastIndexOf("]");
+      if (
+        lastOpenBrace > lastCloseBrace &&
+        lastOpenBrace > text.length - 300
+      ) {
+        failures.push(
+          `${output.taskId}: unclosed JSON object near end of output — likely truncated.`,
+        );
+        output.truncated = true;
+      }
+      if (
+        lastOpenBracket > lastCloseBracket &&
+        lastOpenBracket > text.length - 300
+      ) {
+        failures.push(
+          `${output.taskId}: unclosed JSON array near end of output — likely truncated.`,
+        );
+        output.truncated = true;
+      }
     }
 
     // ── Text-only response for implementation task ─────────────────────
@@ -2887,6 +2945,7 @@ function detectExecutorOutputQualityFailures(
     }
 
     // Contradiction: output mentions editing files but exit code indicates failure
+    const hasTruncationSignal = Boolean(output.truncated || output.contextExhaustionSignal);
     if (output.exitCode !== null && output.exitCode !== 0) {
       const fileClaims = extractFileArtifactClaimsFromText(text);
       if (fileClaims.length > 0 && !hasTruncationSignal) {
@@ -3284,7 +3343,7 @@ async function executeExecutorTaskWithRecovery(
     }
   }
 
-  const output: ExecutorOutput = {
+  let output: ExecutorOutput = {
     taskId: task.id,
     description: task.description,
     agentName: result.agentName,
@@ -3298,20 +3357,24 @@ async function executeExecutorTaskWithRecovery(
     preExecSnapshot,
     outputSuffix: outputSuffix ?? undefined,
     toolCalls: result.toolCalls,
+    commandTimes: result.commandTimes,
   };
 
   // ── Post-execution git diff (Change 1) ───────────────────────────
-  if (preExecSnapshot.success) {
+  {
     const postSnapshot = capturePreExecutionGitSnapshot(params.cwd);
     const diff = computePostExecutionDiff(preExecSnapshot, postSnapshot);
-    output.filesChanged = diff.filesChanged;
-    output.changedFiles = [...diff.newFiles, ...diff.modifiedFiles, ...diff.deletedFiles];
+    output.postExecSnapshot = postSnapshot;
+    output.effectSnapshots = [{ before: preExecSnapshot, after: postSnapshot }];
+    output.effectObservation = diff.effectObservation;
+    output.filesChanged = diff.effectObservation?.status === "complete" || diff.filesChanged > 0 ? diff.filesChanged : undefined;
+    output.changedFiles = output.filesChanged === undefined ? undefined : [...diff.newFiles, ...diff.modifiedFiles, ...diff.deletedFiles];
     emit(
-      `Task ${task.id}: post-exec git diff — ${diff.filesChanged} file(s) changed ` +
+      `Task ${task.id}: post-exec content diff — ${output.filesChanged ?? "unknown"} file(s) changed (${diff.effectObservation?.status}) ` +
       `(new=${diff.newFiles.length}, mod=${diff.modifiedFiles.length}, del=${diff.deletedFiles.length}); ` +
       `tool calls ${formatToolCallSummary(result.toolCalls)}.`,
     );
-    if (diff.filesChanged === 0 && isImplementationTask(task)) {
+    if (output.filesChanged === 0 && isImplementationTask(task)) {
       emit(
         `Task ${task.id}: WARNING — implementation task produced zero git-detectable file changes.`,
       );
@@ -3329,6 +3392,26 @@ async function executeExecutorTaskWithRecovery(
     `[RECOVERY] ${task.id} a${state.attempt}: context exhaustion detected. Starting escalation.`,
   );
 
+  // Observe every recovery window, including rejected/partial continuations.
+  // Reuse the preceding settled boundary so no bytes fall between windows.
+  const observeRecovery = (next: ExecutorOutput, before: GitSnapshot): ExecutorOutput => {
+    const after = capturePreExecutionGitSnapshot(params.cwd);
+    const diff = computePostExecutionDiff(before, after);
+    const filesChanged = diff.effectObservation?.status === "complete" || diff.filesChanged > 0 ? diff.filesChanged : undefined;
+    return { ...next, preExecSnapshot: before, postExecSnapshot: after, effectSnapshots: [{ before, after }],
+      effectObservation: diff.effectObservation, filesChanged,
+      changedFiles: filesChanged === undefined ? undefined : [...diff.newFiles, ...diff.modifiedFiles, ...diff.deletedFiles] };
+  };
+  const recoverBySplit = async (): Promise<ExecutorOutput> => {
+    const before = output.postExecSnapshot!;
+    const next = await trySplitAndExecute(
+      state, params, agents, task, plan, output.output,
+      signal, emit, inheritedModel, inferredModelRouting,
+      resolvedAgent, mergedOverride, budget, maxDepth,
+    );
+    return mergeExecutorOutputs(output, next.effectSnapshots?.length ? next : observeRecovery(next, before));
+  };
+
   // ── Tier 2: Handoff continuation (CONTINUE) ────────────────────────
   if (state.recoveryDepth < maxDepth && state.spawnGuard.wouldFit(1)) {
     emit(`Task ${task.id}: attempting handoff continuation (CONTINUE)...`);
@@ -3341,6 +3424,7 @@ async function executeExecutorTaskWithRecovery(
       priorOutput: result.text,
     });
 
+    const continueBefore = output.postExecSnapshot!;
     let continueResult: SubagentResult;
     try {
       continueResult = await spawnChecked(
@@ -3348,35 +3432,32 @@ async function executeExecutorTaskWithRecovery(
         continuationPrompt, signal, emit, inheritedModel, mergedOverride,
         { taskId: `${task.id}-continue`, semanticRole: task.role },
       );
-    } catch {
+    } catch (error) {
       emit(`Task ${task.id}: handoff continuation spawn failed — escalating to split.`);
       state.recoveryLog.push(
         `[RECOVERY] ${task.id}: CONTINUE spawn failed — escalating to SPLIT.`,
       );
-      // Fall through to Tier 3
-      return trySplitAndExecute(
-        state, params, agents, task, plan, result.text,
-        signal, emit, inheritedModel, inferredModelRouting,
-        resolvedAgent, mergedOverride, budget, maxDepth,
-      );
+      output = mergeExecutorOutputs(output, observeRecovery({
+        taskId: task.id, description: task.description, agentName: resolvedAgent,
+        output: `Continuation spawn error: ${String(error)}`, stderr: String(error), exitCode: 1, durationMs: 0,
+      }, continueBefore));
+      return recoverBySplit();
     }
 
+    output = mergeExecutorOutputs(output, observeRecovery({
+      taskId: task.id, description: task.description, agentName: continueResult.agentName,
+      output: `## CONTINUATION\n${continueResult.text}`, stderr: continueResult.stderr || undefined,
+      exitCode: continueResult.exitCode, durationMs: continueResult.durationMs,
+      contextBudget: budget, truncated: continueResult.truncated,
+      contextExhaustionSignal: continueResult.contextExhaustionSignal, toolCalls: continueResult.toolCalls,
+      commandTimes: continueResult.commandTimes,
+    }, continueBefore));
     if (!checkContextExhaustion(continueResult)) {
       emit(`Task ${task.id}: handoff continuation succeeded.`);
       state.recoveryLog.push(
         `[RECOVERY] ${task.id}: CONTINUE tier succeeded.`,
       );
-      return mergeExecutorOutputs(output, {
-        taskId: task.id,
-        description: task.description,
-        agentName: continueResult.agentName,
-        output: `## CONTINUATION\n${continueResult.text}`,
-        exitCode: continueResult.exitCode,
-        durationMs: continueResult.durationMs,
-        contextBudget: budget,
-        truncated: continueResult.truncated,
-        contextExhaustionSignal: continueResult.contextExhaustionSignal,
-      });
+      return output;
     }
 
     emit(`Task ${task.id}: handoff continuation also exhausted — escalating to split.`);
@@ -3385,11 +3466,7 @@ async function executeExecutorTaskWithRecovery(
     );
   }
 
-  return trySplitAndExecute(
-    state, params, agents, task, plan, result.text,
-    signal, emit, inheritedModel, inferredModelRouting,
-    resolvedAgent, mergedOverride, budget, maxDepth,
-  );
+  return recoverBySplit();
 }
 
 /**
@@ -3460,6 +3537,17 @@ async function splitAndExecuteTask(
   );
 
   const subtaskOutputs: ExecutorOutput[] = [];
+  let settledSnapshot = capturePreExecutionGitSnapshot(params.cwd);
+  const observeSubtask = (next: ExecutorOutput): ExecutorOutput => {
+    const before = settledSnapshot;
+    const after = capturePreExecutionGitSnapshot(params.cwd);
+    settledSnapshot = after;
+    const diff = computePostExecutionDiff(before, after);
+    const filesChanged = diff.effectObservation?.status === "complete" || diff.filesChanged > 0 ? diff.filesChanged : undefined;
+    return { ...next, preExecSnapshot: before, postExecSnapshot: after, effectSnapshots: [{ before, after }],
+      effectObservation: diff.effectObservation, filesChanged,
+      changedFiles: filesChanged === undefined ? undefined : [...diff.newFiles, ...diff.modifiedFiles, ...diff.deletedFiles] };
+  };
 
   for (const subtask of split.subtasks) {
     if (!state.spawnGuard.wouldFit(1)) {
@@ -3485,7 +3573,7 @@ async function splitAndExecuteTask(
       );
     } catch (err) {
       emit(`Task ${task.id}: subtask ${subtask.id} spawn failed — ${String(err)}`);
-      subtaskOutputs.push({
+      subtaskOutputs.push(observeSubtask({
         taskId: subtask.id,
         description: subtask.description,
         agentName: resolvedAgent,
@@ -3493,11 +3581,11 @@ async function splitAndExecuteTask(
         exitCode: 1,
         durationMs: 0,
         contextBudget: budget,
-      });
+      }));
       continue;
     }
 
-    subtaskOutputs.push({
+    subtaskOutputs.push(observeSubtask({
       taskId: subtask.id,
       description: subtask.description,
       agentName: subtaskResult.agentName,
@@ -3508,7 +3596,9 @@ async function splitAndExecuteTask(
       contextBudget: budget,
       truncated: subtaskResult.truncated,
       contextExhaustionSignal: subtaskResult.contextExhaustionSignal,
-    });
+      toolCalls: subtaskResult.toolCalls,
+      commandTimes: subtaskResult.commandTimes,
+    }));
 
     // If this subtask also shows exhaustion, stop spawning more
     if (checkContextExhaustion(subtaskResult)) {
@@ -3530,18 +3620,21 @@ async function splitAndExecuteTask(
 
   const totalDuration = subtaskOutputs.reduce((sum, o) => sum + o.durationMs, 0);
   const allClean = subtaskOutputs.every((o) => o.exitCode === 0);
+  const effects = subtaskOutputs.reduce(mergeExecutorOutputs);
 
   state.recoveryLog.push(
     `[RECOVERY] ${task.id}: SPLIT tier completed — ${subtaskOutputs.length} subtask(s), all_clean=${allClean}`,
   );
 
   return {
+    ...effects,
     taskId: task.id,
     description: task.description,
     agentName: resolvedAgent,
     output: chainedOutput,
     exitCode: allClean ? 0 : 1,
     durationMs: totalDuration,
+    commandTimes: mergeCommandTimes(...subtaskOutputs.map(item => item.commandTimes)),
     contextBudget: budget,
   };
 }
@@ -3604,24 +3697,32 @@ function escalateToReplan(
  * Uses both the structured flags (truncated, contextExhaustionSignal) from
  * SubagentResult and heuristic text patterns in the output.
  */
-function checkContextExhaustion(result: SubagentResult): boolean {
+export function checkContextExhaustion(result: SubagentResult): boolean {
+  // Structured transport evidence is authoritative even if the child process
+  // happened to exit cleanly after publishing a partial result.
   if (result.truncated || result.contextExhaustionSignal) return true;
 
   const text = result.text ?? "";
-  if (!text.trim()) return false;
+  if (!text.trim()) return true;
 
-  // Heuristic truncation patterns
+  // spawnSubagent emits an exit-0 result only after observing a complete
+  // terminal assistant result. Settle that protocol result before inspecting
+  // ordinary report prose about truncated logs or exceeded diagnostics.
+  if (result.exitCode === 0) return false;
+
   const truncationSignals: RegExp[] = [
-    /\b(?:truncated|cut off|too long|exceeded)\b/i,
+    /\b(?:truncated|cut off|too long)\b/i,
+    /\b(?:context(?: window| length| limit)?|token(?: budget| limit)?|output limit)\b[^\r\n.]{0,80}\b(?:exceeded|exhausted|reached)\b/i,
+    /\b(?:ran out of|out of)\s+(?:context|tokens?)\b/i,
     /\.\.\.\s*$/m,
     /(?:content|output|response)\s+(?:has been|was)\s+truncated/i,
+    /\b(?:transport|stream|connection)\b[^\r\n.]{0,80}\b(?:ended|closed|failed|lost|interrupted)\b[^\r\n.]{0,80}\b(?:before|without)\b[^\r\n.]{0,40}\b(?:completion|complete|final|result)\b/i,
   ];
 
   for (const signal of truncationSignals) {
     if (signal.test(text)) return true;
   }
 
-  // Unclosed JSON code fences at end
   const jsonFenceCount = (text.match(/```json/g) ?? []).length;
   const closeFenceCount = (text.match(/```/g) ?? []).length;
   if (jsonFenceCount > 0 && closeFenceCount < jsonFenceCount * 2) return true;
@@ -3674,16 +3775,37 @@ function mergeExecutorOutputs(
   first: ExecutorOutput,
   second: ExecutorOutput,
 ): ExecutorOutput {
+  const changedFiles = first.changedFiles || second.changedFiles
+    ? [...new Set([...(first.changedFiles ?? []), ...(second.changedFiles ?? [])])] : undefined;
+  const observedCount = first.changedFiles && second.changedFiles
+    ? changedFiles!.length : (first.filesChanged ?? 0) + (second.filesChanged ?? 0);
+  // Known positive evidence survives; unknown plus zero is never proven zero.
+  const windows = (output: ExecutorOutput) => output.effectSnapshots ?? (output.preExecSnapshot && output.postExecSnapshot
+    ? [{ before: output.preExecSnapshot, after: output.postExecSnapshot }] : []);
+  const firstWindows = windows(first), secondWindows = windows(second);
+  const before = secondWindows[0]?.before.contentSnapshot;
+  const after = firstWindows.at(-1)?.after.contentSnapshot;
+  const continuous = before !== undefined && after !== undefined && JSON.stringify(before) === JSON.stringify(after);
+  const complete = continuous && first.effectObservation?.status === "complete" && second.effectObservation?.status === "complete";
+  const filesChanged = observedCount > 0 ? observedCount
+    : complete && first.filesChanged === 0 && second.filesChanged === 0 ? 0 : undefined;
   return {
     taskId: first.taskId,
+    preExecSnapshot: first.preExecSnapshot,
+    postExecSnapshot: second.postExecSnapshot,
+    effectSnapshots: [...firstWindows, ...secondWindows],
     description: first.description,
     agentName: first.agentName,
     output: [first.output, second.output].filter(Boolean).join("\n\n"),
     stderr: [first.stderr, second.stderr].filter(Boolean).join("\n") || undefined,
     exitCode: first.exitCode === 0 ? second.exitCode : first.exitCode,
     durationMs: first.durationMs + second.durationMs,
+    commandTimes: mergeCommandTimes(first.commandTimes, second.commandTimes),
     contextBudget: first.contextBudget,
     truncated: second.truncated ?? first.truncated,
     contextExhaustionSignal: second.contextExhaustionSignal ?? first.contextExhaustionSignal,
+    filesChanged,
+    changedFiles,
+    effectObservation: { status: complete ? "complete" : "partial" },
   };
 }

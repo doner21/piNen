@@ -7,9 +7,8 @@
  * artifacts, never an executor narrative, and it NEVER modifies the audited tree.
  *
  * There is NO executor role in this shape — it spawns exactly ONE verifier and
- * ZERO executors. The verifier is instructed it has READ-ONLY intent toward the
- * evidence cwd (running read-only recompute commands is allowed; writing into
- * the audited tree is a contract violation).
+ * ZERO executors. The verifier receives only read/grep/find/ls inspection tools;
+ * shell execution and every mutation-capable tool remain unavailable.
  *
  * Phases (in order):
  *   1. freeze-verify     (DETERMINISTIC verify-hash): frozen gate doc sha256 ==
@@ -52,6 +51,8 @@ import {
   DeterministicPhaseError,
   type DeterministicPhaseOutput,
 } from "../deterministic-phase";
+
+import { READ_ONLY_SHAPE_EXECUTION } from "../supervision";
 
 import type {
   OrchestrationShape,
@@ -97,6 +98,7 @@ export const evidenceAuditShape: OrchestrationShape = {
     "exactly ONE read-only verifier to audit run-id binding, internal consistency, and freshness from " +
     "raw artifacts (fail-closed JSON), and re-verifies the frozen doc was untouched. Spawns NO executor " +
     "and never writes into the audited tree. The spec-file input pattern is preferred.",
+  execution: READ_ONLY_SHAPE_EXECUTION,
   run: runEvidenceAudit,
 };
 
@@ -281,6 +283,7 @@ async function runEvidenceAudit(context: OrchestrationShapeContext): Promise<Orc
     const result = await spawnSubagent(agentName, prompt, {
       agents, cwd: params.cwd, allowLocalModel: params.allowLocalModel, signal, inheritedModel, onProgress: emit,
       modelOverride: route,
+      readOnly: true,
       ...(store
         ? {
             abortSurvival: {
@@ -427,16 +430,16 @@ function buildAuditorPrompt(
     inputs.specFile ? `Read this spec/audit file FIRST (authoritative): ${inputs.specFile}` : "",
     `Evidence cwd (the COMPLETED run's directory to audit): ${evidenceCwdAbs}`,
     `Frozen gate document (do NOT modify): ${frozenDocAbs}`,
-    "READ-ONLY INTENT: You may run read-only recompute commands (re-run verification/tests, recompute hashes) " +
-      "against the evidence cwd. You MUST NOT write, edit, delete, or otherwise modify ANY file inside the evidence " +
-      "cwd or the frozen document — doing so is a contract violation that FAILs this audit.",
+    "READ-ONLY CAPABILITY: inspect with read, grep, find, and ls only. Shell execution and every mutation-capable " +
+      "tool are unavailable. You MUST NOT write, edit, delete, execute commands, or otherwise modify ANY file inside " +
+      "the evidence cwd or the frozen document — doing so is a contract violation that FAILs this audit.",
     inputs.runIdLabel ? `Expected run-id label: every gate-evidence file must be bound to run-id "${inputs.runIdLabel}" — no stale/mismatched run ids.` : "",
     inputs.auditFocus ? `Audit focus/questions: ${inputs.auditFocus}` : "",
     "Deterministic evidence manifest (sha256 + bytes of the declared gate-evidence files — this IS the audit fingerprint):",
     manifestBlock,
     "Checks (ALL must hold for PASS):",
     "1. Run-id binding: every gate-evidence file is bound to the expected run (no stale/mismatched/absent run ids).",
-    "2. Internal consistency: metrics/gate JSONs are recomputable from the raw evidence where feasible (re-run the verification commands).",
+    "2. Internal consistency: inspect raw artifacts and recorded command output to confirm metrics/gate JSONs are internally coherent; do not execute commands.",
     "3. Freshness: evidence timestamps are coherent with the run (no stale artifacts carried over from a prior run).",
     "4. No reliance on any executor narrative — cite raw-artifact evidence only.",
     `Original task:\n${truncateWithNotice(originalTask, 3000, "task")}`,

@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "name": "two-builds",
+  "description": "Two narrow file changes, each independently verified.",
+  "phases": [
+    { "id": "build-one", "role": "executor", "agentName": "coder", "prompt": "CREATE file out-1.txt containing First phase. Change no other files.", "expectedOutput": "Saved first file and plain result.", "dependsOn": [], "route": { "role": "executor" } },
+    { "id": "verify-one", "role": "verifier", "agentName": "reviewer", "prompt": "Read out-1.txt and verify its first-phase content. Do not edit files.", "expectedOutput": "Independent first-phase verification.", "dependsOn": ["build-one"], "route": { "role": "verifier" } },
+    { "id": "build-two", "role": "executor", "agentName": "coder", "prompt": "CREATE file out-2.txt containing Second phase. Preserve out-1.txt. Change no other files.", "expectedOutput": "Saved second file and plain result.", "dependsOn": ["verify-one"], "route": { "role": "executor" } },
+    { "id": "verify-two", "role": "verifier", "agentName": "reviewer", "prompt": "Read out-1.txt and out-2.txt and verify both phase contents. Do not edit files.", "expectedOutput": "Independent second-phase verification.", "dependsOn": ["build-two"], "route": { "role": "verifier" } }
+  ],
+  "maxSubagents": 5,
+  "maxConcurrency": 1,
+  "maxIterations": 1,
+  "continueOnFailure": false,
+  "terminationCondition": "Both changing phases verified.",
+  "evidenceModel": "Actual saved files and independent phase results.",
+  "failureBehavior": "Stop and report the precise failure.",
+  "userFacingExplanation": "Build one, verify one, build two, verify two."
+}
