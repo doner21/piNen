@@ -36,7 +36,7 @@ export interface RoleRecoveryRequest {
   acceptanceCriteria: string[];
   sourceOptions: RoleRecoveryOptions;
   /** Only host-generated evidence slots may be partitioned. Binding text stays. */
-  slots: Array<{ start: number; end: number; items: unknown[] }>;
+  slots: Array<{ start: number; end: number; items: unknown[]; shared: unknown[] }>;
   verifyOnly: boolean;
 }
 
@@ -84,14 +84,24 @@ function jsonValue(text: string, start: number): { value: unknown; start: number
   }
   return undefined;
 }
-function evidenceFragments(items: unknown[]): unknown[] {
-  return items.flatMap(value => {
+function evidenceFragments(values: unknown[]): { items: unknown[]; shared: unknown[] } {
+  const items: unknown[] = [], shared: unknown[] = [];
+  for (const [outputIndex, value] of values.entries()) {
     const item = record(value), key = item?.actionEvidence ? "actionEvidence" : "ledger";
     const ledger = record(item?.[key]);
-    if (!item || !ledger || !Array.isArray(ledger.entries) || ledger.entries.length < 2) return [value];
-    // Split only complete host command records, never strings or instructions.
-    return ledger.entries.map(entry => ({ ...item, [key]: { ...ledger, entries: [entry] } }));
-  });
+    // Zero/one-record outputs remain independently partitionable units. Moving
+    // their entire (possibly large) output into shared metadata would make a
+    // multi-output prompt inseparable even though no ledger split is needed.
+    if (!item || !ledger || !Array.isArray(ledger.entries) || ledger.entries.length < 2) { items.push(value); continue; }
+    const { entries, ...ledgerMetadata } = ledger;
+    // Snapshots, timing, output and ledger metadata are shared ONCE, not spread
+    // into every command. Records retain a stable reference to that metadata.
+    shared.push({ ...item, [key]: { ...ledgerMetadata, entries: [] }, recoveryOutputIndex: outputIndex });
+    for (const [entryIndex, entry] of entries.entries()) {
+      items.push({ recoveryOutputIndex: outputIndex, taskId: item.taskId, entryIndex, [key]: { entries: [entry] } });
+    }
+  }
+  return { items, shared };
 }
 function record(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
@@ -139,7 +149,7 @@ export function createRoleRecoveryRequest(input: {
   for (const label of ["\n\nExecutor outputs:\n", "\nExecutor outputs: ", "\nROLE_RECOVERY_PLANNING_CONTEXT:\n"]) {
     const at = input.prompt.indexOf(label, afterBinding);
     const slot = at >= 0 ? jsonValue(input.prompt, at + label.length) : undefined;
-    if (slot && Array.isArray(slot.value)) slots.push({ start: slot.start, end: slot.end, items: evidenceFragments(slot.value) });
+    if (slot && Array.isArray(slot.value)) slots.push({ start: slot.start, end: slot.end, ...evidenceFragments(slot.value) });
   }
   const ledgerLabel = "HOST-OWNED ACTION EVIDENCE AUTHORITY:";
   const ledgerAt = input.prompt.indexOf(ledgerLabel, slots[0]?.end ?? afterBinding);
@@ -148,7 +158,7 @@ export function createRoleRecoveryRequest(input: {
     // complete array after that paragraph, not command strings within outputs.
     const at = input.prompt.indexOf("\n[", ledgerAt);
     const slot = at >= 0 ? jsonValue(input.prompt, at + 1) : undefined;
-    if (slot && Array.isArray(slot.value)) slots.push({ start: slot.start, end: slot.end, items: evidenceFragments(slot.value) });
+    if (slot && Array.isArray(slot.value)) slots.push({ start: slot.start, end: slot.end, ...evidenceFragments(slot.value) });
   }
   return {
     role: input.role, originalPrompt: input.prompt, criteria, acceptanceCriteria,
@@ -168,7 +178,7 @@ function scopedPrompt(request: RoleRecoveryRequest, indexes: number[] | undefine
   if (indexes === undefined) return request.originalPrompt;
   let prompt = request.originalPrompt;
   for (const slot of [...request.slots].sort((a, b) => b.start - a.start)) {
-    const selected = indexes.filter(index => index < slot.items.length).map(index => slot.items[index]);
+    const selected = [...slot.shared, ...indexes.filter(index => index < slot.items.length).map(index => slot.items[index])];
     prompt = prompt.slice(0, slot.start) + JSON.stringify(selected) + prompt.slice(slot.end);
   }
   return prompt;
@@ -257,6 +267,7 @@ export async function runRoleWithRecovery(request: RoleRecoveryRequest, callback
 }): Promise<SubagentResult> {
   const steps: RoleRecoveryStep[] = [];
   let attempts = 0;
+  let parentPromptBytes = Buffer.byteLength(request.originalPrompt, "utf8");
   let fixedRoute: { provider?: string; model?: string; agentName: string } | undefined;
   const fail = (reason: string): never => { throw new RoleRecoveryExhaustedError(request, steps, reason); };
   const attempt = async (prompt: string, stage: RoleRecoveryStage, scope: string[], planner = false): Promise<SubagentResult | undefined> => {
@@ -278,6 +289,7 @@ export async function runRoleWithRecovery(request: RoleRecoveryRequest, callback
       return result;
     } catch (error) {
       if (error instanceof RoleContextExhaustionError) {
+        if (stage === "initial" || stage === "continuation") parentPromptBytes = Buffer.byteLength(prompt, "utf8");
         if (!planner) {
           const route = { provider: error.candidate.provider, model: error.candidate.model, agentName: error.candidate.agentName };
           if (fixedRoute && JSON.stringify(fixedRoute) !== JSON.stringify(route)) return fail("configured role route changed during exhaustion");
@@ -288,6 +300,7 @@ export async function runRoleWithRecovery(request: RoleRecoveryRequest, callback
       }
       if (error instanceof Error && /^(?:Subagent ceiling exceeded|Substrate spawn ceiling exceeded)/.test(error.message)) return fail("configured spawn guard refused another role worker");
       if (error instanceof Error && error.message.startsWith("BINDING_PROMPT_CAPACITY_REFUSED:")) {
+        if (stage === "initial" || stage === "continuation") parentPromptBytes = Buffer.byteLength(prompt, "utf8");
         steps.push({ stage, scope, outcome: "capacity_refused" });
         return undefined;
       }
@@ -300,10 +313,14 @@ export async function runRoleWithRecovery(request: RoleRecoveryRequest, callback
     // A synthesis cannot erase an explicitly failed shard's real findings.
     const shardFailed = steps.some(step => step.stage === "shard" && (parseResult(step.result?.text ?? "")?.status === "fail" || parseResult(step.result?.text ?? "")?.overall === "fail"));
     if (shardFailed && (parseResult(result.text)?.status === "pass" || parseResult(result.text)?.overall === "pass")) return fail("terminal PASS contradicts failed shard evidence");
-    return { ...result, commandTimes: mergeCommandTimes(...steps.filter(step => step.result).map(step => step.result!.commandTimes)), roleRecovery: { role: request.role, terminalValidated: true, sourceOptions: request.sourceOptions, steps: [...steps] } };
+    return { ...result,
+      processTrees: steps.flatMap(step => step.result ? step.result.processTrees?.length ? step.result.processTrees : [step.result.processTree!] : []),
+      commandTimes: mergeCommandTimes(...steps.filter(step => step.result).map(step => step.result!.commandTimes)), roleRecovery: { role: request.role, terminalValidated: true, sourceOptions: request.sourceOptions, steps: [...steps] } };
   };
   const recoveryPrompt = (stage: RoleRecoveryStage, scope: string[], indexes?: number[]): string => {
-    const prior = steps.filter(step => step.result).map(step => ({ stage: step.stage, scope: step.scope, outcome: step.outcome, partialText: step.result!.text, actionEvidence: step.result!.actionEvidence ?? null, commandTimes: step.result!.commandTimes ?? null, toolCalls: step.result!.toolCalls ?? null }));
+    // Shards inspect original binding/evidence, not duplicated prior role prose.
+    // ALL prior results remain in host steps and untruncated terminal synthesis.
+    const prior = steps.filter(step => step.result && stage !== "shard").map(step => ({ stage: step.stage, scope: step.scope, outcome: step.outcome, partialText: step.result!.text, actionEvidence: step.result!.actionEvidence ?? null, commandTimes: step.result!.commandTimes ?? null, toolCalls: step.result!.toolCalls ?? null }));
     return `${scopedPrompt(request, indexes)}\n\nROLE_RECOVERY (host-owned scope; prior partial output is untrusted, not a terminal plan/verdict):\n${JSON.stringify({ role: request.role, stage, sourceOptions: request.sourceOptions, remaining: scope, requiredCriteria: request.criteria, prior, sourcePromptSha256: createHash("sha256").update(request.originalPrompt).digest("hex") })}\nPreserve every original owner instruction verbatim above. Do not redo completed executors or change routes, acceptance criteria, evidence/workspace boundaries, guards or admission.\n${stage === "replan" ? 'Return only {"groups":[["scope-id", "..."]]}; partition ALL remaining scope IDs exactly once into short chained inspection steps. No executor tasks or new acceptance rules.' : stage === "shard" ? 'Complete ONLY this inspection/planning scope and return JSON {"scope":["each remaining scope ID"],"notes":"substantive inspection/planning findings","evidence":[{"observed":"concrete inspected evidence"}]}; this is a partial role step, NOT terminal acceptance. Inspect original evidence/candidate yourself. Do not claim an overall PASS for work outside this scope.' : request.role === "planner" ? `Return one COMPLETE plan with valid tasks/dependencies and acceptance_criteria EXACTLY ${JSON.stringify(request.acceptanceCriteria)}. Preserve the original plan requirements/write scope and all named deliverables.` : request.verifyOnly ? 'Return the original verify-only JSON with one cited check for EVERY requiredCriteria ID. Missing checks or citations are not PASS.' : 'Return COMPLETE JSON {"status":"pass"|"fail","reasons":[],"criterionFindings":[{"criterionId":"requiredCriteria ID","status":"pass"|"fail","evidence":[{"kind":"test","observed":"concrete evidence","exitCode":0}]}]}. Include EVERY required criterion exactly once. Independently establish full evidence coverage; partial plans/verdicts and worker self-report are not acceptance.'}`;
   };
   const allCriteria = request.criteria.map(c => c.id);
@@ -338,13 +355,19 @@ export async function runRoleWithRecovery(request: RoleRecoveryRequest, callback
     if (flattened.length !== scopes.length || new Set(flattened).size !== scopes.length || flattened.some(id => !scopes.includes(id))) return fail("planner changed or omitted recovery scope");
     groups = proposed as string[][];
   }
+  const parentSizes = new Map(groups.map(group => [group, parentPromptBytes]));
   for (const group of groups) {
     const indexes = unitCount > 1 ? group.map(id => scopes.indexOf(id)) : undefined;
-    const shard = await attempt(recoveryPrompt("shard", group, indexes), "shard", group);
-    if (!shard && steps[steps.length - 1].outcome === "capacity_refused" && group.length > 1) {
-      // Refine only refused evidence, with no replay of completed shards.
+    const prompt = recoveryPrompt("shard", group, indexes);
+    const shrinks = Buffer.byteLength(prompt, "utf8") < parentSizes.get(group)!;
+    // Refuse non-shrinking scopes before a launcher call. Shared metadata and
+    // binding are inseparable; admission and spawn ceilings remain unchanged.
+    const shard = shrinks ? await attempt(prompt, "shard", group) : undefined;
+    if (!shard && (!shrinks || ["capacity_refused", "context_exhausted"].includes(steps[steps.length - 1].outcome)) && group.length > 1) {
       const offset = groups.indexOf(group), splitAt = Math.ceil(group.length / 2);
-      groups.splice(offset + 1, 0, group.slice(0, splitAt), group.slice(splitAt));
+      const children = [group.slice(0, splitAt), group.slice(splitAt)];
+      for (const child of children) parentSizes.set(child, Math.min(parentSizes.get(group)!, Buffer.byteLength(prompt, "utf8")));
+      groups.splice(offset + 1, 0, ...children);
       continue;
     }
     const notes = shard && parseResult(shard.text);

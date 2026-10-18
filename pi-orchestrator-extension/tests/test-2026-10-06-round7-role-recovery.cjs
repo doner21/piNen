@@ -27,13 +27,29 @@ const helpers = fs.existsSync(path.join(SOURCE, "src/role-recovery.ts")) ? jiti(
 const publications = jiti(path.join(SOURCE, "src/host-publications.ts"));
 const signatures = jiti(path.join(SOURCE, "src/write-set.ts"));
 const hostState = jiti(path.join(SOURCE, "src/run-state.ts"));
+const substrate = jiti(path.join(SOURCE, 'src/substrate.ts'));
+const generations = jiti(path.join(SOURCE, 'src/process-generation.ts'));
 function declarations(relative, names) {
   const file = path.join(SOURCE, relative), ast = ts.createSourceFile(file, fs.readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true);
   return names.map(name => { const node = ast.statements.find(item => item.name?.text === name); assert.ok(node, `baseline declaration ${relative}:${name}`); return node.getText(ast).replace(/^export\s+/, ""); }).join("\n");
 }
 function compile(source, dependencies, expression) {
   const context = vm.createContext({ Date, path, os, process, console, Buffer, structuredClone, Error, Map, Set, ...fs,
-    createHash: crypto.createHash, randomBytes: crypto.randomBytes, ...signatures, ...publications, ...helpers, ...timing, getCommandTimesForRun, ...dependencies });
+    createHash: crypto.createHash, randomBytes: crypto.randomBytes,
+    ...require(path.join(SOURCE, 'src/streaming-redactor.cjs')),
+    sanitizeSubagentResult: substrate.sanitizeSubagentResult,
+    isProvablyReadOnlySubagent: substrate.isProvablyReadOnlySubagent,
+    isNoToolInfrastructureFailure: substrate.isNoToolInfrastructureFailure,
+    isInfrastructureFailure: substrate.isInfrastructureFailure,
+    SubagentInfrastructureError: substrate.SubagentInfrastructureError,
+    // Child I/O is simulated here; feed creation-bound fixture generations to
+    // the REAL pure assessor, not a cleanup PASS stub. Real SDK/window tests
+    // independently exercise kernel observation and surviving descendants.
+    ProcessGenerationTracker: class { constructor(pid) { const born='2026-10-17T00:00:00.0000000Z';this.tree={schemaVersion:1,rootPid:pid,rootBorn:born,observedAt:born,members:[{pid,parentPid:1,born}],status:'clean',survivors:[],unknown:[]}; } sample() {} rootClosed() {} current() { return structuredClone(this.tree); } },
+    assessResultProcessTrees: outputs=>outputs.flatMap(o=>(o.processTrees?.length?o.processTrees:[o.processTree]).map(t=>generations.assessTreeWithObserver(t,()=>({status:'dead',evidence:'ESRCH'})))),
+    getRunProcessTrees: ()=>undefined,
+    ...hostState, ...signatures, ...publications, ...helpers, ...timing,
+    ...jiti(path.join(SOURCE, 'src/spawn-budget.ts')), getCommandTimesForRun, ...dependencies });
   vm.runInContext(ts.transpileModule(source + `\nglobalThis.api = ${expression};`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText, context);
   return context.api;
 }
@@ -122,7 +138,8 @@ async function exercise(relative, role, mode) {
     buildWindowsEpermEvidence: () => ({}), writeWindowsEpermEvidence: async () => undefined, formatSpawnFailure: error => error.message,
     phaseLogPathFor: (_run, index) => path.join(logs, `phase-${index}.log`), phaseResultPathFor: (_run, index) => { const file = path.join(logs, `phase-${index}.result.json`); sidecars.push(file); return file; },
   };
-  const launchName = relative === "src/index.ts" ? "runSubagent" : "spawnSubagent";
+  const publicLaunchName = relative === "src/index.ts" ? "runSubagent" : "spawnSubagent";
+  const launchName = fs.readFileSync(path.join(SOURCE, relative), 'utf8').includes(`function ${publicLaunchName}Attempt(`) ? `${publicLaunchName}Attempt` : publicLaunchName;
   const launch = compile(declarations("src/substrate.ts", ["SubagentPhaseResultRecorder", "isValidBoundPhaseResult"]) + "\n" + declarations(relative, [launchName, "buildSubagentSystemPrompt", "describeJsonEvent", "extractMessageText", "truncateWithNotice"]), deps, launchName);
   const workerName = mode === "shared-profile" ? "shared-worker" : role === "planner" ? "planner" : "reviewer";
   const agents = new Map([[workerName, { name: workerName, ...route }]]);
@@ -170,6 +187,10 @@ async function exercise(relative, role, mode) {
     if (mode === "visible-main-readonly-chain") assert.ok(!result.roleRecovery.steps.some(s => s.stage === "replan") && JSON.parse(result.text).criterionFindings.every(finding => finding.criterionId.startsWith("AC-")), "visible-main read-only recovery retains the frozen mission schema without an implicit planner");
     if (mode === "verify-only-chain") assert.ok(!result.roleRecovery.steps.some(s => s.stage === "replan") && result.roleRecovery.steps.filter(s => s.stage === "shard").length >= 2, "read-only context recovery chains without a planner");
     assert.equal(JSON.parse(result.text).status ?? "pass", "pass");
+    if(!only){
+      assert.equal(relative==='src/index.ts'?state.spawnedCount:spawned,count,'only physical launches consume the budget; admission refusals do not');
+      assert.equal(result.processTrees.length,count,'every physical exhausted/planner/shard generation survives synthesis');
+    }
   }
   if (mode.startsWith("visible-main-nested")) {
     const admitted = outer.admittedPaths(beforeOuter, signatures.captureContentSignatureSnapshot(cwd, { excludeDirectories: [] }));
@@ -177,10 +198,17 @@ async function exercise(relative, role, mode) {
     else assert.ok(admitted.size >= 2, "real initial/continuation sidecar writes remain attributed to the enclosing visible-main batch");
   }
   for (const [index, task] of requests.entries()) {
-    if (index > 0) assert.ok(task.includes('"hostObserved":"preserved-host-observation"'), "follow-on workers receive host-observed evidence, not just worker prose");
+    // Independent capacity shards inspect disjoint original evidence; carrying
+    // every sibling's ledger into each shard recreates the prompt-growth bug.
+    // Continuations and final synthesis must still receive host observations.
+    if (index > 0 && !task.includes('"stage":"shard"')) assert.ok(task.includes('"hostObserved":"preserved-host-observation"'), "follow-on synthesis/continuations receive host-observed evidence, not just worker prose");
     assert.ok(task.includes(OWNER), "complete original owner instructions reach every worker");
     if (only) assert.ok(task.includes(params.task), "a caller's delimiter-looking checklist text is never partitioned as host evidence");
     if (task !== originalPrompt) { assert.match(task, /ROLE_RECOVERY/); assert.match(task, /remaining/); assert.match(task, /sourceOptions/); }
+  }
+  if (mode === "planner-capacity" && !error) {
+    assert.equal(requests.at(-1).split('"hostObserved":"preserved-host-observation"').length - 1, requests.length - 1,
+      "final synthesis retains every settled shard's host observation exactly once");
   }
   for (const observation of optionsSeen) { assert.ok(observation.args.includes(route.provider)); assert.ok(observation.args.includes(route.model)); assert.ok(observation.args.includes("guard")); }
   if (mode === "continuation") {
@@ -216,7 +244,7 @@ async function siblingPublications() {
   assert.equal(admitted.size, 2, "enclosing host observation authenticates both sibling publications");
   assert.ok(results.every(result => result === "fulfilled"), `concurrent genuine sibling publications are not worker mutations: ${JSON.stringify(results)}`);
 }
-async function actualVerifyOnlyPublications(concurrent = false, mutation) {
+async function actualVerifyOnlyPublications(concurrent = false, mutation, cleanup) {
   requireObserver();
   const cwd = fixture(concurrent ? "configured-concurrent" : mutation ?? "final-sidecars"), evidence = path.join(SCRATCH, `probe-evidence-${serial}`);
   fs.mkdirSync(evidence); fs.writeFileSync(path.join(evidence, "input.txt"), "immutable");
@@ -228,7 +256,9 @@ async function actualVerifyOnlyPublications(concurrent = false, mutation) {
     MAX_VERIFIER_CONCURRENCY: 3, DEFAULT_VERIFIER_COUNT: 1, MAX_VERIFIER_COUNT: 7, MAX_FINAL_CHARS: 20000, MAX_DETAIL_CHARS: 4000, VERIFY_ONLY_TOOLS: ["read", "grep", "find", "ls", "bash"],
     throwIfAborted() {}, truncateWithNotice: text => text, formatRoutedModel: (provider, model) => `${provider}/${model}`, formatRouteLabel: () => "owner-provider/owner-model", toModelOverride: () => ({ provider: "owner-provider", model: "owner-model" }),
     runBoundedPool: realPool,
+    assessResultProcessTrees: outputs=>outputs.flatMap(o=>(o.processTrees?.length?o.processTrees:[o.processTree]).map(t=>generations.assessTreeWithObserver(t,()=>cleanup==='survivor'?{status:'alive',startedAt:Date.parse(t.rootBorn),birthIdentity:t.rootBorn}:{status:'dead',evidence:'ESRCH'}))),
     async spawnSubagent(name, task, options) {
+      options.reserveSpawn?.(); // This stub stands at the physical child-launch seam.
       const index = task.includes("verifier 2 of 2") ? 1 : 0, count = ++counts[index]; routes.push(options.modelOverride); prompts.push(task);
       if (concurrent && count === 1) { rendezvous[index].resolve(); await rendezvous[1-index].promise; }
       const file = path.join(cwd, `phase-${index}-${count}.result.json`), log = path.join(cwd, `phase-${index}.log`);
@@ -243,7 +273,9 @@ async function actualVerifyOnlyPublications(concurrent = false, mutation) {
         else if (mutation === "evidence") fs.writeFileSync(path.join(evidence, "input.txt"), "worker mutation");
       }
       if (mutation === "source-restored" && count === 2) fs.writeFileSync(path.join(cwd, "product.txt"), "unchanged");
-      const result = { agentName: name, provider: "owner-provider", model: "owner-model", task, text: JSON.stringify({ overall: "pass", reasons: [], checks: [{ id: "check-1", description: "check product", status: "pass", citations: ["product.txt:1"] }] }), exitCode: 0, durationMs: 0 };
+      const born='2026-10-17T00:00:00.0000000Z',pid=60000+index*10+count;
+      const processTree={schemaVersion:1,rootPid:pid,rootBorn:born,observedAt:born,members:[{pid,parentPid:1,born}],status:'clean',survivors:[],unknown:cleanup==='unknown'?['fixture_observation_gap']:[]};
+      const result = { ...(cleanup==='missing'?{}:{processTree}), agentName: name, provider: "owner-provider", model: "owner-model", task, text: JSON.stringify({ overall: "pass", reasons: [], checks: [{ id: "check-1", description: "check product", status: "pass", citations: ["product.txt:1"] }] }), exitCode: 0, durationMs: 0 };
       if (count === 1) throw new helpers.RoleContextExhaustionError({ ...result, text: "partial" });
       return result;
     },
@@ -257,7 +289,9 @@ async function actualVerifyOnlyPublications(concurrent = false, mutation) {
     assert.equal(counts[0], 1, "a later continuation cannot restore/launder an exhausted worker's mutation");
   } else {
     assert.equal(error, undefined, `configured verification must settle: ${error?.stack}`);
-    assert.equal(output.details.status, "pass", `actual recovered verify-only admits authentic result/log sidecars at FINAL gate: ${JSON.stringify(output.details.verifierRuns.map(run => run.reasons))}`);
+    assert.equal(output.details.status, cleanup ? "fail" : "pass", 'verify-only cleanup gate preserves every attempted generation; clean authentic sidecars remain admitted');
+    if(cleanup)assert.ok(output.details.verifierRuns.every(run=>run.reasons.some(reason=>reason.includes('WORKER_PROCESS_GENERATION_NOT_CLEAN'))));
+    assert.equal(output.details.processTrees.length,concurrent?4:2,'every exhausted and terminal generation retained');
     assert.equal(output.details.plannerSpawns, 0); assert.equal(output.details.executorSpawns, 0);
     assert.equal(output.details.spawnedCount, concurrent ? 4 : 2);
     for (const run of output.details.verifierRuns) { assert.equal(run.mutations.length, 0); assert.ok(run.roleRecovery.terminalValidated); }
@@ -310,12 +344,13 @@ async function ownershipLifetime(mode) {
   }
 }
 const failures = [];
-async function check(id, body) { try { await body(); console.log(`PASS ${id}`); } catch (error) { failures.push({ id, error: error.message }); console.log(`RED ${id}: ${error.message}`); } }
+async function check(id, body) { try { await body(); console.log(`PASS ${id}`); } catch (error) { failures.push({ id, error: error.name }); console.log(`RED ${id}: ${error.name}`); } }
 (async () => {
   try {
     await check("probe/concurrent-genuine-sibling-host-publications", siblingPublications);
     await check("probe/actual-recovered-verify-only-final-sidecars", () => actualVerifyOnlyPublications());
     await check("probe/actual-configured-concurrent-verify-only", () => actualVerifyOnlyPublications(true));
+    for(const cleanup of ['missing','unknown','survivor'])await check(`probe/verify-only-cleanup-${cleanup}`,()=>actualVerifyOnlyPublications(false,undefined,cleanup));
     for (const mode of ["source-restored", "spoofed", "overwritten", "log-tamper", "dependency", "evidence"]) await check(`probe/verify-only-${mode}`, () => actualVerifyOnlyPublications(false, mode));
     for (const mode of ["no-history-replay", "unrelated-run", "closed-child", "closed-parent", "sibling-tamper"]) await check(`probe/${mode}`, () => ownershipLifetime(mode));
     for (const relative of ["src/index.ts", "src/substrate.ts"]) {
@@ -325,5 +360,5 @@ async function check(id, body) { try { await body(); console.log(`PASS ${id}`); 
       if (relative === "src/substrate.ts") for (const mode of ["verify-only-continuation", "verify-only-chain", "verify-only-missing", "verify-only-cache"]) await check(`actual-shape/${mode}`, () => exercise(relative, "verifier", mode));
     }
   } finally { fs.rmSync(SCRATCH, { recursive: true, force: true }); }
-  assert.equal(failures.length, 0, JSON.stringify(failures, null, 2));
-})().catch(error => { throw error; });
+  assert.equal(failures.length, 0, 'role recovery cases failed (safe labels only)');
+})().catch(() => { console.error('ROLE_RECOVERY_CHECK_FAILED (safe labels only)'); process.exitCode = 1; });

@@ -3,7 +3,7 @@
 import { closeSync, fstatSync, mkdirSync, openSync, readSync, statSync, writeSync } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
-import { redactCompleteText } from "./streaming-redactor.cjs";
+import { sanitizeWorkerText } from "./streaming-redactor.cjs";
 
 export type ActionEvidenceOmissionReason =
   | "entry-count-budget"
@@ -138,9 +138,9 @@ function text(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 
-/** Shared UTF-8 streaming redactor is also used by live command retention. */
+/** Complete commands/errors must scrub echoes before their credential labels. */
 export function redactActionText(value: string): string {
-  return redactCompleteText(value);
+  return sanitizeWorkerText(value);
 }
 
 function eventInput(raw: Record<string, unknown>): Record<string, unknown> | undefined {

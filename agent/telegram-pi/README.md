@@ -10,6 +10,10 @@ Use `/telegram logon [label]` / `logoff`. `enable` / `disable` controls opt-in f
 
 See `C:/Users/you/telegramupgrade/README.md` for setup, phone testing and installation status. **Installing source does not activate topics mode or update already-running windows. No real cutover or running-session reload/restart without separate owner approval while P7 is paused.**
 
+## Separate Windows Terminal windows
+
+The candidate General `/new <name-or-existing-folder> [first instruction]` uses the same helper as the discoverable `open_window` tool and `/window` command. It requires the existing pinned group/allowlist, consumes project-topic `/new` without forwarding, preserves the literal instruction suffix, and confirms actual new-topic logon plus runtime acceptance of the requested first user message. Instructions are data, not shell or Pi commands; later unrelated local conversation is not mirrored. No Pi session is stopped. See [window configuration, safety, tests and owner-gated cutover](../window/README.md). Installing source alone does not activate this router change or reload any existing window.
+
 ## Document attachments
 
 The bridge supports `send_document` and `/telegram send-document "<file>" [--caption "..."]` in topics and legacy modes. Non-empty regular local files up to 10MB are supported; network shares, symlinks and obvious credentials are refused. Plaintext captions are limited to 1024 characters. Credential scanning is best-effort; do not upload secrets or disguised credential exports.

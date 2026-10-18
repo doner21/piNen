@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Focused deterministic regressions for child-process orchestration runtime defects:
+ * Focused deterministic regressions for SSI IPC orchestration runtime defects:
  * - child auto-retry lifecycle clears transient assistant failures;
  * - final unrecovered assistant failures remain terminal;
  * - composable role/phase xN syntax preserves exact requested cardinality;
@@ -27,7 +27,7 @@ function makeJiti() {
 }
 
 function writeLifecycleFake(dir) {
-  const fakePath = path.join(dir, "fake-child-runtime.cjs");
+  const fakePath = path.join(dir, "fake-ssi-ipc-runtime.cjs");
   fs.writeFileSync(fakePath, `#!/usr/bin/env node
 const fs = require("node:fs");
 function emit(event) { console.log(JSON.stringify(event)); }
@@ -99,7 +99,7 @@ function loadOrchestrateTool() {
 }
 
 async function withFakeRuntime(mode, test) {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-child-runtime-"));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-ssi-ipc-runtime-"));
   const fakePath = writeLifecycleFake(tmp);
   const logPath = path.join(tmp, "calls.jsonl");
   const previous = {
@@ -184,10 +184,11 @@ async function testExactPhaseCardinalityParsingAndRuntime() {
   await withFakeRuntime("cardinality", async ({ tmp, logPath }) => {
     const tool = loadOrchestrateTool();
     const result = await tool.execute(
-      "test-child-runtime-cardinality",
+      "test-ssi-ipc-cardinality",
       {
         task: "hypotheses x3, critiques x2, verify x2",
         paradigm: "composable-pipeline",
+        supervision: "off",
         preflight: false,
         cwd: tmp,
         maxSubagents: 10,
@@ -210,10 +211,11 @@ async function testNoFallbackAfterAmbiguousMutationAndNonResumableAbort() {
   await withFakeRuntime("ambiguous-middle", async ({ tmp, logPath }) => {
     const tool = loadOrchestrateTool();
     const result = await tool.execute(
-      "test-child-runtime-ambiguous-middle",
+      "test-ssi-ipc-ambiguous-middle",
       {
         task: "Only hypothesize x1 about the IPC defect.",
         paradigm: "composable-pipeline",
+        supervision: "off",
         preflight: false,
         cwd: tmp,
         maxSubagents: 4,
@@ -251,11 +253,11 @@ async function main() {
   console.log("ok - composable xN/×N parsing and runtime cardinality are exact");
   await testNoFallbackAfterAmbiguousMutationAndNonResumableAbort();
   console.log("ok - ambiguous mutation suppresses fallback and reports non-resumable abort");
-  console.log("test-child-runtime-regressions: ALL PASS");
+  console.log("test-ssi-ipc-runtime-regressions: ALL PASS");
 }
 
 main().catch((error) => {
-  console.error("test-child-runtime-regressions: FAIL");
+  console.error("test-ssi-ipc-runtime-regressions: FAIL");
   console.error(error);
   process.exit(1);
 });

@@ -15,7 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { redactActionText } from "./action-evidence";
-import { StreamingSecretRedactor } from "./streaming-redactor.cjs";
+import { sanitizeWorkerText } from "./streaming-redactor.cjs";
 import { CommandTelemetryOwner, type CommandTelemetryOwnerConfiguration } from "./command-telemetry-owner.cjs";
 
 export const NO_OUTPUT_MONITOR_READY_MARKER = "NO_OUTPUT_MONITOR_READY:v1";
@@ -1988,7 +1988,9 @@ export default function workerNoOutputMonitor(pi: ExtensionAPI): void {
       };
       drainEventsForCleanup = drainEvents;
       const local = createLocalBashOperations();
-      const redactor = new StreamingSecretRedactor();
+      // Native bash owns truncation/full-output references. Feed it the complete
+      // sanitized command result at settlement, never unsafe partial echoes.
+      const completeOutput: Buffer[] = [];
       const operations = {
         exec: async (command: string, cwd: string, options: Parameters<typeof local.exec>[2]) => {
           // P-INTERVAL-RETAINED-FAILURE (decision 4 / hard rule 3): an exception inside this interval
@@ -2023,19 +2025,25 @@ export default function workerNoOutputMonitor(pi: ExtensionAPI): void {
             }
           }, policy.pollMs);
           poll.unref?.();
+          let outputComplete = false;
           try {
             const effectivePath = options.env?.PATH ?? options.env?.Path ?? process.env.PATH ?? "";
-            return await local.exec(command, cwd, { ...options, env: {
+            const outcome = await local.exec(command, cwd, { ...options, env: {
               ...(options.env ?? {}),
               PATH: `${shimDir}${path.delimiter}${effectivePath}`,
               PI_ORC_NO_OUTPUT_ORIGINAL_PATH: effectivePath,
             }, onData(data) {
               lastOutput = performance.now(); fallbackAlarmSent = false;
-              const safe = redactor.push(data); if (safe.length > 0) options.onData(Buffer.from(safe, "utf8"));
+              completeOutput.push(Buffer.from(data));
             } });
+            outputComplete = true;
+            return outcome;
           } finally {
             try {
-              const tail = redactor.finish(); if (tail.length > 0) options.onData(Buffer.from(tail, "utf8"));
+              const safe = outputComplete ? sanitizeWorkerText(Buffer.concat(completeOutput).toString("utf8"))
+                : completeOutput.length ? "[incomplete command output withheld]\n" : "";
+              completeOutput.length = 0;
+              if (safe.length > 0) options.onData(Buffer.from(safe, "utf8"));
             } finally { clearInterval(poll); }
           }
         },

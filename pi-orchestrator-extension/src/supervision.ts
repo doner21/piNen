@@ -2,6 +2,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { readRunProcessTrees } from "./process-generation";
+import { sanitizeWorkerValue } from "./streaming-redactor.cjs";
 import { refreshLiveStatus, observeProcessIdentity, type LiveStatus, type LiveStatusOptions, type ProcessIdentityObservation, type ProcessIdentityObserver } from "./live-status";
 export { observeProcessIdentity } from "./live-status";
 export type { ProcessIdentityObservation, ProcessIdentityObserver } from "./live-status";
@@ -264,6 +266,8 @@ export interface FrozenMissionInput {
   lane: RunLane;
   routes: ResolvedMissionRoute[];
   constraints: string[];
+  /** Recorded at admission by the caller, never read from planner prose. */
+  protectedAreaGrants?: string[];
   nonGoals: string[];
   acceptanceCriteria: AcceptanceCriterion[];
   /** Frozen worker dispatch policy. Undefined is accepted only for legacy schema-v1 missions. */
@@ -401,6 +405,9 @@ export interface ApprovalRecord extends ApprovalBinding {
   issuedAt: string;
   consumedAt?: string;
   invalidatedAt?: string;
+  /** Host/evidence fence captured at issuance; never worker-supplied authority. */
+  hostInstanceId?: string;
+  settlementBinding?: string;
 }
 
 /**
@@ -435,7 +442,7 @@ export interface SupervisionCheckpoint {
 
 export interface InfrastructureFailure {
   infrastructure: boolean;
-  code?: "provider_refused" | "command_unavailable" | "provider" | "transport" | "checkpoint" | "parser" | "write_set" | "orchestrator";
+  code?: "worker_infrastructure" | "retry_cleanup" | "provider_refused" | "command_unavailable" | "provider" | "transport" | "checkpoint" | "parser" | "write_set" | "orchestrator";
   message: string;
   providerMessage?: string;
   retryAllowed?: boolean;
@@ -472,7 +479,7 @@ export interface LegacyPevSupervisionRuntime {
   kind?: "legacy-pev";
   params: Record<string, unknown>;
   intake: unknown;
-  plan: { tasks: CriterionTask[]; notes: string; predictedWriteSet?: string[]; externalEvidenceRoots?: string[]; acceptanceCriteria?: string[] };
+  plan: { tasks: CriterionTask[]; notes: string; predictedWriteSet?: string[]; externalEvidenceRoots?: string[]; acceptanceCriteria?: string[]; protectedAreasNeeded?: string[] };
   completedTaskIds: string[];
   executorOutputs: unknown[];
   contentBaseline: ContentSignatureSnapshot;
@@ -606,6 +613,7 @@ export interface SupervisionRunState {
   currentTaskId?: string;
   lastTaskId?: string;
   currentApproval?: ApprovalRecord;
+  protectedAreaDecision?: ReturnType<typeof checkProtectedAreaForecast>;
   automaticPlanApprovals?: Array<{ authority: "fixed-host-checks"; checkpointId: string; approvedAt: string; scope: string[] }>;
   audit: SupervisionAuditFacts;
   pauseReason?: string;
@@ -614,6 +622,7 @@ export interface SupervisionRunState {
   acceptance?: SupervisorAcceptance;
   /** Administrative retirement is distinct from PASS, acceptance, cancellation, and failure. */
   retirement?: PausedRunRetirement;
+  adoptions?: Array<{ oldHostInstanceId: string; hostInstanceId: string; adoptedAt: string; sourceCheckpointId: string }>;
   /** Host-owned resumable lifecycle payload. Kept in the mission-bound atomic state file. */
   runtime?: DurableSupervisionRuntime;
 }
@@ -759,6 +768,8 @@ export interface InspectionSnapshot {
   retirement?: PausedRunRetirement;
   drift: DriftFlag[];
   allowedNextActions: SupervisionAction[];
+  actionRefusals: Partial<Record<SupervisionAction, string>>;
+  terminalOutcome?: SupervisionRunState["terminalOutcome"];
   liveStatus: LiveStatus;
 }
 
@@ -1055,6 +1066,7 @@ function normalizedMissionBody(input: FrozenMissionInput): FrozenMissionInput & 
     routes,
     constraints: input.constraints.map((item) => assertNonEmptyString(item, "constraint")),
     nonGoals: input.nonGoals.map((item) => assertNonEmptyString(item, "nonGoal")),
+    ...(input.protectedAreaGrants !== undefined ? { protectedAreaGrants: input.protectedAreaGrants.map(item => assertNonEmptyString(item, "protected area grant")) } : {}),
     acceptanceCriteria,
     workerExecutionConstraints: {
       noForceKill: input.workerExecutionConstraints?.noForceKill === true,
@@ -1563,29 +1575,15 @@ export function assessPausedRunRetirement(
     return rejection("survivor_present", "A durable survivor artifact is present.");
   }
 
+  try { const retry = unsettledRetryReason(runDir, names); if (retry) return rejection("worker_settlement_ambiguous", retry); }
+  catch { return rejection("worker_settlement_ambiguous", "Infrastructure retry evidence is unreadable."); }
+  const processTrees = readRunProcessTrees(runDir, observeProcess === observeProcessIdentity ? undefined : observeProcess);
+  if (processTrees.status !== "clean") return rejection("active_worker_liveness_unknown", `Whole process generation is not clean: ${processTrees.reasons.join("; ")}.`);
+
   const activeWorkers = [...state.audit.activeWorkers.map((worker) => ({ pid: worker.pid, startedAt: undefined as number | undefined }))];
-  for (const name of names.filter((candidate) => /^phase-.*\.result\.json$/i.test(candidate))) {
-    let sidecar: unknown;
-    try {
-      sidecar = JSON.parse(fs.readFileSync(path.join(runDir, name), "utf8"));
-    } catch (error) {
-      return rejection("run_state_inaccessible", `Phase settlement evidence ${name} is inaccessible or malformed.`);
-    }
-    if (!isRuntimeRecord(sidecar) || sidecar.kind !== "subagent-phase-result") {
-      return rejection("run_state_inaccessible", `Phase settlement evidence ${name} has an unknown format.`);
-    }
-    if (sidecar.status === "incomplete") {
-      return rejection("worker_settlement_ambiguous", `Phase settlement evidence ${name} is incomplete.`);
-    }
-    if (sidecar.status === "running") {
-      const startedAt = typeof sidecar.startedAt === "string" && Number.isFinite(Date.parse(sidecar.startedAt))
-        ? Date.parse(sidecar.startedAt)
-        : undefined;
-      activeWorkers.push({ pid: typeof sidecar.pid === "number" ? sidecar.pid : undefined, startedAt });
-    } else if (sidecar.status !== "complete") {
-      return rejection("worker_settlement_ambiguous", `Phase settlement evidence ${name} has unknown status ${String(sidecar.status)}.`);
-    }
-  }
+  // Validated phase settlement and exact member generations above are the
+  // authority. Raw historical root PIDs cannot undo those facts. Unbound
+  // active audit entries below still require conclusive absence.
 
   const observed = new Set<string>();
   for (const worker of activeWorkers) {
@@ -1599,7 +1597,7 @@ export function assessPausedRunRetirement(
   return {
     eligible: true,
     owningHostInstanceId: `${host.pid}:${host.startedAt}`,
-    reason: `Paused run retired because owning host PID ${host.pid} is conclusively dead (ESRCH), every recorded worker is conclusively absent, and no detached survivor exists.`,
+    reason: `Paused run retired because owning host PID ${host.pid} is conclusively dead (ESRCH), every recorded worker generation is settled, and no detached survivor exists.`,
   };
 }
 
@@ -1752,8 +1750,15 @@ export function partitionLaneViolations(violations: LanePathViolation[]): {
 
 export function classifyInfrastructureFailure(error: unknown): InfrastructureFailure {
   const object = error && typeof error === "object" ? error as { code?: unknown; message?: unknown; info?: unknown } : undefined;
-  const message = object?.message !== undefined ? String(object.message) : String(error ?? "");
-  const info = object?.info && typeof object.info === "object" ? object.info as Record<string, unknown> : undefined;
+  const safe = sanitizeWorkerValue({ message: object?.message !== undefined ? String(object.message) : String(error ?? ""), info: object?.info });
+  const message = safe.message;
+  const info = safe.info && typeof safe.info === "object" ? safe.info as Record<string, unknown> : undefined;
+  if (info?.code === "retry_cleanup") return { infrastructure: true, code: "retry_cleanup", message,
+    retryAllowed: true, retryEligible: true, retryAttempted: false, mutationAmbiguous: false };
+  if (info?.code === "worker_infrastructure" && info.toolTelemetryComplete === true) {
+    return { infrastructure: true, code: "worker_infrastructure", message: "Recorded auth/provider failure before tool execution; restore infrastructure before one same-role retry.",
+      retryAllowed: info.retryAllowed === true, retryEligible: true, retryAttempted: info.retryAttempted === true, mutationAmbiguous: false };
+  }
   if (info?.code === "provider_refused") {
     return {
       infrastructure: true,
@@ -2120,7 +2125,7 @@ export function migrateLegacyPevSupervisionState(
     contentBaseline,
     repairCount,
     ...(verifierBatchById.size ? { verifierBatches: [...verifierBatchById.values()] } : {}),
-    ...(options.hostInstanceId ? { hostInstanceId: options.hostInstanceId } : legacy.hostInstanceId ? { hostInstanceId: legacy.hostInstanceId } : {}),
+    ...(legacy.hostInstanceId ? { hostInstanceId: legacy.hostInstanceId } : {}),
     adapterState: {
       classification: "executor-bearing",
       ...(
@@ -2214,13 +2219,14 @@ export function normalizeSupervisorAcceptanceReason(value: unknown): string {
 }
 
 /** Acceptance is available only at a settled verifier boundary. */
-export function supervisorAcceptanceIneligibility(state: SupervisionRunState): string | undefined {
+export function supervisorAcceptanceIneligibility(state: SupervisionRunState, runDir = runDirFor(state.runId), observe?: ProcessIdentityObserver): string | undefined {
   if (state.status !== "awaiting_supervisor") return `status ${state.status} is not an awaiting supervisor boundary`;
   if (state.currentTaskId) return `task ${state.currentTaskId} is not settled`;
   if (state.audit.activeWorkers.length) return "an active worker has not settled";
   if (state.audit.detachedWorkers.length) return "a detached worker has not settled";
   const checkpoint = state.checkpoints[state.checkpoints.length - 1];
   if (!checkpoint || checkpoint.kind !== "verifier") return "the latest checkpoint is not a settled verifier result";
+  if (readRunProcessTrees(runDir, observe === observeProcessIdentity ? undefined : observe).status !== "clean") return "worker process generation inventory is missing, surviving or unknown";
   if (!state.currentApproval) return "no checkpoint approval is outstanding";
   if (
     state.currentApproval.runId !== state.runId ||
@@ -2232,24 +2238,171 @@ export function supervisorAcceptanceIneligibility(state: SupervisionRunState): s
   return undefined;
 }
 
-function allowedNextActions(state: SupervisionRunState): SupervisionAction[] {
+function baseNextActions(state: SupervisionRunState): SupervisionAction[] {
   switch (state.status) {
     case "plan_checkpoint": return ["inspect", "continue", "pause", "cancel"];
-    case "awaiting_supervisor": return supervisorAcceptanceIneligibility(state)
-      ? ["inspect", "continue", "pause", "cancel"]
-      : ["inspect", "continue", "accept", "pause", "cancel"];
+    case "awaiting_supervisor": return ["inspect", "continue", "accept", "pause", "cancel"];
     case "paused": return ["inspect", "continue", "cancel"];
-    case "blocked_infrastructure":
+    case "blocked_infrastructure": return ["worker_infrastructure", "retry_cleanup"].includes(state.audit.infrastructureFailures.at(-1)?.code ?? "") && state.audit.infrastructureFailures.at(-1)?.retryAllowed === true ? ["inspect", "continue", "pause", "cancel"] : ["inspect", "pause", "cancel"];
     case "executing":
     case "verifying": return ["inspect", "pause", "cancel"];
-    case "cancelled":
+    case "cancelled": return ["inspect"];
     case "terminal": return ["inspect"];
+    default: return ["inspect"];
   }
+}
+
+function unsettledRetryReason(runDir: string, names: string[]): string | undefined {
+  if (names.some(name => /^infrastructure-.*\.retry\.json\.lock$/i.test(name))) return "infrastructure retry claim is still owned or uncertain";
+  for (const name of names.filter(name => /^infrastructure-.*\.retry\.json$/i.test(name))) {
+    const retry = JSON.parse(fs.readFileSync(path.join(runDir, name), "utf8"));
+    if (retry.version !== 1 || !["waiting", "settled", "failed"].includes(retry.status)) return "infrastructure retry settlement is ambiguous";
+  }
+  return undefined;
+}
+
+/** Round9 continuation/acceptance never transfers ownership. Takeover is deferred to round10. */
+export function lifecycleAuthorityIneligibility(state: SupervisionRunState, runDir: string,
+  hostInstanceId = `${process.pid}:${Math.round(performance.timeOrigin)}`, observe: ProcessIdentityObserver = observeProcessIdentity): string | undefined {
+  const owner = state.runtime?.hostInstanceId;
+  if (!parseHostInstanceId(owner)) return "owning host identity is missing or unknown";
+  if (owner !== hostInstanceId) return "foreign owning host; dead-host takeover is deferred to round10";
+  const restoredRetry = ["worker_infrastructure", "retry_cleanup"].includes(state.audit.infrastructureFailures.at(-1)?.code ?? "") && state.audit.infrastructureFailures.at(-1)?.retryAllowed === true;
+  if (!["plan_checkpoint", "awaiting_supervisor", "paused", "blocked_infrastructure"].includes(state.status)) return `continuation/acceptance unavailable in status ${state.status}`;
+  if (state.status === "blocked_infrastructure" && !restoredRetry) return "infrastructure failure has no eligible pending same-role retry";
+  if (state.audit.activeWorkers.length || state.audit.detachedWorkers.length || state.currentTaskId && !restoredRetry) return "active, detached or unsettled worker evidence";
+  try {
+    const names = fs.readdirSync(runDir);
+    if (names.some(name => /^survivor-.*\.json$/i.test(name))) return "durable survivor evidence";
+    const retry = unsettledRetryReason(runDir, names); if (retry) return retry;
+    // Before any dispatch, an intact empty manifest/checkpoint is sufficient.
+    // Once a phase was published, every attempt must have validated settlement.
+    const hasPhases = names.some(name => /^phase-.*\.result\.json$/i.test(name));
+    if (!hasPhases) {
+      if (state.checkpoints.some(cp => cp.kind === "executor" || cp.kind === "verifier")) return "missing phase generation inventory";
+      const manifest = JSON.parse(fs.readFileSync(path.join(runDir, "state.json"), "utf8"));
+      if (manifest.runId !== state.runId || !Array.isArray(manifest.phases) || manifest.phases.length) return "unproven pre-dispatch manifest";
+    } else {
+      const preDispatch = !state.currentTaskId && !state.checkpoints.some(cp => cp.kind === "executor" || cp.kind === "verifier")
+        && state.runtime?.kind === "generic-shape" && state.runtime.executorOutputs.length === 0 && state.runtime.cursor.nextTaskIndex === 0;
+      const facts = readRunProcessTrees(runDir, observe === observeProcessIdentity ? undefined : observe, { preDispatch });
+      if (facts.status !== "clean") return `worker settlement is ${facts.status}: ${facts.reasons.join("; ")}`;
+    }
+  } catch { return "worker settlement evidence unavailable"; }
+  if (state.adoptions?.length && state.runtime?.kind === "generic-shape" && state.runtime.cursor.stage === "executor-task") return "review-only adoption forbids writer authority";
+  return undefined;
+}
+
+export function lifecycleEligibility(state: SupervisionRunState, runDir: string, options: LiveStatusOptions = {}): { allowedNextActions: SupervisionAction[]; actionRefusals: Partial<Record<SupervisionAction, string>> } {
+  const actionRefusals: Partial<Record<SupervisionAction, string>> = {};
+  try {
+    validateLoadedSupervisionState(state, path.basename(runDir));
+    if (options.observationError || !Array.isArray(state.audit?.activeWorkers) || !Array.isArray(state.audit?.detachedWorkers) || !Array.isArray(state.audit?.infrastructureFailures)) throw new Error("invalid lifecycle evidence");
+  } catch { return { allowedNextActions: ["inspect"], actionRefusals: { continue: "invalid durable lifecycle evidence", accept: "invalid durable lifecycle evidence" } }; }
+  const authority = lifecycleAuthorityIneligibility(state, runDir, options.hostInstanceId, options.observeProcess);
+  if (authority) { actionRefusals.continue = authority; actionRefusals.accept = authority; }
+  const acceptance = supervisorAcceptanceIneligibility(state, runDir, options.observeProcess);
+  if (acceptance) actionRefusals.accept ??= acceptance;
+  const actions = baseNextActions(state).filter(action => !actionRefusals[action]);
+  return { allowedNextActions: actions, actionRefusals };
+}
+
+/** Native-producing inputs are protected even if the planner calls them ordinary. */
+export function isProtectedNativePath(value: string): boolean {
+  const file = path.posix.normalize(value.replaceAll("\\", "/")).replace(/^\.\//, "");
+  return /(?:^|\/)(?:experiments\/phase0\/parallel-crossfade|tools\/phase1\/native)(?:\/|$)/i.test(file)
+    || /(?:^|\/)tools\/stage6\/(?:.*\/)?native(?:\/|$)/i.test(file)
+    || /(?:^|\/)(?:CMakeLists\.txt|[^/]+\.cmake)$/i.test(file)
+    || /(?:^|\/)(?:experiments\/phase0|tools\/phase1|tools\/stage6)\/(?:Makefile|build[^/]*\.(?:json|mjs|cjs|js|ts|ps1|sh|bat|cmd))$/i.test(file)
+    || /\.(?:c|cc|cpp|cxx|c\+\+|h|hh|hpp|hxx|h\+\+|m|mm|cu|cuh|s|asm|rs|swift)(?:\.(?:in|template|generated))?$/i.test(file);
+}
+
+/** Paths in scoped grants are repo-relative, never substring/prose matches. */
+export function protectedScopeCovers(scope: string, file: string): boolean {
+  if (!scope || /[\\:*?\[\]{}]|(?:^|\/)\.\.(?:\/|$)/.test(scope) || scope.startsWith("/")) return false;
+  return scope.endsWith("/") ? file.startsWith(scope) : file === scope;
+}
+
+function excludesNativeObservation(text: string): boolean {
+  const words = text.replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2").replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[^a-z0-9]+/gi, " ");
+  return /\b(?:STOP|device\w*|lease\w*|allocat\w*|cross\s*fade|A\s+B|swap\w*)\b/i.test(words);
+}
+
+/** Exact named needs; native-code:<path> optionally narrows a native grant.
+ * native-observe-notify-wake:<path> is ONLY the already-granted adjacent
+ * observation scope. It never expands to STOP/device/lease/allocation/swap work.
+ * Neither a forecast nor a planner-supplied grant creates owner authority. */
+export function decideProtectedAreaPermission(input: {
+  needed?: string[]; grants?: string[]; paths?: string[]; descriptions?: string[]; cwd?: string;
+}): { approved: boolean; needed: string[]; grants: string[]; missing: string[]; reasons: string[] } {
+  const valid = Array.isArray(input.needed) && input.needed.every(item => typeof item === "string" && item.trim() === item && item.length > 0);
+  const grantsValid = input.grants === undefined || Array.isArray(input.grants) && input.grants.every(item => typeof item === "string" && item.trim() === item && item.length > 0);
+  const grants = grantsValid ? [...(input.grants ?? [])] : [];
+  const needed = valid ? [...new Set(input.needed)] : [];
+  const observationOnly = !(input.descriptions ?? []).some(excludesNativeObservation);
+  for (const declared of input.paths ?? []) {
+    const file = path.posix.normalize((input.cwd && path.isAbsolute(declared) ? path.relative(input.cwd, declared) : declared).replaceAll("\\", "/")).replace(/^\.\//, "");
+    if (!isProtectedNativePath(file)) continue;
+    const observationPath = observationOnly && !excludesNativeObservation(path.posix.basename(file));
+    if (needed.some(area => area === "native-code"
+      || area.startsWith("native-code:") && protectedScopeCovers(area.slice("native-code:".length), file)
+      || observationPath && area.startsWith("native-observe-notify-wake:") && protectedScopeCovers(area.slice("native-observe-notify-wake:".length), file))) continue;
+    needed.push(`native-code:${file}`);
+  }
+  const missing = needed.filter(area => !grants.some(grant => grant === area
+    || observationOnly && area.startsWith("native-observe-notify-wake:")
+      && protectedScopeCovers(area.slice("native-observe-notify-wake:".length), area.slice("native-observe-notify-wake:".length))
+      && !excludesNativeObservation(path.posix.basename(area.slice("native-observe-notify-wake:".length)))
+      && (grant === "native-code" || grant.startsWith("native-code:") && protectedScopeCovers(grant.slice("native-code:".length), area.slice("native-observe-notify-wake:".length)))
+    || grant === "native-code" && area.startsWith("native-code:")
+    || ["native-code:", "native-observe-notify-wake:"].some(prefix => area.startsWith(prefix) && grant.startsWith(prefix) && protectedScopeCovers(grant.slice(prefix.length), area.slice(prefix.length)))));
+  const reasons = [...(!valid ? ["PLAN requires explicit protected_areas_needed: [] or named protected changes."] : []),
+    ...(!grantsValid ? ["Malformed admission protected area grants."] : []), ...missing.map(area => `Owner permission required before builder: ${area}.`)];
+  return { approved: reasons.length === 0, needed, grants, missing, reasons };
+}
+
+/** Explicit forecast compared ONLY with mission-bound admission grants. */
+export function checkProtectedAreaForecast(state: SupervisionRunState): ReturnType<typeof decideProtectedAreaPermission> {
+  return decideProtectedAreaPermission({ needed: state.runtime?.plan?.protectedAreasNeeded, grants: state.mission.protectedAreaGrants,
+    paths: [...(state.runtime?.plan?.predictedWriteSet ?? []), ...state.tasks.flatMap(task => task.predictedWriteSet ?? [])],
+    descriptions: state.tasks.map(task => task.description), cwd: state.mission.cwd });
+}
+
+/** The original plan stays immutable. Only host-published bounded verifier
+ * repairs may extend its tasks; approval never authorizes arbitrary edits. */
+export function checkSavedPlanConsistency(state: SupervisionRunState, runDir = runDirFor(state.runId)): string[] {
+  const checkpoint = [...state.checkpoints].reverse().find(item => item.kind === "plan");
+  if (!checkpoint) return ["Saved plan checkpoint missing."];
+  try {
+    const envelope = JSON.parse(fs.readFileSync(path.join(runDir, `${checkpoint.id}-plan.json`), "utf8"));
+    const savedPlan = envelope.payload?.plan;
+    const normalized = (value: unknown) => canonicalJson(JSON.parse(JSON.stringify(value ?? null)));
+    if (!savedPlan || !Array.isArray(savedPlan.tasks)) return ["Saved plan checkpoint malformed."];
+    const repairs: CriterionTask[] = [];
+    for (const item of state.checkpoints.filter(item => item.kind === "verifier" && item.sequence > checkpoint.sequence)) {
+      const payload = JSON.parse(fs.readFileSync(path.join(runDir, `${item.id}-verifier.json`), "utf8")).payload;
+      if (!payload?.boundedRepair) continue;
+      const repair = payload.boundedRepair as CriterionTask;
+      if (item.outcome !== "fail" || item.missionHash !== state.mission.missionHash
+        || repair.id !== `repair-${repairs.length + 1}`
+        || normalized(repair.predictedWriteSet) !== normalized(savedPlan.predictedWriteSet)
+        || !repair.criteria?.length || repair.criteria.some(id => !state.mission.acceptanceCriteria.some(c => c.id === id))
+        || !state.approvedTaskIds.includes(repair.id)) return ["Saved plan bounded repair checkpoint invalid."];
+      repairs.push(repair);
+    }
+    const expected = { ...savedPlan, tasks: [...savedPlan.tasks, ...repairs] };
+    const repairLimit = Number(state.runtime?.params?.maxRetries ?? 2);
+    if (repairs.length && (state.runtime?.repairCount !== repairs.length || !Number.isSafeInteger(repairLimit)
+      || repairLimit < 0 || repairs.length > repairLimit)) return ["Saved plan repair allowance exceeded."];
+    if (normalized(expected) !== normalized(state.runtime?.plan)
+      || normalized(expected.tasks) !== normalized(state.tasks)) return ["Saved plan is inconsistent with runtime/checkpoint tasks."];
+    return [];
+  } catch { return ["Saved plan unreadable or malformed."]; }
 }
 
 /** Automatic approval is a fixed host decision, never a worker verdict or an inferred grant. */
 export function checkAutomaticPlanApproval(state: SupervisionRunState, options: { allowedWriteSet?: string[] }): { approved: boolean; reasons: string[] } {
-  const reasons: string[] = [];
+  const reasons: string[] = [...checkProtectedAreaForecast(state).reasons, ...checkSavedPlanConsistency(state)];
   if (!verifyFrozenMission(state.mission)) reasons.push("frozen mission invalid");
   if (!state.tasks.length) reasons.push("plan genuinely missing: no tasks");
   if (!options.allowedWriteSet?.length) reasons.push("approved scope missing");
@@ -2260,9 +2413,10 @@ export function checkAutomaticPlanApproval(state: SupervisionRunState, options: 
   else {
     try {
       const envelope = JSON.parse(fs.readFileSync(planPath, "utf8"));
-      const savedTasks = envelope.payload?.plan?.tasks ?? envelope.payload?.fullPlan;
-      if (!Array.isArray(savedTasks) || !savedTasks.length || savedTasks.length !== state.tasks.length
-        || savedTasks.some((task: any, index: number) => task?.id !== state.tasks[index]?.id || task?.description !== state.tasks[index]?.description)) reasons.push("saved plan missing or inconsistent with checkpoint tasks");
+      // A caller ceiling does not erase a planner's out-of-scope declaration.
+      const declaredScope = envelope.payload?.declaredPlan?.predictedWriteSet;
+      if (Array.isArray(declaredScope)) reasons.push(...checkLanePaths({ lane: "product", cwd: state.mission.cwd,
+        worktree: state.mission.worktree, paths: declaredScope, allowedWriteSet: options.allowedWriteSet }).map(item => item.message));
     } catch { reasons.push("saved plan unreadable: automatic approval refused"); }
   }
   const knownCriteria = new Set(state.mission.acceptanceCriteria.map(item => item.id));
@@ -2272,7 +2426,8 @@ export function checkAutomaticPlanApproval(state: SupervisionRunState, options: 
     for (const candidate of task.predictedWriteSet ?? []) {
       // Broad patterns cannot prove that protected code is excluded. Human approval remains available.
       if (/[*?\[\]]|[\\/]$/.test(candidate)) reasons.push(`${candidate}: scope cannot be proven for a wildcard or directory`);
-      if (/(?:native|audio|device|alloc|(?:^|[\\/])stop(?:[.\\/]|$)|a[-_/]?b[-_/]?swap|profiles|saved[-_]?state|package[-_]?stores)/i.test(candidate)) reasons.push(`${candidate}: protected code or owner data`);
+      // Protected changes use the explicit forecast and recorded grants above;
+      // ordinary TypeScript clients are not protected by an audio/device name.
     }
     const violations = checkLanePaths({ lane: "product", cwd: state.mission.cwd, worktree: state.mission.worktree,
       paths: task.predictedWriteSet ?? [], allowedWriteSet: options.allowedWriteSet });
@@ -2314,13 +2469,15 @@ export function buildInspectionSnapshot(
         ...(Array.isArray(payload?.findings) ? { findings: payload.findings.slice(0, 12) } : {})};
     } catch { settledResult = {outcome: resultCheckpoint.outcome, text: "Saved result unavailable; inspect the referenced file.", omitted: true}; }
   }
-  const awaitingApproval = allowedNextActions(state).includes("continue");
+  const { allowedNextActions, actionRefusals } = liveStatus.lifecycle;
+  const awaitingApproval = allowedNextActions.includes("continue");
   return structuredClone({
     planSummary: { tasks: state.tasks.slice(0, 24).map(task => ({...task, description: task.description.slice(0, 600), acceptanceCriteria: state.mission.acceptanceCriteria.filter(item => task.criteria.includes(item.id))})), omittedTasks: Math.max(0, state.tasks.length - 24), declaredScope },
     savedArtifacts: {state: path.join(runDir, "supervision.json"), plan: artifact(planCheckpoint), result: artifact(resultCheckpoint), checkpoint: artifact(lastCheckpoint)},
     checkpointState: { kind: lastCheckpoint?.kind, awaitingApproval, approvalOutstanding: Boolean(state.currentApproval && !state.currentApproval.consumedAt && !state.currentApproval.invalidatedAt), freshApprovalAvailable: awaitingApproval && Boolean(lastCheckpoint) },
     settledResult,
     automaticPlanApprovals: state.automaticPlanApprovals ?? [],
+    protectedAreaDecision: state.protectedAreaDecision ?? checkProtectedAreaForecast(state),
     runId: state.runId,
     status: state.status,
     missionHash: state.mission.missionHash,
@@ -2345,7 +2502,7 @@ export function buildInspectionSnapshot(
     verifierBatches: state.runtime?.kind === "generic-shape" ? state.runtime.verifierBatches ?? [] : [],
     ...(state.retirement ? { retirement: state.retirement } : {}),
     drift: options.drift ?? [],
-    allowedNextActions: allowedNextActions(state),
+    allowedNextActions, actionRefusals, terminalOutcome: state.terminalOutcome,
     liveStatus,
   });
 }
@@ -2649,6 +2806,11 @@ export class SupervisionStateStore {
     return paused;
   }
 
+  /** Intentionally unavailable in round9, including direct store callers. */
+  adoptDeadHost(_hostInstanceId: string, _options: { observeProcess?: ProcessIdentityObserver; now?: Date } = {}): SupervisionRunState {
+    throw new Error("ADOPT_REFUSED: dead-host takeover deferred to round10");
+  }
+
   /**
    * Retire an already-paused orphan without signalling any process. Eligibility
    * is checked once for discovery and again under an exclusive mutation fence;
@@ -2662,7 +2824,7 @@ export class SupervisionStateStore {
     const initial = assessPausedRunRetirement(this.readPersistedState(), this.runDir, observeProcess);
     if (!initial.eligible) return { retired: false, assessment: initial };
 
-    const lockFile = `${this.stateFile}.retirement.lock`;
+    const lockFile = `${this.stateFile}.approval.lock`;
     let descriptor: number | undefined;
     try {
       descriptor = fs.openSync(lockFile, "wx", 0o600);
@@ -2707,8 +2869,10 @@ export class SupervisionStateStore {
       }
       throw error;
     } finally {
-      if (descriptor !== undefined) fs.closeSync(descriptor);
-      try { fs.unlinkSync(lockFile); } catch {}
+      if (descriptor !== undefined) {
+        fs.closeSync(descriptor);
+        try { fs.unlinkSync(lockFile); } catch {}
+      }
     }
   }
 
@@ -2717,7 +2881,7 @@ export class SupervisionStateStore {
    * acceptance. Historical verifier payloads remain byte-identical; the new
    * acceptance checkpoint references rather than replaces them.
    */
-  acceptWithReason(token: string, reasonValue: unknown, hostInstanceId: string, now = new Date()): SupervisionRunState {
+  acceptWithReason(token: string, reasonValue: unknown, hostInstanceId: string, now = new Date(), options: { observeProcess?: ProcessIdentityObserver } = {}): SupervisionRunState {
     const reason = normalizeSupervisorAcceptanceReason(reasonValue);
     assertNonEmptyString(hostInstanceId, "hostInstanceId");
     const lockFile = `${this.stateFile}.approval.lock`;
@@ -2725,7 +2889,8 @@ export class SupervisionStateStore {
     try {
       descriptor = fs.openSync(lockFile, "wx", 0o600);
       const latest = this.loadReadOnly();
-      const ineligible = supervisorAcceptanceIneligibility(latest);
+      this.assertApprovalAuthority(latest, hostInstanceId, options);
+      const ineligible = supervisorAcceptanceIneligibility(latest, this.runDir, options.observeProcess);
       if (ineligible) throw new Error(`Supervisor accept-with-reason refused: ${ineligible}.`);
       const acceptedCheckpoint = latest.checkpoints[latest.checkpoints.length - 1];
       const payloadFile = path.join(this.runDir, `${acceptedCheckpoint.id}-${acceptedCheckpoint.kind}.json`);
@@ -2791,8 +2956,10 @@ export class SupervisionStateStore {
       if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("Approval is already being consumed by another continuation.");
       throw error;
     } finally {
-      if (descriptor !== undefined) fs.closeSync(descriptor);
-      try { fs.unlinkSync(lockFile); } catch {}
+      if (descriptor !== undefined) {
+        fs.closeSync(descriptor);
+        try { fs.unlinkSync(lockFile); } catch {}
+      }
     }
   }
 
@@ -2805,6 +2972,8 @@ export class SupervisionStateStore {
     token: string,
     expected: ApprovalBinding,
     now = new Date(),
+    hostInstanceId = `${process.pid}:${Math.round(performance.timeOrigin)}`,
+    options: { observeProcess?: ProcessIdentityObserver } = {},
   ): { state: SupervisionRunState; approvalConsumption: ApprovalConsumptionMetadata } {
     const lockFile = `${this.stateFile}.approval.lock`;
     let descriptor: number | undefined;
@@ -2812,6 +2981,14 @@ export class SupervisionStateStore {
       descriptor = fs.openSync(lockFile, "wx", 0o600);
       const latest = this.loadReadOnly();
       if (!latest.currentApproval) throw new Error("No approval is outstanding for this checkpoint.");
+      this.assertApprovalAuthority(latest, hostInstanceId, options);
+      if (!verifyFrozenMission(latest.mission)) throw new Error("Frozen mission/grants changed before dispatch.");
+      if (latest.runtime?.kind === "generic-shape" && latest.runtime.cursor.stage === "executor-task") {
+        const protectedDecision = checkProtectedAreaForecast(latest);
+        if (!protectedDecision.approved) throw new Error(`Protected permission refused before dispatch: ${protectedDecision.reasons.join("; ")}`);
+        const planIssues = checkSavedPlanConsistency(latest, this.runDir);
+        if (planIssues.length) throw new Error(planIssues.join("; "));
+      }
       const consumed = consumeApprovalToken(latest.currentApproval, token, expected, now);
       const approvalConsumption = createApprovalConsumptionMetadata(consumed);
       const next = { ...latest, currentApproval: consumed };
@@ -2821,9 +2998,47 @@ export class SupervisionStateStore {
       if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("Approval is already being consumed by another continuation.");
       throw error;
     } finally {
-      if (descriptor !== undefined) fs.closeSync(descriptor);
-      try { fs.unlinkSync(lockFile); } catch {}
+      if (descriptor !== undefined) {
+        fs.closeSync(descriptor);
+        try { fs.unlinkSync(lockFile); } catch {}
+      }
     }
+  }
+
+  /** Read-only authority check used before any public lifecycle mutation. */
+  assertLifecycleAuthority(hostInstanceId: string, options: { observeProcess?: ProcessIdentityObserver } = {}): void {
+    const reason = lifecycleAuthorityIneligibility(this.readPersistedState(), this.runDir, hostInstanceId, options.observeProcess);
+    if (reason) throw new Error(`LIFECYCLE_REFUSED: ${reason}`);
+  }
+
+  private settlementBinding(): string {
+    const names = fs.readdirSync(this.runDir).filter(name => name === "state.json" || name === "spawn-budget.json" || /^infrastructure-.*\.retry\.json(?:\.route|\.lock)?$/i.test(name) || /^phase-.*\.result\.json$/i.test(name) || /^checkpoint-.*\.json$/i.test(name) || /^survivor-.*\.json$/i.test(name)).sort();
+    const { currentApproval: _approval, updatedAt: _updatedAt, ...authority } = this.readPersistedState();
+    return sha256Canonical([authority, names.map(name => [name, fs.readFileSync(path.join(this.runDir, name), "utf8")])]);
+  }
+
+  issueCheckpointApproval(state: SupervisionRunState, hostInstanceId: string, options: { observeProcess?: ProcessIdentityObserver } = {}): { state: SupervisionRunState; token: string } {
+    const lockFile = `${this.stateFile}.approval.lock`;
+    let fd: number | undefined;
+    try {
+      fd = fs.openSync(lockFile, "wx", 0o600);
+      const latest = this.readPersistedState();
+      if (canonicalJson(latest) !== canonicalJson(JSON.parse(JSON.stringify(state)))) throw new Error("LIFECYCLE_REFUSED: state changed before approval issuance");
+      this.assertLifecycleAuthority(hostInstanceId, options);
+      const checkpoint = latest.checkpoints.at(-1);
+      if (!checkpoint) throw new Error("Cannot approve a run without a durable checkpoint.");
+      const issued = issueApprovalToken({ runId: latest.runId, missionHash: latest.mission.missionHash, checkpointId: checkpoint.id, action: "continue" });
+      issued.record.hostInstanceId = hostInstanceId;
+      issued.record.settlementBinding = this.settlementBinding();
+      const next = { ...latest, currentApproval: issued.record };
+      this.save(next);
+      return { state: next, token: issued.token };
+    } finally { if (fd !== undefined) { fs.closeSync(fd); fs.unlinkSync(lockFile); } }
+  }
+
+  private assertApprovalAuthority(state: SupervisionRunState, hostInstanceId: string, options: { observeProcess?: ProcessIdentityObserver } = {}): void {
+    this.assertLifecycleAuthority(hostInstanceId, options);
+    if (state.currentApproval?.hostInstanceId !== hostInstanceId || state.currentApproval?.settlementBinding !== this.settlementBinding()) throw new Error("LIFECYCLE_REFUSED: ownership or settlement changed since approval issuance");
   }
 
   /** Compatibility wrapper for callers that do not need dispatch evidence. */

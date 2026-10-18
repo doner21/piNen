@@ -3,6 +3,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { spawn, spawnSync, type SpawnOptions } from "node:child_process";
 import { createHash } from "node:crypto";
+import { sanitizeWorkerText, sanitizeWorkerValue, WorkerProtocolSanitizer } from "./streaming-redactor.cjs";
 import { createInterface } from "node:readline";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
@@ -31,7 +32,7 @@ import { buildRecoveryMetadata } from "./executor-recovery/metadata";
 import { createRoleRecoveryRequest, runRoleWithRecovery, observeRoleReadOnlyLaunch, isRoleContextExhaustion, isRoleRecoveryHandoff, RoleContextExhaustionError, type RoleRecoveryEvidence, type RoleRecoveryStage } from "./role-recovery";
 import { CommandTimesCollector, mergeCommandTimes, commandTimesFromHostResults, formatCommandTimes, summarizeCommandTimes, type CommandTimes, type CommandTimingContext, type CommandTimingClocks } from "./command-times";
 import { getCommandTimesForRun } from "./substrate";
-import { RunStateStore, collectSurvivorResult, phaseLogPathFor, phaseResultPathFor, runsRootDir, type LoadedRunState, type TerminalNoRetryState } from "./run-state";
+import { RunStateStore, collectSurvivorResult, phaseLogPathFor, phaseResultPathFor, runsRootDir, runDirFor, atomicWriteJsonSync, type LoadedRunState, type TerminalNoRetryState } from "./run-state";
 import {
   parseWriteSetInput,
   planEntriesOutsideContract,
@@ -53,6 +54,8 @@ import {
   SupervisionStateStore,
   buildInspectionSnapshot,
   checkAutomaticPlanApproval,
+  checkProtectedAreaForecast,
+  decideProtectedAreaPermission,
   checkLanePaths,
   partitionLaneViolations,
   classifyInfrastructureFailure,
@@ -67,7 +70,6 @@ import {
   evaluateNumericAcceptanceGates,
   numericTargetCoverageIssues,
   restartToPaused,
-  issueApprovalToken,
   resolveShapeDispatch,
   transitionSupervisionState,
   hasBlockingVerificationIssues,
@@ -191,6 +193,11 @@ import {
   ActionEvidenceCollector,
   SubagentDetachedError,
   SubagentTerminalAmbiguousError,
+  SubagentInfrastructureError,
+  retryInfrastructureSubagent,
+  sanitizeSubagentResult,
+  isNoToolInfrastructureFailure,
+  isInfrastructureFailure,
   ProviderRefusalError,
   READ_ONLY_EVIDENCE_TOOLS,
   VERIFIER_EVIDENCE_TOOLS,
@@ -312,9 +319,11 @@ interface PlanTask {
   dependsOn: string[];
   /** Planner-declared: false = validation/audit task that legitimately changes no files; true = implementation task. */
   expectsFileChange?: boolean;
+  predictedWriteSet?: string[];
 }
 
 interface Plan {
+  protectedAreasNeeded?: string[];
   tasks: PlanTask[];
   notes: string;
   raw?: unknown;
@@ -336,6 +345,8 @@ interface PlannerPathReferenceAdvisory {
 }
 
 interface SubagentResult {
+  processTree?: ProcessTreeInventory;
+  processTrees?: ProcessTreeInventory[];
   agentName: string;
   task: string;
   text: string;
@@ -363,6 +374,9 @@ interface SubagentResult {
   providerRefusal?: ProviderRefusalInfo;
 }
 
+import { readRunProcessTrees, assessResultProcessTrees, RetryCleanupError, type ProcessTreeInventory } from "./process-generation";
+import { reserveRunSpawn, readRunSpawnCount } from "./spawn-budget";
+
 interface ResolvedPiCommand {
   command: string;
   argsPrefix: string[];
@@ -372,6 +386,8 @@ interface ResolvedPiCommand {
 }
 
 interface ExecutorOutput {
+  processTree?: ProcessTreeInventory;
+  processTrees?: ProcessTreeInventory[];
   taskId: string;
   description: string;
   agentName: string;
@@ -536,6 +552,9 @@ interface NormalizedParams {
   predictedWriteSet?: string[];
   /** Canonical external directories available for read/evidence evaluation only, never writes. */
   externalEvidenceRoots?: string[];
+  /** Exact admission forecast and coordinator-recorded owner grants, never planner grants. */
+  protectedAreasNeeded?: string[];
+  protectedAreaGrants?: string[];
   /** Optional criterion-bound gates read and evaluated by the host at verification. */
   numericAcceptanceGates?: Array<NumericAcceptanceGate & { criterionId: string }>;
   /** Run intake + planning only; spawn no executors/verifiers; return the discovery manifest. */
@@ -686,6 +705,8 @@ const orchestrateParamsSchema = Type.Object({
   paradigm: Type.Optional(Type.String({ description: `Explicitly select an orchestration paradigm/shape. Built-ins: ${ORCHESTRATION_PARADIGM_NAMES.join(", ")}. A safe kebab-case declarative workflow name discovered from a trusted user/project workflow root is also accepted immediately, without reload. When omitted, a built-in paradigm is inferred from task keywords.` })),
   hardGates: Type.Optional(Type.String({ description: 'Hard-gate mode: "strict" | "advisory" | "off". Default "advisory": text-shape heuristics are demoted to warnings, the verifier verdict gates, and only effect-based contradictions (zero observed mutations for implementation work) can force FAIL.' })),
   preflight: Type.Optional(Type.Boolean({ description: "Run a 1-token provider health ping for each routed provider/model before spawning any subagent (default true). Failures produce a structured machine-readable error and a partial report." })),
+  protectedAreasNeeded: Type.Optional(Type.Array(Type.String(), { description: "Explicit forecast for deterministic host-generated plans; [] means none. Never grants permission." })),
+  protectedAreaGrants: Type.Optional(Type.Array(Type.String(), { description: "Named owner grants recorded at admission only. Planner text never grants permission." })),
   automaticPlanApproval: Type.Optional(Type.Boolean({ description: "Explicit launch opt-in, default false: automatically approve only an intact initial plan after fixed host in-scope and protected-area checks. Approval is recorded; exceptions remain with the supervisor." })),
   noForceKill: Type.Optional(Type.Boolean({ description: "Opt in to a frozen per-mission worker guard that rejects every bash argument object owning a timeout key whose value is not null before command dispatch (a timeout key that is absent, or present and null, is allowed). Ordinary missions default false." })),
   predictedWriteSet: Type.Optional(Type.String({ description: 'Contract-granted predicted write set: comma- or newline-separated repo-relative paths ("docs/a.md"), directory prefixes ("docs/"), or simple globs ("tools/*.mjs"). When set, per-task worktree deltas are checked deterministically after execution — any file mutated outside the set forces FAIL with WRITE_SET_VIOLATION naming the file, before verifier spawn. A plan whose predicted_write_set exceeds this scope fails before any executor spawns.' })),
@@ -968,6 +989,7 @@ export default function (pi: ExtensionAPI) {
     settlementControl?: SupervisedSettlementControl,
   ) {
     const action = (typeof params.action === "string" ? params.action : "run") as SupervisionAction;
+    if (String(action) === "adopt") throw new Error("ADOPT_REFUSED: dead-host takeover deferred to round10");
     if (action !== "run") return runVisibleMainLifecycle(params, action, signal, onUpdate, ctx, undefined, settlementControl);
 
     // Resume dispatch (ABORT-RESUME-DESIGN.md): reload the stored run state
@@ -978,6 +1000,15 @@ export default function (pi: ExtensionAPI) {
     if (resumeId) {
       resumeState = RunStateStore.load(resumeId);
       const { resume: _resume, ...overrides } = params;
+      const frozenGrants = resumeState.state.params.protectedAreaGrants ?? [];
+      if (overrides.protectedAreaGrants !== undefined && JSON.stringify(overrides.protectedAreaGrants) !== JSON.stringify(frozenGrants)) {
+        throw new Error(`Protected permission admission grants changed on resume ${resumeId}.`);
+      }
+      const frozenNeeds = parseProtectedAreaForecast(resumeState.state.params, true);
+      if (["protected_areas_needed", "protectedAreasNeeded", "protected areas needed"].some(key => Object.prototype.hasOwnProperty.call(overrides, key))
+        && JSON.stringify(parseProtectedAreaForecast(overrides)) !== JSON.stringify(frozenNeeds)) {
+        throw new Error(`Protected permission admission forecast changed on resume ${resumeId}.`);
+      }
       // Review 28 finding 1 of 2 (legacy plan-execute-verify persists
       // NormalizedParams, which never carries a top-level `noForceKill`
       // field -- only the nested `workerExecutionConstraints.noForceKill`
@@ -1228,7 +1259,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("orchestrate", {
-    description: "Run or supervise deterministic orchestration. Forms: run|inspect|continue|accept|pause|cancel; accept requires --reason and --approval-token. Other flags: --action, --run-id, --supervision visible-main|off, --adaptive-supervision off|shadow-v1|enforce-canary-v1|adaptive-v1, --lane product|orchestrator-maintenance, --external-evidence-roots, --no-force-kill; legacy --resume remains distinct.",
+    description: "Run or supervise deterministic orchestration. Forms: run|inspect|continue|accept|pause|cancel; dead-host takeover is deferred to round10; accept requires --reason and --approval-token. Other flags: --action, --run-id, --supervision visible-main|off, --adaptive-supervision off|shadow-v1|enforce-canary-v1|adaptive-v1, --lane product|orchestrator-maintenance, --external-evidence-roots, --no-force-kill; legacy --resume remains distinct.",
     handler: async (args, ctx) => {
       let commandParams: Record<string, unknown>;
       try {
@@ -1448,7 +1479,7 @@ function compactSupervisionMarkdown(
     ...(snapshot.planSummary ? [
     `Saved plan: ${snapshot.savedArtifacts.plan ?? "genuinely missing"}`,
     `Planner-declared scope: ${snapshot.planSummary.declaredScope?.join(", ") || "not supplied (see saved plan)"}`,
-    `Saved result: ${snapshot.savedArtifacts.result ?? "not started yet"}`,
+    `Saved result: ${snapshot.savedArtifacts.result ?? (snapshot.infrastructureFailures.length || state.currentTaskId ? "execution recorded; no settled result" : "not started yet")}`,
     `Full details: ${snapshot.savedArtifacts.state}; checkpoint=${snapshot.savedArtifacts.checkpoint ?? "none"}`,
     `Approval: awaiting=${snapshot.checkpointState.awaitingApproval}; outstanding=${snapshot.checkpointState.approvalOutstanding}; fresh available=${snapshot.checkpointState.freshApprovalAvailable}. Request a fresh approval with continue without a token, then consume it.`,
     `Phase manifest: ${snapshot.liveStatus.manifestState}`,
@@ -1459,6 +1490,8 @@ function compactSupervisionMarkdown(
     ...(state.pauseReason ? [`Reason: ${state.pauseReason}`] : []),
     `Criteria: completed=${snapshot.completedCriteria.join(", ") || "none"}; remaining=${snapshot.remainingCriteria.join(", ") || "none"}`,
     `Legal actions: ${snapshot.allowedNextActions.join(", ")}`,
+    ...Object.entries(snapshot.actionRefusals).map(([action, reason]) => `${action} refused: ${reason}`),
+    `Current cleanup: ${snapshot.liveStatus.processTrees.status}; durable outcome: ${state.terminalOutcome ?? state.status}. SDK settlement alone is not completion.`,
   ];
   if (state.acceptance) lines.push(`Accepted reason: ${state.acceptance.reason}`);
   if (state.retirement) lines.push(`Retirement reason: ${state.retirement.reason}`);
@@ -1484,7 +1517,9 @@ function compactSupervisionMarkdown(
   } else if (state.status === "paused") {
     lines.push("Paused: no worker will spawn until a fresh visible-main approval is issued and consumed.");
   } else if (state.status === "blocked_infrastructure") {
-    lines.push("Blocked infrastructure: product execution is stopped; inspect the infrastructure failure, then pause or cancel. Do not synthesize an orchestrator repair inside this product run.");
+    lines.push(snapshot.allowedNextActions.includes("continue")
+      ? "Blocked infrastructure: eligible same-owner continue obtains fresh authority, then independently proves restoration on the same route before the once-only retry. A changed login file alone is not proof. No completed writer replay."
+      : "Blocked infrastructure: execution stopped; inspect refusal reasons. Only eligible same-owner restored retry may resume; dead-host takeover is deferred to round10; otherwise pause or cancel.");
   } else if (state.status === "cancelled") {
     lines.push("Cancelled is irreversible; inspection remains read-only.");
   }
@@ -1520,7 +1555,7 @@ function lifecycleResult(state: SupervisionRunState, token?: string, extra: Reco
 
 function lifecycleState(params: NormalizedParams, runId: string): OrchestrationState {
   return {
-    attempt: 1, spawnedCount: 0, plan: null, planText: "", executorOutputs: [], verifierResult: null,
+    attempt: 1, spawnedCount: readRunSpawnCount(runDirFor(runId)), plan: null, planText: "", executorOutputs: [], verifierResult: null,
     failureReasons: [], finalResult: "", progressLog: [], intake: null, routingCheck: null, runId,
     gateWarnings: [], taskLedger: new Map(), commitEvidence: [], attempts: [], recoveryLog: [], recoveryDepth: 0, maxRecoveryDepth: 0,
   };
@@ -1639,12 +1674,7 @@ function executorOwnsCommit(task: CriterionTask, originalTask: string, outputTex
 }
 
 function issueCheckpointApproval(store: SupervisionStateStore, state: SupervisionRunState): { state: SupervisionRunState; token: string } {
-  const checkpoint = state.checkpoints[state.checkpoints.length - 1];
-  if (!checkpoint) throw new Error("Cannot approve a run without a durable checkpoint.");
-  const issued = issueApprovalToken({ runId: state.runId, missionHash: state.mission.missionHash, checkpointId: checkpoint.id, action: "continue" });
-  const next = { ...state, currentApproval: issued.record };
-  store.save(next);
-  return { state: next, token: issued.token };
+  return store.issueCheckpointApproval(state, SUPERVISION_HOST_INSTANCE);
 }
 
 interface VisibleMainDispatchContext {
@@ -2043,6 +2073,8 @@ function commandUnavailableError(message: string): Error & { code: "command_unav
 
 function executorOutputFromSupervisedResult(task: PlanTask, result: SubagentResult): ExecutorOutput {
   return {
+    processTree: result.processTree,
+    processTrees: result.processTrees,
     taskId: task.id,
     description: task.description,
     agentName: result.agentName,
@@ -2664,8 +2696,9 @@ async function runAdaptiveEnforceCanaryVisibleMain(
       ...numericCoverageIssues,
     ];
     const failedFindings = [...findings.filter((finding) => finding.status === "fail"), ...numericGateFindings.filter((finding) => finding.status === "fail")];
-    terminalVerificationEvidence = { verifier, findings, numericGateFindings, numericCoverageIssues, verificationIssues };
-    if (verifierParsed.status !== "pass" || hasBlockingVerificationIssues(verificationIssues) || failedFindings.length) {
+    const processTrees = readRunProcessTrees(store.runDir);
+    terminalVerificationEvidence = { verifier, findings, numericGateFindings, numericCoverageIssues, verificationIssues, processTrees };
+    if (processTrees.status !== "clean" || verifierParsed.status !== "pass" || hasBlockingVerificationIssues(verificationIssues) || failedFindings.length) {
       throw new Error(`ADAPTIVE_CANARY_STRICT_ACCEPTANCE_FAILED: ${verificationIssues.map((item) => item.message).join("; ")}`);
     }
     if (numericCoverageIssues.length > 0) {
@@ -3049,6 +3082,8 @@ async function executeOneSupervisedTask(
       toolCalls: output.toolCalls,
       actionEvidence: output.actionEvidence,
       commandTimes: output.commandTimes,
+      processTree: output.processTree,
+      processTrees: output.processTrees,
       provider: output.provider,
       model: output.model,
     });
@@ -3155,6 +3190,7 @@ async function runVisibleMainLifecycle(
       };
     }
     if (state.status === "cancelled" || state.status === "terminal") throw new Error(`Run ${runId} is irreversible in status ${state.status}.`);
+    if (action === "continue" || action === "accept") store.assertLifecycleAuthority(SUPERVISION_HOST_INSTANCE);
     // Migration is pure during inspect. A requested state-changing lifecycle
     // action is the first authorized boundary at which the generic projection
     // may replace the old runtime atomically.
@@ -3185,6 +3221,21 @@ async function runVisibleMainLifecycle(
       return lifecycleResult(approved.state, approved.token);
     }
     if (action !== "continue") throw new Error(`Unsupported supervision action: ${action}`);
+    if (state.status === "blocked_infrastructure" && ["worker_infrastructure", "retry_cleanup"].includes(state.audit.infrastructureFailures.at(-1)?.code ?? "")
+      && state.audit.infrastructureFailures.at(-1)?.retryAllowed === true) {
+      // A normal fresh checkpoint approval re-enters the SAME phase. The shared
+      // durable retry claim, not approval or a changed auth file, owns dispatch.
+      state = transitionSupervisionState(state, "paused");
+      state.pauseReason = state.audit.infrastructureFailures.at(-1)?.code === "retry_cleanup"
+        ? "pending_retry_requires_independently_clean_predecessors" : "isolated_restoration_requires_independent_probe";
+      store.save(state);
+    }
+    state.protectedAreaDecision = checkProtectedAreaForecast(state);
+    if (!state.protectedAreaDecision.approved && state.runtime?.kind === "generic-shape" && state.runtime.cursor.stage === "executor-task") {
+      state.pauseReason = state.protectedAreaDecision.reasons.join("; ");
+      store.save(state);
+      return lifecycleResult(state, undefined, { protectedAreaDecision: state.protectedAreaDecision });
+    }
     if ((!raw.approvalToken || typeof raw.approvalToken !== "string") && ["plan_checkpoint", "awaiting_supervisor"].includes(state.status)) {
       const approved = issueCheckpointApproval(store, state);
       return lifecycleResult(approved.state, approved.token);
@@ -3230,15 +3281,16 @@ async function runVisibleMainLifecycle(
 
     const params = normalizeParams(runtime.params, state.mission.cwd);
     params.workerExecutionConstraints = JSON.parse(JSON.stringify(state.mission.workerExecutionConstraints ?? { noForceKill: false }));
+    params.protectedAreaGrants = [...(state.mission.protectedAreaGrants ?? [])]; // never restore grants from mutable runtime params
     const agents = await loadAgents();
     resolveConfiguredRoleDefaults(params, agents);
     const internal = lifecycleState(params, runId);
     internal.intake = runtime.intake as Intake;
-    const plan: Plan = { tasks: runtime.plan.tasks.map((task) => ({ id: task.id, description: task.description, dependsOn: task.dependsOn, ...(task.expectsFileChange === undefined ? {} : { expectsFileChange: task.expectsFileChange }) })), notes: runtime.plan.notes, predictedWriteSet: runtime.plan.predictedWriteSet, externalEvidenceRoots: runtime.plan.externalEvidenceRoots };
+    const plan: Plan = { tasks: runtime.plan.tasks.map((task) => ({ id: task.id, description: task.description, dependsOn: task.dependsOn, ...(task.expectsFileChange === undefined ? {} : { expectsFileChange: task.expectsFileChange }) })), notes: runtime.plan.notes, predictedWriteSet: runtime.plan.predictedWriteSet, externalEvidenceRoots: runtime.plan.externalEvidenceRoots, protectedAreasNeeded: runtime.plan.protectedAreasNeeded };
     internal.plan = plan;
     const completed = new Set(runtime.cursor.completedTaskIds);
     const legacyCompatibility = runtime.adapterState?.legacyPevMigration as { executorRespawnAllowed?: unknown; mode?: unknown } | undefined;
-    const executorRespawnAllowed = legacyCompatibility?.executorRespawnAllowed !== false;
+    const executorRespawnAllowed = legacyCompatibility?.executorRespawnAllowed !== false && !state.adoptions?.length;
     const nextTask = runtime.cursor.stage === "executor-task" ? state.tasks[runtime.cursor.nextTaskIndex] : undefined;
     if (nextTask && !executorRespawnAllowed) {
       throw new Error("LEGACY_PEV_VERIFICATION_ONLY: compatibility state forbids historical executor respawn.");
@@ -3407,8 +3459,17 @@ async function runVisibleMainLifecycle(
           return lifecycleResult(state, undefined, { executor: output, settledBeforePause: true });
         }
         if (params.adaptiveSupervision !== "adaptive-v1" || nextTaskIndex < state.tasks.length) {
-          const approved = issueCheckpointApproval(store, state);
-          return lifecycleResult(approved.state, approved.token, { executor: output });
+          try {
+            const approved = issueCheckpointApproval(store, state);
+            return lifecycleResult(approved.state, approved.token, { executor: output });
+          } catch (error) {
+            // Settlement was durably published above. A refused ownership or
+            // cleanup fence withholds authority; it is not another worker
+            // failure and must not unwind/overwrite the settled checkpoint.
+            // Explicit continue still refuses, including under its lock.
+            if (!(error instanceof Error) || !error.message.startsWith("LIFECYCLE_REFUSED:")) throw error;
+            return lifecycleResult(store.loadReadOnly(), undefined, { executor: output });
+          }
         }
         emit("Adaptive Supervision v1: real strategy execution settled; continuing directly to strict frozen acceptance without a second approval.");
       }
@@ -3467,7 +3528,8 @@ async function runVisibleMainLifecycle(
           const prompt = verifierCount > 1
             ? `${verificationPrompt}\n\nVerifier instance ${verifierIndex + 1}/${verifierCount}: verify independently. The host will aggregate only after every sibling settles, and any FAIL makes the batch FAIL.`
             : verificationPrompt;
-          const verifier = await spawnChecked(internal, params, agents, params.verifierAgent, prompt, workerSignal, emit, undefined, verifierRoute, undefined, false, true);
+          const verifier = await spawnChecked(internal, params, agents, params.verifierAgent, prompt, workerSignal, emit, undefined, verifierRoute, undefined, false, true, undefined,
+            JSON.stringify(["visible-main-verifier", state.runId, runtime.repairCount, verifierIndex]));
           const completedAt = new Date().toISOString();
           const completedSequence = ++verifierEventSequence;
           const parsing = normalizeVisibleMainVerifierResponse(
@@ -3560,7 +3622,9 @@ async function runVisibleMainLifecycle(
       const aggregationStartedSequence = ++verifierEventSequence;
       const numericGateFindings = evaluateNumericAcceptanceGates(state.mission);
       const numericCoverageIssues = numericTargetCoverageIssues(state.mission);
+      const processTrees = readRunProcessTrees(store.runDir);
       const pass = verifierBatchError === undefined
+        && processTrees.status === "clean"
         && !workspaceIntegrity.mutationDetected
         && verifierRuns.length === verifierCount
         && verifierRuns.every((run) => run.pass)
@@ -3642,26 +3706,31 @@ async function runVisibleMainLifecycle(
         : undefined;
       let verificationEvidence: Record<string, unknown> = {
         verifier, verifiers, findings, numericGateFindings, numericCoverageIssues, verifierFindings, verifierParsing, verificationIssues,
-        verificationBatch, routeObservations: allRouteObservations, routeAdvisories,
+        verificationBatch, processTrees, routeObservations: allRouteObservations, routeAdvisories,
         ...(recoveredVerifierSettlement ? { recoveredVerifierSettlement } : {}),
       };
       // Persist batch integrity before interpreting self-report. Any byte effect
       // is hostile and overrides semantic PASS, transport failure, or claimed
       // inability to run a command.
       store.save(state);
-      if (workspaceIntegrity.mutationDetected) {
-        const verifierMutation = { code: "verifier_mutation", reason: "verifier_mutation" } as const;
+      if (workspaceIntegrity.mutationDetected || processTrees.status !== "clean") {
+        const outcome = workspaceIntegrity.mutationDetected ? "verifier_mutation" : "worker_process_generation_not_clean";
+        const safetyFailure = workspaceIntegrity.mutationDetected
+          ? { verifierMutation: { code: outcome, reason: outcome } }
+          : { processGenerationFailure: { code: outcome, reasons: processTrees.reasons } };
+        // Cleanup uncertainty cannot launch a repair writer or be overridden by
+        // reviewer prose/accept-with-reason. Preserve the settled writer prefix.
         updateGenericCursor(state, { stage: "terminal", nextTaskIndex: state.tasks.length, currentTaskId: undefined });
         state = transitionSupervisionState(state, "terminal");
         state.terminalOutcome = "fail";
         state = store.appendCheckpoint(
           state,
-          { kind: "verifier", createdAt: new Date().toISOString(), missionHash: state.mission.missionHash, criteria: state.mission.acceptanceCriteria.map((criterion) => criterion.id), effectChanges: workspaceChanges, outcome: "verifier_mutation" },
-          { ...verificationEvidence, verifierMutation, cursor: runtime.cursor },
+          { kind: "verifier", createdAt: new Date().toISOString(), missionHash: state.mission.missionHash, criteria: state.mission.acceptanceCriteria.map((criterion) => criterion.id), effectChanges: workspaceChanges, outcome },
+          { ...verificationEvidence, ...safetyFailure, cursor: runtime.cursor },
         );
         updateGenericCursor(state, { lastCheckpointId: state.checkpoints[state.checkpoints.length - 1].id });
         store.save(state);
-        return lifecycleResult(state, undefined, { ...verificationEvidence, verifierMutation });
+        return lifecycleResult(state, undefined, { ...verificationEvidence, ...safetyFailure });
       }
       if (verifierBatchError !== undefined) throw verifierBatchError;
       const unavailable = verifierRuns.find((run) => run.parsing.commandUnavailable)?.parsing.commandUnavailable;
@@ -3762,6 +3831,7 @@ async function runVisibleMainLifecycle(
         return lifecycleResult(approved.state, approved.token, { ...verificationEvidence, routingOnlySettlement: settlement });
       }
       let repairPlanned = false;
+      let boundedRepair: CriterionTask | undefined;
       // Ambiguous old-schema states get exactly one bounded final-verification
       // opportunity. A failed verifier may not manufacture a repair executor
       // after migration declared historical replay unsafe.
@@ -3782,6 +3852,7 @@ async function runVisibleMainLifecycle(
           predictedWriteSet: runtime.plan.predictedWriteSet,
           ...((schemaOnlyFailure || routingOnlyFailure) ? { expectsFileChange: false } : {}),
         };
+        boundedRepair = repair;
         state.tasks.push(repair); state.approvedTaskIds.push(repairId); runtime.plan.tasks.push(repair);
         updateGenericCursor(state, { stage: "executor-task", nextTaskIndex: state.tasks.length - 1 });
       }
@@ -3804,13 +3875,13 @@ async function runVisibleMainLifecycle(
         updateGenericCursor(state, { stage: "terminal", nextTaskIndex: state.tasks.length });
         state = transitionSupervisionState(state, "terminal");
         state.terminalOutcome = "fail";
-        state = store.appendCheckpoint(state, { kind: "verifier", createdAt: new Date().toISOString(), missionHash: state.mission.missionHash, criteria: repairCriteria, effectChanges: [], outcome: "fail" }, { ...verificationEvidence, repairBudgetExhausted: true, cursor: runtime.cursor });
+        state = store.appendCheckpoint(state, { kind: "verifier", createdAt: new Date().toISOString(), missionHash: state.mission.missionHash, criteria: repairCriteria, effectChanges: [], outcome: "fail" }, { ...verificationEvidence, ...(state.adoptions?.length ? { repairBudgetExhausted: false, repairRefused: "review_only_adoption" } : { repairBudgetExhausted: true }), cursor: runtime.cursor });
         updateGenericCursor(state, { lastCheckpointId: state.checkpoints[state.checkpoints.length - 1].id });
         store.save(state);
         return lifecycleResult(state, undefined, verificationEvidence);
       }
       state = transitionSupervisionState(state, "awaiting_supervisor");
-      state = store.appendCheckpoint(state, { kind: "verifier", createdAt: new Date().toISOString(), missionHash: state.mission.missionHash, criteria: repairCriteria, effectChanges: [], outcome: "fail" }, { ...verificationEvidence, cursor: runtime.cursor });
+      state = store.appendCheckpoint(state, { kind: "verifier", createdAt: new Date().toISOString(), missionHash: state.mission.missionHash, criteria: repairCriteria, effectChanges: [], outcome: "fail" }, { ...verificationEvidence, boundedRepair, cursor: runtime.cursor });
       updateGenericCursor(state, { lastCheckpointId: state.checkpoints[state.checkpoints.length - 1].id });
       store.save(state);
       const approved = issueCheckpointApproval(store, state);
@@ -3967,6 +4038,7 @@ async function runVisibleMainLifecycle(
       { role: "executor", agentName: params.executorAgent, provider: executorRoute.provider ?? "default", model: executorRoute.model ?? "default" },
       { role: "verifier", agentName: params.verifierAgent, provider: verifierRoute.provider ?? "default", model: verifierRoute.model ?? "default" },
     ], constraints: intake.constraints, nonGoals: intake.nonGoals, acceptanceCriteria: criteria,
+    protectedAreaGrants: params.protectedAreaGrants ?? [],
     workerExecutionConstraints: params.workerExecutionConstraints,
     externalEvidenceRoots: params.externalEvidenceRoots ?? [],
     criteriaAuthority: {
@@ -3986,7 +4058,11 @@ async function runVisibleMainLifecycle(
   state.runtime = createGenericSupervisionRuntime({
     identity: dispatchContext.identity,
     cursor: createGenericSupervisionCursor(dispatchContext.identity, { stage: "plan" }),
-    params: JSON.parse(JSON.stringify({ ...raw, task: params.task, cwd, supervision: "visible-main", action: "run" })),
+    params: JSON.parse(JSON.stringify({ ...raw, task: params.task, cwd, supervision: "visible-main", action: "run", maxRetries: params.maxRetries,
+      plannerAgent: params.plannerAgent, plannerProvider: plannerRoute.provider, plannerModel: plannerRoute.model,
+      executorAgent: params.executorAgent, executorProvider: executorRoute.provider, executorModel: executorRoute.model,
+      verifierAgent: params.verifierAgent, verifierProvider: verifierRoute.provider, verifierModel: verifierRoute.model,
+    })), // persist resolved admission routes, not absent raw/default agent fields
     intake,
     plan: { tasks: [], notes: "planning", predictedWriteSet: params.predictedWriteSet, externalEvidenceRoots: params.externalEvidenceRoots },
     completedTaskIds: [],
@@ -4012,7 +4088,7 @@ async function runVisibleMainLifecycle(
     if (params.preflight) {
       preflightInProgress = true;
       await withWorkerExecutionConstraints(params.workerExecutionConstraints, () =>
-        withSubagentPhaseLogging(newRunId, () => runProviderPreflight(params, agents, undefined, signal, emit)));
+        withSubagentPhaseLogging(newRunId, () => runProviderPreflight(params, agents, undefined, signal, emit), () => params.maxSubagents, !params.maxSubagentsExplicit));
       preflightInProgress = false;
     }
     const internal = lifecycleState(params, newRunId); internal.intake = intake;
@@ -4027,7 +4103,8 @@ async function runVisibleMainLifecycle(
       tasks = deterministic.tasks;
       completedTaskIds = deterministic.completedTaskIds;
       adapterState = deterministic.adapterState;
-      parsedPlan = { tasks: tasks.map(({ id, description, dependsOn }) => ({ id, description, dependsOn })), notes: deterministic.notes, predictedWriteSet: params.predictedWriteSet, externalEvidenceRoots: params.externalEvidenceRoots };
+      parsedPlan = { tasks: tasks.map(({ id, description, dependsOn }) => ({ id, description, dependsOn })), notes: deterministic.notes, predictedWriteSet: params.predictedWriteSet, externalEvidenceRoots: params.externalEvidenceRoots,
+        protectedAreasNeeded: params.protectedAreasNeeded };
     } else {
       const adaptivePlanningRule = params.adaptiveSupervision === "enforce-canary-v1"
         ? "\nADAPTIVE ENFORCE CANARY: return exactly one bounded plan task. The same frozen task will undergo real A,A,model-B,B execution after the single initial visible-main approval.\n"
@@ -4037,6 +4114,7 @@ async function runVisibleMainLifecycle(
       const planner = await spawnChecked(internal, params, agents, params.plannerAgent, buildPlanningPrompt(intake, 1, [], [], params.predictedWriteSet, params.externalEvidenceRoots) + adaptivePlanningRule, signal, emit, undefined, toModelOverride(params.plannerModel, params.plannerProvider), undefined, false, false, "planner");
       plannerObservation = observedRouteFromResult("planner", planner);
       parsedPlan = parsePlan(planner.text, params.task);
+      if (parsedPlan.protectedAreasNeeded && params.protectedAreasNeeded) parsedPlan.protectedAreasNeeded = [...new Set([...params.protectedAreasNeeded, ...parsedPlan.protectedAreasNeeded])];
       parsedPlan.externalEvidenceRoots = validatePlannedExternalEvidenceRoots(parsedPlan.externalEvidenceRoots, mission);
       try {
         assertPlannerPreservesDeliverables(intake.deliverables, parsedPlan);
@@ -4060,7 +4138,7 @@ async function runVisibleMainLifecycle(
       if (parsedPlan.tasks.some((task) => task.expectsFileChange === true) && !scope?.length) {
         throw new Error("SUPERVISED_PLAN_REJECTED: implementation plan omitted a bounded predicted write set.");
       }
-      tasks = parsedPlan.tasks.map((task, index) => ({ ...task, criteria: [criteria[index % criteria.length].id], predictedWriteSet: scope }));
+      tasks = parsedPlan.tasks.map((task, index) => ({ ...task, criteria: [criteria[index % criteria.length].id], predictedWriteSet: task.predictedWriteSet ?? scope }));
       for (let index = 0; index < criteria.length; index += 1) if (!tasks.some((task) => task.criteria.includes(criteria[index].id))) tasks[index % tasks.length].criteria.push(criteria[index].id);
       completedTaskIds = [];
       adapterState = { classification: shapeRegistry.get(paradigm)?.execution?.classification ?? "executor-bearing" };
@@ -4082,7 +4160,11 @@ async function runVisibleMainLifecycle(
     const firstIncomplete = tasks.findIndex((task) => !completedTaskIds.includes(task.id));
     const nextTaskIndex = firstIncomplete < 0 ? tasks.length : firstIncomplete;
     const runtime = requireGenericRuntime(state);
-    runtime.plan = { tasks, notes: parsedPlan.notes, predictedWriteSet: scope, externalEvidenceRoots: params.externalEvidenceRoots, acceptanceCriteria: frozenProductCriteria };
+    const planPermission = decideProtectedAreaPermission({ needed: parsedPlan.protectedAreasNeeded, grants: mission.protectedAreaGrants,
+      paths: [...(scope ?? []), ...(parsedPlan.predictedWriteSet ?? []), ...tasks.flatMap(task => task.predictedWriteSet ?? [])],
+      descriptions: tasks.map(task => task.description), cwd });
+    runtime.plan = { tasks, notes: parsedPlan.notes, predictedWriteSet: scope, externalEvidenceRoots: params.externalEvidenceRoots, acceptanceCriteria: frozenProductCriteria,
+      protectedAreasNeeded: parsedPlan.protectedAreasNeeded ? planPermission.needed : undefined };
     runtime.adapterState = { ...adapterState, commandTimes: getCommandTimesForRun(state.runId) };
     const planRouteObservations = appendRouteObservations(runtime, [plannerObservation]);
     runtime.executorOutputs = dispatchContext.resumeState
@@ -4146,14 +4228,14 @@ async function runVisibleMainLifecycle(
           ? { kind: "host_numeric_gate", gate: criterion.numericGate }
           : { kind: "unavailable", ...criterion.numericEvaluationUnavailable },
       }));
+    state.protectedAreaDecision = checkProtectedAreaForecast(state);
+    if (!state.protectedAreaDecision.approved) state.pauseReason = state.protectedAreaDecision.reasons.join("; ");
     store.save(state);
     state = store.appendCheckpoint(state, { kind: "plan", createdAt: new Date().toISOString(), missionHash: mission.missionHash, criteria: criteria.map((criterion) => criterion.id), effectChanges: [], outcome: "plan_ready" }, { mission, intake, plan: runtime.plan, declaredPlan: { tasks: parsedPlan.tasks, predictedWriteSet: parsedPlan.predictedWriteSet, notes: parsedPlan.notes }, routes: mission.routes, routeObservations: planRouteObservations, plannerCriteriaAdvisories, plannerPathReferenceAdvisories, numericTargetCoverage, effectsBaseline: contentBaseline, protocol: runtime.identity, cursor: runtime.cursor });
     updateGenericCursor(state, { lastCheckpointId: state.checkpoints[state.checkpoints.length - 1].id });
     state = transitionSupervisionState(state, "awaiting_supervisor"); store.save(state);
     const automaticDecision = raw.automaticPlanApproval === true
-      ? checkAutomaticPlanApproval({ ...state, tasks: state.tasks.map(task => ({ ...task,
-          predictedWriteSet: parsedPlan.predictedWriteSet,
-        })) }, { allowedWriteSet: params.predictedWriteSet })
+      ? checkAutomaticPlanApproval(state, { allowedWriteSet: params.predictedWriteSet })
       : undefined;
     if (automaticDecision && !deterministic && (!parsedPlan.raw || typeof parsedPlan.raw !== "object")) {
       automaticDecision.approved = false;
@@ -4163,13 +4245,15 @@ async function runVisibleMainLifecycle(
       state.pauseReason = `automatic_plan_approval_refused: ${automaticDecision.reasons.join("; ")}`;
       store.save(state);
     }
-    const approved = issueCheckpointApproval(store, state);
     if (automaticDecision?.approved) {
-      approved.state.automaticPlanApprovals = [...(approved.state.automaticPlanApprovals ?? []), {
-        authority: "fixed-host-checks", checkpointId: approved.state.checkpoints.at(-1)!.id,
+      state.automaticPlanApprovals = [...(state.automaticPlanApprovals ?? []), {
+        authority: "fixed-host-checks", checkpointId: state.checkpoints.at(-1)!.id,
         approvedAt: new Date().toISOString(), scope: [...(params.predictedWriteSet ?? [])],
       }];
-      store.save(approved.state);
+      store.save(state);
+    }
+    const approved = issueCheckpointApproval(store, state);
+    if (automaticDecision?.approved) {
       return await runVisibleMainLifecycle({action: "continue", runId: state.runId, approvalToken: approved.token}, "continue", signal, onUpdate, ctx, dispatchContext, settlementControl);
     }
     return lifecycleResult(approved.state, approved.token, { plan: runtime.plan, protocol: runtime.identity, cursor: runtime.cursor, numericTargetCoverage, automaticPlanApproval: { enabled: raw.automaticPlanApproval === true, decision: automaticDecision }, audit: { missionHash: mission.missionHash, lane: mission.lane, routes: mission.routes } });
@@ -4218,6 +4302,7 @@ function extractProgressText(update: unknown): string {
 
 function parseOrchestrateCommandArgs(args: string): Record<string, unknown> {
   const tokens = splitCommandLine(args.trim());
+  if (tokens[0] === "adopt") throw new Error("ADOPT_REFUSED: dead-host takeover deferred to round10");
   const params: Record<string, unknown> = {};
   const taskParts: string[] = [];
   const lifecycleActions = new Set(["run", "inspect", "continue", "accept", "pause", "cancel"]);
@@ -4401,6 +4486,11 @@ function parseOrchestrateCommandArgs(args: string): Record<string, unknown> {
       case "verifierProvider":
         params.verifierProvider = value;
         break;
+      case "protectedAreasNeeded":
+      case "protectedAreaGrants":
+        try { params[normalized] = JSON.parse(value); }
+        catch { throw new Error(`--${flag} requires a JSON array of exact named needs/grants.`); }
+        break;
       case "automaticPlanApproval":
         if (value !== "on" && value !== "off") throw new Error("--automatic-plan-approval requires on or off");
         params.automaticPlanApproval = value === "on";
@@ -4446,7 +4536,7 @@ function parseOrchestrateCommandArgs(args: string): Record<string, unknown> {
         params.verifierFallbackProvider = value;
         break;
       default:
-        throw new Error(`Unknown flag --${flag}. Supported lifecycle flags: --action, --run/--inspect/--continue/--accept/--pause/--cancel, --run-id, --approval-token/--token, --reason, --supervision/--visible-main/--off, --adaptive-supervision off|shadow-v1|enforce-canary-v1|adaptive-v1, --lane/--product/--orchestrator-maintenance, and distinct legacy --resume. Existing run flags remain supported: --max-subagents, --max-retries, --concurrency, --executor-concurrency, --executor-count, --planner-count, --planner-concurrency, --verifier-count, --verifier-concurrency, --planner-agent, --executor-agent, --verifier-agent, --cwd, --allow-local-model, --paradigm, --hard-gates, --write-set, --external-evidence-roots, --numeric-gates JSON, --discovery-only, --no-force-kill, --preflight/--no-preflight, role model/provider flags, and role fallback flags.`);
+        throw new Error(`Unknown flag --${flag}. Supported lifecycle flags: --action, --run/--inspect/--continue/--accept/--pause/--cancel, --run-id, --approval-token/--token, --reason, --supervision/--visible-main/--off, --adaptive-supervision off|shadow-v1|enforce-canary-v1|adaptive-v1, --lane/--product/--orchestrator-maintenance, and distinct legacy --resume. Existing run flags remain supported: --max-subagents, --max-retries, --concurrency, --executor-concurrency, --executor-count, --planner-count, --planner-concurrency, --verifier-count, --verifier-concurrency, --planner-agent, --executor-agent, --verifier-agent, --cwd, --allow-local-model, --paradigm, --hard-gates, --write-set, --external-evidence-roots, --numeric-gates JSON, --discovery-only, --no-force-kill, --preflight/--no-preflight, role model/provider flags, --protected-areas-needed JSON, --protected-area-grants JSON, and role fallback flags.`);
     }
   }
 
@@ -4570,6 +4660,11 @@ function normalizeNumericAcceptanceGateBindings(value: unknown): Array<NumericAc
 function normalizeParams(params: Record<string, unknown>, defaultCwd: string): NormalizedParams {
   const task = String(params.task ?? "").trim();
   if (!task) throw new Error("orchestrate requires a non-empty task.");
+  const protectedAreasNeeded = parseProtectedAreaForecast(params, true);
+  if (!protectedAreasNeeded) throw new Error("Malformed or conflicting admission protected areas needed.");
+  if (params.protectedAreaGrants !== undefined && (!Array.isArray(params.protectedAreaGrants)
+    || !params.protectedAreaGrants.every(item => typeof item === "string" && item.length > 0 && item.trim() === item))) throw new Error("Malformed admission protected area grants.");
+  const protectedAreaGrants = [...(params.protectedAreaGrants as string[] | undefined ?? [])];
   const inferredRoutingRaw = inferModelRoutingFromTask(task);
   const orchestrationControls = inferOrchestrationControlsFromTask(task, params, inferredRoutingRaw);
 
@@ -4624,11 +4719,14 @@ function normalizeParams(params: Record<string, unknown>, defaultCwd: string): N
     adaptiveSupervision: normalizePublicAdaptiveSupervisionMode(params.adaptiveSupervision),
     hardGates: normalizeHardGatesMode(params.hardGates),
     predictedWriteSet: parseWriteSetInput(params.predictedWriteSet),
+    protectedAreasNeeded,
+    protectedAreaGrants,
     externalEvidenceRoots: normalizeExternalEvidenceRootBindings(params.externalEvidenceRoots),
     numericAcceptanceGates: normalizeNumericAcceptanceGateBindings(params.numericAcceptanceGates),
     discoveryOnly: typeof params.discoveryOnly === "boolean" ? params.discoveryOnly : false,
     preflight: typeof params.preflight === "boolean" ? params.preflight : true,
     workerExecutionConstraints: {
+      protectedAreaAuthorization: { needed: protectedAreasNeeded, grants: protectedAreaGrants, paths: parseWriteSetInput(params.predictedWriteSet) ?? [] },
       noForceKill: params.noForceKill === true
         || Boolean(params.workerExecutionConstraints && typeof params.workerExecutionConstraints === "object"
           && (params.workerExecutionConstraints as Record<string, unknown>).noForceKill === true),
@@ -4809,7 +4907,7 @@ async function runOrchestration(
   if (params.preflight && !deterministicDynamicCanary && !shapeOwnsPreflight) {
     preflightInProgress = true;
     await withWorkerExecutionConstraints(params.workerExecutionConstraints, () =>
-      withSubagentPhaseLogging(state.runId, () => runProviderPreflight(params, agents, inheritedModel, signal, emit)));
+      withSubagentPhaseLogging(state.runId, () => runProviderPreflight(params, agents, inheritedModel, signal, emit), () => params.maxSubagents, !params.maxSubagentsExplicit));
     preflightInProgress = false;
   } else if (shapeOwnsPreflight && params.preflight) {
     emit("Preflight delegated to composable-pipeline role-safe route resolution.");
@@ -4854,7 +4952,7 @@ async function runOrchestration(
     const result: OrchestrationShapeResult = await withWorkerExecutionConstraints(params.workerExecutionConstraints, () =>
       withSubagentPhaseLogging(state.runId, () => resolvedDynamicWorkflow
         ? runDynamicWorkflow(resolvedDynamicWorkflow, context)
-        : shape!.run(context)));
+        : shape!.run(context), () => params.maxSubagents, !params.maxSubagentsExplicit));
     emit(`[orchestrate] "${paradigm}" shape completed.`);
 
     return {
@@ -5044,7 +5142,14 @@ async function runOrchestration(
     const executorConcurrency = clampInt(planRoleControls.executorConcurrency ?? params.concurrency, params.concurrency, 1, 16);
     const verifierCount = clampInt(planRoleControls.verifierCount ?? params.verifierCount, params.verifierCount, 1, 16);
     const executionWaves = buildExecutionWaves(plan);
+    if (plan.protectedAreasNeeded && params.protectedAreasNeeded) plan.protectedAreasNeeded = [...new Set([...params.protectedAreasNeeded, ...plan.protectedAreasNeeded])];
     state.plan = plan;
+    // Supervision=off still saves and checks a plan before any builder. Neither
+    // disabling supervision nor a planner's self-grant supplies owner authority.
+    const protectedAreaDecision = decideProtectedAreaPermission({ needed: plan.protectedAreasNeeded, grants: params.protectedAreaGrants,
+      paths: [...(params.predictedWriteSet ?? []), ...(plan.predictedWriteSet ?? []), ...plan.tasks.flatMap(task => task.predictedWriteSet ?? [])], descriptions: plan.tasks.map(task => task.description), cwd: params.cwd });
+    atomicWriteJsonSync(path.join(runDirFor(state.runId), `attempt-${attempt}-protected-plan.json`), { plan, protectedAreaGrants: params.protectedAreaGrants ?? [], protectedAreaDecision });
+    if (!protectedAreaDecision.approved) throw new Error(`Protected permission refused before builder: ${protectedAreaDecision.reasons.join("; ")}`);
 
     if (params.plannerCount > 1) {
       emit(`Attempt ${attempt}: selected planner ${selectedPlannerIndex + 1}/${plannerOutputs.length} by deterministic lowest-index parseable-plan rule.`);
@@ -5402,6 +5507,11 @@ async function runOrchestration(
     }));
     state.verifierResults = verifierResults;
     const verifierResult = aggregateVerifierResults(verifierResults);
+    const processTrees = readRunProcessTrees(runDirFor(state.runId));
+    if (processTrees.status !== "clean") {
+      verifierResult.status = "fail";
+      verifierResult.reasons.push("WORKER_PROCESS_GENERATION_NOT_CLEAN: surviving, unknown or missing inventory");
+    }
     state.routingCheck = checkRequiredModelRouting(params, state);
     if (verifierResult.status === "pass" && state.routingCheck.status === "fail") {
       verifierResult.status = "fail";
@@ -5445,6 +5555,7 @@ async function runOrchestration(
     const reasons = verifierResult.reasons.length ? verifierResult.reasons : ["Verifier did not return a pass result."];
     state.failureReasons.push(...reasons.map((reason) => `Attempt ${attempt}: ${reason}`));
     emit(`Attempt ${attempt}: verification failed (${reasons.join("; ")}).`);
+    if (processTrees.status !== "clean") break; // no writer retry for cleanup uncertainty
     updateTaskLedgerFromFailure(state, plan, executorOutputs, reasons, attempt, emit);
 
     if (attempt >= maxAttempts) break;
@@ -5972,6 +6083,8 @@ function ledgerArtifactsStillPresent(entry: TaskLedgerEntry, cwd: string): boole
  */
 function executorOutputFromSubagent(task: PlanTask, result: SubagentResult): ExecutorOutput {
   return {
+    processTree: result.processTree,
+    processTrees: result.processTrees,
     taskId: task.id,
     description: task.description,
     agentName: result.agentName,
@@ -6091,6 +6204,7 @@ async function executeExecutorTaskWithRecovery(
     // an ordinary task failure.
     if (err instanceof SubagentDetachedError) throw err;
     if (err instanceof SubagentTerminalAmbiguousError) throw err;
+    if (err instanceof SubagentInfrastructureError || err instanceof RetryCleanupError) throw err;
     if (err instanceof ConfirmedSupervisedAbandonError) throw err;
     emit("Task " + task.id + ": spawn failed — " + String(err));
     return {
@@ -6120,6 +6234,8 @@ async function executeExecutorTaskWithRecovery(
   }
 
   let output: ExecutorOutput = {
+    processTree: result.processTree,
+    processTrees: result.processTrees,
     taskId: task.id,
     description: task.description,
     agentName: result.agentName,
@@ -6203,6 +6319,7 @@ async function executeExecutorTaskWithRecovery(
         true,
       );
     } catch (error) {
+      if (error instanceof SubagentInfrastructureError || error instanceof RetryCleanupError) throw error;
       emit("Task " + task.id + ": handoff continuation spawn failed — escalating to split.");
       state.recoveryLog.push(
         "[RECOVERY] " + task.id + ": CONTINUE spawn failed — escalating to SPLIT.",
@@ -6222,6 +6339,8 @@ async function executeExecutorTaskWithRecovery(
       contextExhaustionSignal: continueResult.contextExhaustionSignal,
       toolCalls: continueResult.toolCalls, actionEvidence: continueResult.actionEvidence,
       commandTimes: continueResult.commandTimes,
+      processTree: continueResult.processTree,
+      processTrees: continueResult.processTrees,
       provider: continueResult.provider, model: continueResult.model,
     }));
     if (!checkContextExhaustion(continueResult)) {
@@ -6340,6 +6459,7 @@ async function splitAndExecuteTask(
         true,
       );
     } catch (err) {
+      if (err instanceof SubagentInfrastructureError || err instanceof RetryCleanupError) throw err;
       emit("Task " + task.id + ": subtask " + subtask.id + " spawn failed — " + String(err));
       subtaskOutputs.push(observeSubtask({
         taskId: subtask.id,
@@ -6367,6 +6487,8 @@ async function splitAndExecuteTask(
       toolCalls: subtaskResult.toolCalls,
       actionEvidence: subtaskResult.actionEvidence,
       commandTimes: subtaskResult.commandTimes,
+      processTree: subtaskResult.processTree,
+      processTrees: subtaskResult.processTrees,
       provider: subtaskResult.provider,
       model: subtaskResult.model,
     }));
@@ -6571,6 +6693,7 @@ function mergeExecutorOutputs(
     toolCalls: sumToolCallSummaries(first.toolCalls, second.toolCalls),
     actionEvidence: mergeActionEvidenceLedgers(first.actionEvidence, second.actionEvidence),
     commandTimes: mergeCommandTimes(first.commandTimes, second.commandTimes),
+    processTrees: [...(first.processTrees ?? (first.processTree ? [first.processTree] : [])), ...(second.processTrees ?? (second.processTree ? [second.processTree] : []))],
     filesChanged,
     effectObservation: { status: complete ? "complete" : "partial" },
     effectChanges: first.effectChanges || second.effectChanges ? [...(first.effectChanges ?? []), ...(second.effectChanges ?? [])] : undefined,
@@ -6625,15 +6748,15 @@ async function spawnChecked(
   phaseMutates = false,
   verifierReadOnly = false,
   recoveryRole?: "planner" | "verifier",
+  logicalWorkerIdentity?: string,
 ): Promise<SubagentResult> {
   // Semantic role, not profile-name coincidence, owns recovery and routing.
   const role = phaseMutates ? undefined : recoveryRole ?? (verifierReadOnly ? "verifier" : undefined);
   const launch = async (prompt: string, stage: RoleRecoveryStage = "initial", index = 0, planning = false): Promise<SubagentResult> => {
-    if (state.spawnedCount >= params.maxSubagents) throw new Error(`Subagent ceiling exceeded: already spawned ${state.spawnedCount}/${params.maxSubagents}.`);
-    state.spawnedCount++;
+    state.spawnedCount = readRunSpawnCount(runDirFor(state.runId));
     const name = planning ? params.plannerAgent : agentName;
     onProgress?.(`Spawning subagent ${name} (${state.spawnedCount}/${params.maxSubagents}) in ${params.cwd}`);
-    const phaseLogIndex = abortSurvival?.phaseIndex ?? state.spawnedCount - 1;
+    const phaseLogIndex = abortSurvival?.phaseIndex ?? state.spawnedCount;
     const baseName = abortSurvival?.phaseName ?? name;
     const phaseLogName = index === 0 ? baseName : `${baseName}-role-recovery-${index}-${stage}`;
     const timedPrompt = role === "verifier" && !planning ? `${prompt}\n\nHOST-OWNED COMMAND TIMING (measurements, not worker claims):\n${JSON.stringify(getCommandTimesForRun(state.runId))}` : prompt;
@@ -6642,14 +6765,28 @@ async function spawnChecked(
       modelOverride: planning ? toModelOverride(params.plannerModel, params.plannerProvider) : modelOverride,
       phaseLogFile: phaseLogPathFor(state.runId, phaseLogIndex, phaseLogName),
       phaseResultFile: phaseResultPathFor(state.runId, phaseLogIndex, phaseLogName),
+      reserveSpawn: () => { state.spawnedCount = reserveRunSpawn(runDirFor(state.runId), params.maxSubagents, !params.maxSubagentsExplicit, phaseResultPathFor(state.runId, phaseLogIndex, phaseLogName)); },
+      infrastructureRetry: {
+        identity: JSON.stringify([state.runId, name, stage, index, logicalWorkerIdentity ?? prompt, planning, modelOverride]),
+        file: path.join(runDirFor(state.runId), `infrastructure-${createHash("sha256").update(JSON.stringify([name, stage, index, logicalWorkerIdentity ?? prompt, planning])).digest("hex")}.retry.json`),
+        reserve: () => {
+          state.spawnedCount = readRunSpawnCount(runDirFor(state.runId));
+          if (state.spawnedCount >= params.maxSubagents) throw new Error("Infrastructure retry refused: subagent ceiling exhausted.");
+        },
+      },
       commandTimingContext: { runId: state.runId, role: planning ? "planner" : role ?? "executor", phase: phaseLogIndex, stage },
       // Intermediate shards settle instead of publishing raw detached shards
       // into the parent's terminal checkpoint/survivor slot.
       ...(abortSurvival ? { abortSurvival: role ? { ...abortSurvival, settleOnAbort: true } : abortSurvival } : {}),
-      phaseMutates, readOnly: planning || verifierReadOnly,
+      phaseMutates, readOnly: planning || role === "planner" || verifierReadOnly,
       verifier: role === "verifier" && !planning,
       ...(role ? { recoverableRole: planning ? "planner" as const : role } : {}),
-      workerExecutionConstraints: params.workerExecutionConstraints,
+      workerExecutionConstraints: { ...params.workerExecutionConstraints, protectedAreaAuthorization: {
+        needed: state.plan ? state.plan.protectedAreasNeeded : params.protectedAreasNeeded,
+        grants: params.protectedAreaGrants ?? [],
+        paths: [...(params.predictedWriteSet ?? []), ...(state.plan?.predictedWriteSet ?? []), ...(state.plan?.tasks.flatMap(task => task.predictedWriteSet ?? []) ?? [])],
+        descriptions: state.plan?.tasks.map(task => task.description) ?? [params.task],
+      } },
     });
     return role ? observeRoleReadOnlyLaunch(params.cwd, params.externalEvidenceRoots ?? [], operation) : operation();
   };
@@ -6658,7 +6795,7 @@ async function spawnChecked(
   const result = await runRoleWithRecovery(request, {
     launch: (prompt, stage, index) => launch(prompt, stage, index),
     ...(request.sourceOptions.allowReplan ? { launchPlanner: (prompt: string, stage: RoleRecoveryStage, index: number) => launch(prompt, stage, index, true) } : {}),
-    canLaunch: () => state.spawnedCount < params.maxSubagents, signal, onProgress,
+    canLaunch: () => readRunSpawnCount(runDirFor(state.runId)) < params.maxSubagents, signal, onProgress,
   });
   if (result.roleRecovery) state.recoveryLog?.push(`Role recovery ${role}: terminal validated after ${result.roleRecovery.steps.map(step => `${step.stage}/${step.outcome}`).join(", ")}.`);
   return result;
@@ -6798,10 +6935,21 @@ function parseFrontmatterValue(value: string): unknown {
   return unquoted(value);
 }
 
-async function runSubagent(
+async function runSubagent(agentName: string, task: string, options: Parameters<typeof runSubagentAttempt>[2]): Promise<SubagentResult> {
+  return retryInfrastructureSubagent(agentName, task, options, (retry, evidence, policyRetryBudget) => runSubagentAttempt(agentName, policyRetryBudget?.resumePolicy ? buildProviderRefusalRetryPrompt(task) : task, { ...options, policyRetryBudget,
+    ...(policyRetryBudget?.resumePolicy ? { phaseLogFile: policyRetryBudget.resumePolicy.phaseLogFile?.replace(/\.log$/, "-policy-retry.log"),
+      phaseResultFile: policyRetryBudget.resumePolicy.phaseResultFile?.replace(/\.result\.json$/, "-policy-retry.result.json"), providerRefusalRetryAttempt: 1 }
+      : retry ? { phaseLogFile: evidence.phaseLogFile?.replace(/\.log$/, "-infrastructure-retry.log"),
+      phaseResultFile: evidence.phaseResultFile?.replace(/\.result\.json$/, "-infrastructure-retry.result.json") } : {}),
+  }));
+}
+
+async function runSubagentAttempt(
   agentName: string,
   task: string,
   options: {
+    infrastructureRetry?: import("./infrastructure-retry").InfrastructureRetryOptions;
+    reserveSpawn?: () => void;
     agents: Map<string, AgentProfile>;
     cwd: string;
     allowLocalModel: boolean;
@@ -6843,10 +6991,16 @@ async function runSubagent(
     recoverableRole?: "planner" | "verifier";
     /** Internal recursion fence for the single provider-refusal retry. */
     providerRefusalRetryAttempt?: 0 | 1;
+    policyRetryBudget?: import("./infrastructure-retry").PolicyRetryBudget;
     /** Frozen worker policy; loads only the narrow dispatch guard when opted in. */
     workerExecutionConstraints?: WorkerExecutionConstraints;
   },
 ): Promise<SubagentResult> {
+  const authorization = options.workerExecutionConstraints?.protectedAreaAuthorization;
+  if (!options.verifier && !isProvablyReadOnlySubagent(options.readOnly, options.agents.get(agentName)?.tools) && authorization) {
+    const permission = decideProtectedAreaPermission({ ...authorization, needed: authorization.needed, cwd: options.cwd });
+    if (!permission.approved) throw new Error(`Protected permission refused before worker launch: ${permission.reasons.join("; ")}`);
+  }
   const startedAt = Date.now();
   appendSubagentPhaseLog(options.phaseLogFile, "host", `started=${new Date(startedAt).toISOString()} agent=${agentName}`);
   const loadedProfile = options.agents.get(agentName) ?? { name: agentName };
@@ -6973,6 +7127,7 @@ async function runSubagent(
     for (let attemptIndex = 0; attemptIndex < launchAttempts.length; attemptIndex++) {
       const launch = launchAttempts[attemptIndex];
       appendSubagentPhaseLog(options.phaseLogFile, "host", `launch-attempt=${attemptIndex + 1} command=${path.basename(launch.command)}`);
+      const protocolSanitizer = new WorkerProtocolSanitizer(), logSanitizer = new WorkerProtocolSanitizer();
       let stderr = "";
       let lastAssistantText = "";
       let settledAssistantText: string | undefined;
@@ -7000,6 +7155,7 @@ async function runSubagent(
       // classify settlement from the last assistant result in the retried turn.
       const recoveredAssistantFailures: string[] = [];
       const toolCalls = emptyToolCallSummary();
+      let toolTelemetryComplete = true, sawAgentStart = false;
       const actionEvidence = new ActionEvidenceCollector({
         cancellationJournalFile: path.join(noOutputPhaseRoot, `${phaseResult.launchId}.cancellations.jsonl`),
       });
@@ -7012,6 +7168,8 @@ async function runSubagent(
       let collectorFailure: Error | undefined;
 
       let child: ReturnType<typeof spawn>;
+      options.policyRetryBudget?.beforeDispatch();
+      options.reserveSpawn?.();
       try {
         child = spawn(launch.command, launch.args, launch.options);
         childCreated = true;
@@ -7050,12 +7208,14 @@ async function runSubagent(
         const result: SubagentResult = {
           agentName: profile.name,
           task,
-          text: text.trim(),
-          stderr: stderr.trim(),
+          text: sanitizeWorkerText(text.trim()),
+          stderr: sanitizeWorkerText(stderr.trim()),
           exitCode: code,
           durationMs: Date.now() - startedAt,
           events: eventCount,
           toolCalls,
+          processTree: phaseResult.processTrees ? undefined : phaseResult.processTree,
+          processTrees: phaseResult.processTrees,
           actionEvidence: actionEvidence.finalize(),
           commandTimes: mergeCommandTimes(options.commandTimingPrior ?? { schemaVersion: 1, entries: [] }, commandTimes.snapshot(actionEvidence.finalize())),
         };
@@ -7069,23 +7229,24 @@ async function runSubagent(
       const heartbeatTimer = setInterval(() => phaseResult.heartbeat(eventCount, child.pid), 5_000);
       heartbeatTimer.unref?.();
       child.once("close", (code) => {
+        phaseResult.processClosed(child.pid);
         clearInterval(heartbeatTimer);
         if (code === 0 && settledAssistantText !== undefined && !roleContextExhausted && !protocolTimedOut && !killedByAbort && !collectorFailure) {
           try { phaseResult.complete(buildResult(code, settledAssistantText), assistantFailures); }
           catch (error) {
             collectorFailure = error instanceof Error ? error : new Error(String(error));
-            phaseResult.incomplete(`ACTION_EVIDENCE_PERSISTENCE_FAILED: ${collectorFailure.message}`);
+            phaseResult.incomplete(`ACTION_EVIDENCE_PERSISTENCE_FAILED: ${collectorFailure.message}`, undefined, "closed");
           }
         } else {
           const reason = collectorFailure ? `ACTION_EVIDENCE_PERSISTENCE_FAILED: ${collectorFailure.message}`
             : roleContextExhausted ? "role worker exhausted context; partial output is not terminal" : code === 0
               ? "child closed without a complete assistant result"
               : `child exited with code ${String(code)}`;
-          try { phaseResult.incomplete(reason, actionEvidence.finalize()); }
+          try { phaseResult.incomplete(reason, actionEvidence.finalize(), "closed"); }
           catch (error) {
             // Preserve the original rejection if final evidence is also lost.
             collectorFailure ??= error instanceof Error ? error : new Error(String(error));
-            phaseResult.incomplete(`ACTION_EVIDENCE_PERSISTENCE_FAILED: ${collectorFailure.message}`);
+            phaseResult.incomplete(`ACTION_EVIDENCE_PERSISTENCE_FAILED: ${collectorFailure.message}`, undefined, "closed");
           }
         }
       });
@@ -7147,21 +7308,14 @@ async function runSubagent(
           } catch {}
           child.once("close", (code) => {
             try {
-              const backgroundResult: SubagentResult = {
-                agentName: profile.name,
-                task,
-                text: lastAssistantText.trim(),
-                stderr: stderr.trim(),
-                exitCode: code,
-                durationMs: Date.now() - startedAt,
-                events: eventCount,
-                toolCalls,
-                actionEvidence: actionEvidence.finalize(),
-                commandTimes: mergeCommandTimes(options.commandTimingPrior ?? { schemaVersion: 1, entries: [] }, commandTimes.snapshot(actionEvidence.finalize())),
-              };
+              const backgroundResult = buildResult(code, settledAssistantText ?? lastAssistantText);
+              if (phaseResult.terminalPublicationFailed) {
+                backgroundResult.exitCode = null;
+                backgroundResult.stderr += "\nTERMINAL_PUBLICATION_FAILED: settled output retained; replay forbidden.";
+              }
               if (profile.provider) backgroundResult.provider = profile.provider;
               if (profile.model) backgroundResult.model = profile.model;
-              writeFileSync(survival.resultFile, JSON.stringify(backgroundResult, null, 2), "utf8");
+              writeFileSync(survival.resultFile, JSON.stringify(sanitizeSubagentResult(backgroundResult), null, 2), "utf8");
             } catch (error) {
               collectorFailure = error instanceof Error ? error : new Error(String(error));
               appendSubagentPhaseLog(options.phaseLogFile, "host", `ACTION_EVIDENCE_PERSISTENCE_FAILED: ${collectorFailure.message}`);
@@ -7194,16 +7348,20 @@ async function runSubagent(
       if (!child.stdout) throw new Error(`PI_CHILD_STDOUT_UNAVAILABLE: ${profile.name}`);
       const stdoutReader = createInterface({ input: child.stdout });
       stdoutReader.on("line", (line) => {
-        appendSubagentPhaseLog(options.phaseLogFile, "stdout", line);
+        appendSubagentPhaseLog(options.phaseLogFile, "stdout", line, logSanitizer);
         const trimmed = line.trim();
         if (!trimmed) return;
         try {
           const event = JSON.parse(trimmed);
+          const safeEvent = protocolSanitizer.sanitize(event);
           if (isPiJsonProtocolEvent(event)) markFirstJsonProtocolEvent();
+          else toolTelemetryComplete = false;
+          if (event?.type === "agent_start") sawAgentStart = true;
+          if (["tool_execution_update", "tool_execution_end"].includes(event?.type) && toolCalls.total === 0) toolTelemetryComplete = false;
           eventCount++;
           // Authority must see every event before any additive timing parser or
           // publication can fail. Timing idempotence never skips validation.
-          try { if (!collectorFailure) actionEvidence.observe(event); }
+          try { if (!collectorFailure) actionEvidence.observe(sanitizeWorkerValue(event)); }
           catch (error) {
             collectorFailure = error instanceof Error ? error : new Error(String(error));
             appendSubagentPhaseLog(options.phaseLogFile, "host", `ACTION_EVIDENCE_PERSISTENCE_FAILED: ${collectorFailure.message}`);
@@ -7218,12 +7376,14 @@ async function runSubagent(
           }
           if (timingChanged) phaseResult.publishCommandTimes(commandTimes.snapshot());
           phaseResult.observeEvent(event);
-          const progress = describeJsonEvent(profile.name, event);
-          if (progress) options.onProgress?.(progress);
+          const progress = describeJsonEvent(profile.name, safeEvent);
+          if (progress) options.onProgress?.(sanitizeWorkerText(progress));
           if (!collectorFailure) acknowledgeNoOutputAlarm(event, noOutputAlarmAckRoot);
           if (event?.type === "tool_execution_start") {
-            const toolName = optionalString((event as Record<string, unknown>).toolName);
-            if (toolName) recordToolCall(toolCalls, toolName);
+            const toolName = optionalString(event.toolName) ?? optionalString(event.tool_name);
+            // An unnamed start is not proof that no tool executed.
+            recordToolCall(toolCalls, toolName || "unknown");
+            if (!toolName) toolTelemetryComplete = false;
           }
           // `agent_end` terminates one child attempt, not necessarily the whole
           // turn. Pi marks retryable attempt endings with willRetry=true and may
@@ -7255,13 +7415,13 @@ async function runSubagent(
             agentEnded = false;
           }
           if (event?.type === "message_end" && event.message?.role === "assistant" && !agentEnded) {
-            lastAssistantText = extractMessageText(event.message);
+            lastAssistantText = sanitizeWorkerText(extractMessageText(safeEvent.message));
             const stopReason = optionalString(event.message.stopReason) ?? optionalString(event.stopReason);
             const errorMessage =
-              optionalString(event.message.errorMessage) ??
-              optionalString(event.errorMessage) ??
-              optionalString(event.message.error?.message) ??
-              optionalString(event.error?.message);
+              optionalString(safeEvent.message.errorMessage) ??
+              optionalString(safeEvent.errorMessage) ??
+              optionalString(safeEvent.message.error?.message) ??
+              optionalString(safeEvent.error?.message);
             const normalizedStopReason = stopReason?.toLowerCase();
             if (options.recoverableRole && (isRoleContextExhaustion(stopReason, errorMessage) || isRoleRecoveryHandoff(lastAssistantText, options.recoverableRole))) roleContextExhausted = true;
             if (normalizedStopReason === "error" || normalizedStopReason === "aborted") {
@@ -7272,12 +7432,13 @@ async function runSubagent(
             ) {
               settledAssistantText = lastAssistantText;
             }
-            if (errorMessage) assistantFailures.push(`assistant errorMessage=${errorMessage}`);
-            terminalProviderRefusal = classifyProviderRefusal(event) ?? terminalProviderRefusal;
+            if (errorMessage) assistantFailures.push(`assistant errorMessage=${sanitizeWorkerText(errorMessage)}`);
+            terminalProviderRefusal = classifyProviderRefusal(safeEvent) ?? terminalProviderRefusal;
           }
           phaseResult.heartbeat(eventCount, child.pid);
         } catch {
-          // JSON mode should emit JSONL; ignore any incidental non-JSON line defensively.
+          // Missing/malformed telemetry can never establish zero tool execution.
+          toolTelemetryComplete = false;
         }
       });
 
@@ -7341,9 +7502,15 @@ async function runSubagent(
       if (firstJsonTimer) clearTimeout(firstJsonTimer);
       if (options.signal) options.signal.removeEventListener("abort", abortHandler);
       stdoutReader.close();
+      stderr = sanitizeWorkerText(stderr);
 
       const buildCandidate = (): SubagentResult => buildResult(exitCode);
       const throwAmbiguousIfMutating = (errorMessage: string): void => {
+        if (isNoToolInfrastructureFailure([...assistantFailures, stderr], toolCalls, toolTelemetryComplete && sawAgentStart && agentEnded)) {
+          phaseResult.infrastructureFailure();
+          options.policyRetryBudget?.retain(phaseResult.retryEvidence("infrastructure_no_tools"));
+          throw new SubagentInfrastructureError();
+        }
         const mutatingEvidence = options.phaseMutates === true || toolCalls.mutating > 0;
         if (!mutatingEvidence) return;
         const candidate = lastAssistantText.trim() ? buildCandidate() : undefined;
@@ -7369,6 +7536,13 @@ async function runSubagent(
       }
       if (roleContextExhausted && !killedByAbort && !protocolTimedOut) throw new RoleContextExhaustionError(buildCandidate());
       const durableResult = phaseResult.readComplete();
+      if (settledAssistantText !== undefined && phaseResult.file && !durableResult && !killedByAbort && !protocolTimedOut) {
+        throw new SubagentTerminalAmbiguousError(profile.name, {
+          code: "AMBIGUOUS_COMPLETION", resultLost: false,
+          errorMessage: "TERMINAL_PUBLICATION_FAILED: settled output retained but durable completion unavailable; replay forbidden.",
+          exitCode, stderr, assistantFailures: [...assistantFailures], candidate: buildResult(exitCode, settledAssistantText),
+        });
+      }
       if (!killedByAbort && !protocolTimedOut && durableResult) {
         if (assistantFailures.length > 0) {
           options.onProgress?.(
@@ -7381,19 +7555,33 @@ async function runSubagent(
         if (confirmedAbandon) throw new ConfirmedSupervisedAbandonError(options.abortSurvival?.phaseName ?? agentName);
         throw new Error(`Subagent ${agentName} aborted.`);
       }
+      // Policy wording cannot turn an authentication failure into an
+      // unconfirmed rewording retry.
+      if (isInfrastructureFailure([...assistantFailures, stderr])) {
+        throwAmbiguousIfMutating("WORKER_INFRASTRUCTURE: provider failed after tool execution or with unknown telemetry; redispatch refused.");
+        throw new Error("WORKER_INFRASTRUCTURE: tool execution or unknown telemetry prevents automatic retry.");
+      }
       const providerRefusal = terminalProviderRefusal
         ?? classifyProviderRefusal(assistantFailures.join("; "))
         ?? classifyProviderRefusal(stderr);
       if (providerRefusal) {
-        const retryAttempt = options.providerRefusalRetryAttempt ?? 0;
-        const retryEligible = isProvablyReadOnlySubagent(options.readOnly, profile.tools) && toolCalls.mutating === 0;
+        const retryAttempt = options.policyRetryBudget?.used ? 1 : options.providerRefusalRetryAttempt ?? 0;
+        const retryEligible = isProvablyReadOnlySubagent(options.readOnly, profile.tools) && toolTelemetryComplete && sawAgentStart && agentEnded && toolCalls.mutating === 0;
+        if (retryEligible) phaseResult.readOnlyProviderRefusal(actionEvidence.finalize());
         if (retryEligible && retryAttempt === 0) {
           options.onProgress?.(`Subagent ${profile.name}: provider refused the read-only review; retrying once with defensive evidence-only wording.`);
-          const retried = await runSubagent(agentName, buildProviderRefusalRetryPrompt(task), {
+          // Reword within the existing durable claim, never re-enter its lock.
+          options.policyRetryBudget?.retain(phaseResult.retryEvidence("provider_refused_read_only"));
+          options.policyRetryBudget?.consume();
+          const retried = await runSubagentAttempt(agentName, buildProviderRefusalRetryPrompt(task), {
             ...options,
+            phaseLogFile: options.phaseLogFile?.replace(/\.log$/, "-policy-retry.log"),
+            phaseResultFile: options.phaseResultFile?.replace(/\.result\.json$/, "-policy-retry.result.json"),
             providerRefusalRetryAttempt: 1,
             commandTimingPrior: mergeCommandTimes(options.commandTimingPrior ?? { schemaVersion: 1, entries: [] }, commandTimes.snapshot()),
           });
+          retried.processTrees = [...(phaseResult.processTrees ?? (phaseResult.processTree ? [phaseResult.processTree] : [])), ...(retried.processTrees ?? (retried.processTree ? [retried.processTree] : []))];
+          retried.processTree = undefined;
           retried.commandTimes = mergeCommandTimes(commandTimes.snapshot(actionEvidence.finalize()), retried.commandTimes);
           retried.providerRefusal = {
             ...providerRefusal,
@@ -7405,7 +7593,7 @@ async function runSubagent(
           return retried;
         }
         throw new ProviderRefusalError(profile.name, {
-          providerMessage: providerRefusal.providerMessage,
+          providerMessage: sanitizeWorkerText(providerRefusal.providerMessage),
           retryAllowed: false,
           retryEligible,
           retryAttempted: retryAttempt > 0,
@@ -7450,7 +7638,7 @@ async function runSubagent(
     throw new Error(`Subagent ${agentName} did not launch: no spawn attempts were available.`);
   } catch (error) {
     launchFailed = true;
-    if (!childCreated) phaseResult.incomplete(error instanceof Error ? error.message : String(error));
+    if (!childCreated) phaseResult.incomplete(error instanceof Error ? error.message : String(error), undefined, "never_dispatched");
     throw error;
   } finally {
     if (tempDir !== undefined) {
@@ -8959,7 +9147,8 @@ export function buildPlanningPrompt(intake: Intake, attempt: number, failureReas
   const completedBlock = completedTasks.length
     ? `\nTasks ALREADY COMPLETED successfully in a previous attempt (their artifacts exist on disk). Keep their IDs stable, do NOT instruct executors to re-create or re-do their work, and plan only the remaining/failed work. The orchestrator will reuse their results automatically:\n${completedTasks.map((entry) => `- ${entry.taskId}: ${entry.description}`).join("\n")}\n`
     : "";
-  return `${bindingPromptPreamble(intake)}\n\nPlan the following task for executor subagents. Return JSON if possible, exactly shaped as:\n{"acceptance_criteria":["product outcome copied exactly from intake.success_criteria"],"tasks":[{"id":"...","description":"...","dependsOn":[]}],"predicted_write_set":["repo/relative/output"]${evidenceSchema},"read_only_inputs":["external/or/repo/input"],"notes":"..."}\n\nINTAKE CONTRACT:\n${formatIntakeForPrompt(intake)}\n\nRules:\n- Keep task IDs stable and simple (task-1, task-2, ...).\n- Make each description self-contained.\n- Do not execute the task.\n${plannerAcceptanceCriteriaInstruction(intake.successCriteria)}\n${plannerDeliverablesInstruction(intake.deliverables)}\n- Carry forward all owner criteria, constraints, named deliverables, and any explicitly owner-authored executor output contract into the task descriptions/notes.\n- Keep provenance separate: supervisor_added_constraints govern safe orchestration, while planner_inferred_presentation_rules are advisory and MUST NOT be promoted into acceptance/failure criteria or stricter line-count rules.\n- If model routing requirements exist in intake, treat them as host-owned advisory checks, not executor work or product acceptance.\n- If the task cannot be safely split, return one task.\n- **Task-size cap**: each executor task description MUST be under ~200 words. Tasks exceeding this should be split into multiple smaller tasks. Small tasks ensure executor subagents have enough context budget to use write/edit/bash tools and produce actual file artifacts rather than text reports.\n- An executor task that only describes/analyzes and never touches files is NOT sufficient for CREATE or IMPLEMENT work — the verifier will check for actual file artifacts.\n- **Effect declaration**: on every task set "expects_file_change": true for implementation work that creates or modifies files, and "expects_file_change": false for validation, audit, review, or test-only tasks. Validation-only tasks are legitimate and are not failed for changing no files, but they must still return grounded evidence.
+  return `${bindingPromptPreamble(intake)}\n\nPlan the following task for executor subagents. Return JSON if possible, exactly shaped as:\n{"protected_areas_needed":[],"acceptance_criteria":["product outcome copied exactly from intake.success_criteria"],"tasks":[{"id":"...","description":"...","dependsOn":[]}],"predicted_write_set":["repo/relative/output"]${evidenceSchema},"read_only_inputs":["external/or/repo/input"],"notes":"..."}\n\nINTAKE CONTRACT:\n${formatIntakeForPrompt(intake)}\n\nRules:\n- Forecast every protected change in protected_areas_needed (named native-code or live-hardware needs); use [] explicitly for none. Ordinary TypeScript clients are not native code. This is a forecast, never permission; the host compares recorded owner grants BEFORE any builder.
+- Keep task IDs stable and simple (task-1, task-2, ...).\n- Make each description self-contained.\n- Do not execute the task.\n${plannerAcceptanceCriteriaInstruction(intake.successCriteria)}\n${plannerDeliverablesInstruction(intake.deliverables)}\n- Carry forward all owner criteria, constraints, named deliverables, and any explicitly owner-authored executor output contract into the task descriptions/notes.\n- Keep provenance separate: supervisor_added_constraints govern safe orchestration, while planner_inferred_presentation_rules are advisory and MUST NOT be promoted into acceptance/failure criteria or stricter line-count rules.\n- If model routing requirements exist in intake, treat them as host-owned advisory checks, not executor work or product acceptance.\n- If the task cannot be safely split, return one task.\n- **Task-size cap**: each executor task description MUST be under ~200 words. Tasks exceeding this should be split into multiple smaller tasks. Small tasks ensure executor subagents have enough context budget to use write/edit/bash tools and produce actual file artifacts rather than text reports.\n- An executor task that only describes/analyzes and never touches files is NOT sufficient for CREATE or IMPLEMENT work — the verifier will check for actual file artifacts.\n- **Effect declaration**: on every task set "expects_file_change": true for implementation work that creates or modifies files, and "expects_file_change": false for validation, audit, review, or test-only tasks. Validation-only tasks are legitimate and are not failed for changing no files, but they must still return grounded evidence.
 - **Predicted write set (predict-then-write)**: if the tasks will create or modify ANY files, include "predicted_write_set": ["repo/relative/path", ...] in the plan JSON — the exact files (or narrow "dir/" prefixes) the tasks will touch. This list becomes the executors' write scope and is enforced mechanically after execution: any mutation outside it fails the attempt naming the file. Predict precisely; do not pad with directories you merely might touch.\n${evidenceRule}\n- **Read-only path inputs**: put files/directories that tasks only inspect, read, or use unchanged in "read_only_inputs", never in "predicted_write_set". External read-only inputs must be beneath a declared external evidence root and grant no mutation authority.\n- **POSIX-shell diagnostics**: redirect discarded output only to \`/dev/null\`; never redirect to literal \`NUL\` (for example, never use \`2>NUL\`), because POSIX shells on Windows can create a workspace artifact with that name.\n${evidenceRootsBlock}${contractWriteSetBlock}\nAttempt: ${attempt}${completedBlock}${retryBlock}`;
 }
 
@@ -8983,16 +9172,14 @@ export function buildVisibleMainVerificationPrompt(
   plan: Plan,
   outputs: ExecutorOutput[],
 ): string {
-  const actionEvidence = outputs.map((output) => ({ taskId: output.taskId, ledger: output.actionEvidence ?? null }));
-  return `${bindingPromptPreamble(intake)}\n\nVISIBLE_MAIN_CRITERION_VERIFICATION\nVerify every frozen acceptance criterion using machine evidence. Return JSON exactly: {"status":"pass"|"fail","reasons":["..."],"criterionFindings":[{"criterionId":"AC-01","status":"pass"|"fail","evidence":[{"kind":"test","observed":"...","exitCode":0}]}]}\nMission: ${JSON.stringify(mission)}\nPlan: ${JSON.stringify(plan)}\nExecutor outputs: ${JSON.stringify(outputs)}\nHOST-OWNED COMMAND TIMING (measurements, not worker claims):\n${JSON.stringify(commandTimesFromHostResults(outputs))}\nHOST-OWNED ACTION EVIDENCE AUTHORITY: the chronological, secret-redacted ledger below is authoritative and overrides contradictory executor prose. Judge command outcomes and RED/edit/GREEN order from host evidence, never from self-report.\n${JSON.stringify(actionEvidence)}\nIndependently re-run relevant checks and inspect the actual changes; executor claims alone are not evidence.\nAdvisory review question: was work unexpectedly slow or expensive, and what available timing/usage evidence supports that assessment? Missing evidence is unknown, not zero. Do not guess costs. This question is not a new PASS/FAIL gate and does not alter binding acceptance or independent review requirements.\nPROVENANCE RULE: owner criteria remain hard. Supervisor-added constraints govern orchestration safety but are not new product criteria. Planner-inferred presentation rules are advisory and must not cause FAIL unless the mission records an explicit owner output contract.`;
+  return `${bindingPromptPreamble(intake)}\n\nVISIBLE_MAIN_CRITERION_VERIFICATION\nVerify every frozen acceptance criterion using machine evidence. Return JSON exactly: {"status":"pass"|"fail","reasons":["..."],"criterionFindings":[{"criterionId":"AC-01","status":"pass"|"fail","evidence":[{"kind":"test","observed":"...","exitCode":0}]}]}\nMission: ${JSON.stringify(mission)}\nPlan: ${JSON.stringify(plan)}\nExecutor outputs: ${JSON.stringify(outputs)}\nHOST-OWNED EVIDENCE AUTHORITY: each executor output above carries its commandTimes measurements and chronological secret-redacted actionEvidence exactly once. These override contradictory executor prose. Judge command outcomes and RED/edit/GREEN order from host evidence, never self-report. Recovery ledger records reference shared metadata by recoveryOutputIndex; entryIndex preserves complete original command order.\nIndependently re-run relevant checks and inspect the actual changes; executor claims alone are not evidence.\nAdvisory review question: was work unexpectedly slow or expensive, and what available timing/usage evidence supports that assessment? Missing evidence is unknown, not zero. Do not guess costs. This question is not a new PASS/FAIL gate and does not alter binding acceptance or independent review requirements.\nPROVENANCE RULE: owner criteria remain hard. Supervisor-added constraints govern orchestration safety but are not new product criteria. Planner-inferred presentation rules are advisory and must not cause FAIL unless the mission records an explicit owner output contract.`;
 }
 
 export function buildVerificationPrompt(intake: Intake, plan: Plan, outputs: ExecutorOutput[], routingEvidence: string, artifactEvidence?: string): string {
   const artifactBlock = artifactEvidence
     ? `\n\nARTIFACT EVIDENCE (collected post-execution by orchestrator):\n${artifactEvidence}`
     : "";
-  const actionEvidence = outputs.map((output) => ({ taskId: output.taskId, ledger: output.actionEvidence ?? null }));
-  return `${bindingPromptPreamble(intake)}\n\nVerify the orchestration result against the intake contract.\n\nINTAKE CONTRACT:\n${formatIntakeForPrompt(intake)}\n\nPlan:\n${JSON.stringify(plan, null, 2)}\n\nExecutor outputs:\n${JSON.stringify(outputs, null, 2)}\n\nHOST-OWNED COMMAND TIMING (measurements, not worker claims):\n${JSON.stringify(commandTimesFromHostResults(outputs))}\n\nHOST-OWNED ACTION EVIDENCE AUTHORITY:\nThe chronological, secret-redacted host ledger below is authoritative and overrides contradictory executor prose. Judge command outcomes and RED/edit/GREEN order from host evidence, never from self-report.\n${JSON.stringify(actionEvidence, null, 2)}\n\nModel routing evidence/configuration supplied by orchestrator:\n${routingEvidence}${artifactBlock}\n\nReturn JSON exactly and only in this shape:\n{"status":"pass"|"fail","reasons":["..."]}\n\nUse status "pass" only if the plan, outputs, and supplied routing evidence/configuration satisfy the intake success criteria and do not violate any constraints, invariants, or failure criteria. Use "fail" with concrete reasons for missing, unclear, or incorrect work.\n\nEFFECT EVIDENCE RULE: The ARTIFACT EVIDENCE block (if present) contains mechanical ground truth — per-task tool-call telemetry (write/edit/bash executions) and worktree file deltas. Judge implementation work by these OBSERVED EFFECTS, not by the shape or length of the executor's reply text. An executor that performed real tool-based file mutations and answered with a brief summary (or a table) is VALID. Conversely, prose claiming files were created is INSUFFICIENT when the effect evidence shows zero mutations — treat that as FAIL with reason "no observed effects for implementation task".\n\nIndependently re-run relevant checks and inspect the actual changes; executor claims alone are not evidence.\nAdvisory review question: was work unexpectedly slow or expensive, and what available timing/usage evidence supports that assessment? Missing evidence is unknown, not zero. Do not guess costs. This question is not a new PASS/FAIL gate and does not alter binding acceptance or independent review requirements.\n\nPROVENANCE RULE: owner_criteria are verdict-determining. supervisor_added_constraints govern orchestration safety but do not create product acceptance. planner_inferred_presentation_rules are advisory only — you may mention violations as warnings inside reasons, but they MUST NOT cause status "fail" on their own. Unknown provenance must not be silently weakened.`;
+  return `${bindingPromptPreamble(intake)}\n\nVerify the orchestration result against the intake contract.\n\nINTAKE CONTRACT:\n${formatIntakeForPrompt(intake)}\n\nPlan:\n${JSON.stringify(plan, null, 2)}\n\nExecutor outputs:\n${JSON.stringify(outputs, null, 2)}\n\nHOST-OWNED EVIDENCE AUTHORITY: each executor output above carries its commandTimes measurements and chronological secret-redacted actionEvidence exactly once. These override contradictory executor prose. Judge command outcomes and RED/edit/GREEN order from host evidence, never self-report. Recovery ledger records reference shared metadata by recoveryOutputIndex; entryIndex preserves complete original command order.\n\nModel routing evidence/configuration supplied by orchestrator:\n${routingEvidence}${artifactBlock}\n\nReturn JSON exactly and only in this shape:\n{"status":"pass"|"fail","reasons":["..."]}\n\nUse status "pass" only if the plan, outputs, and supplied routing evidence/configuration satisfy the intake success criteria and do not violate any constraints, invariants, or failure criteria. Use "fail" with concrete reasons for missing, unclear, or incorrect work.\n\nEFFECT EVIDENCE RULE: The ARTIFACT EVIDENCE block (if present) contains mechanical ground truth — per-task tool-call telemetry (write/edit/bash executions) and worktree file deltas. Judge implementation work by these OBSERVED EFFECTS, not by the shape or length of the executor's reply text. An executor that performed real tool-based file mutations and answered with a brief summary (or a table) is VALID. Conversely, prose claiming files were created is INSUFFICIENT when the effect evidence shows zero mutations — treat that as FAIL with reason "no observed effects for implementation task".\n\nIndependently re-run relevant checks and inspect the actual changes; executor claims alone are not evidence.\nAdvisory review question: was work unexpectedly slow or expensive, and what available timing/usage evidence supports that assessment? Missing evidence is unknown, not zero. Do not guess costs. This question is not a new PASS/FAIL gate and does not alter binding acceptance or independent review requirements.\n\nPROVENANCE RULE: owner_criteria are verdict-determining. supervisor_added_constraints govern orchestration safety but do not create product acceptance. planner_inferred_presentation_rules are advisory only — you may mention violations as warnings inside reasons, but they MUST NOT cause status "fail" on their own. Unknown provenance must not be silently weakened.`;
 }
 
 function selectPlannerOutputIndex(outputs: SubagentResult[], originalTask: string): number {
@@ -9048,6 +9235,16 @@ function aggregateVerifierResults(
   };
 }
 
+/** An explicit malformed/conflicting alias is never equivalent to `none`. */
+function parseProtectedAreaForecast(raw: Record<string, unknown>, defaultEmpty = false): string[] | undefined {
+  const keys = ["protected_areas_needed", "protectedAreasNeeded", "protected areas needed"];
+  const values = keys.filter(key => Object.prototype.hasOwnProperty.call(raw, key)).map(key => raw[key]);
+  if (!values.length) return defaultEmpty ? [] : undefined;
+  if (!values.every(value => Array.isArray(value) && value.every(item => typeof item === "string" && item.length > 0 && item.trim() === item))) return undefined;
+  if (!values.every(value => JSON.stringify(value) === JSON.stringify(values[0]))) return undefined;
+  return [...values[0] as string[]];
+}
+
 function parsePlan(text: string, originalTask: string): Plan {
   const parsed = extractJson(text);
   if (parsed && typeof parsed === "object") {
@@ -9061,7 +9258,9 @@ function parsePlan(text: string, originalTask: string): Plan {
         const readOnlyInputs = parseWriteSetInput(raw.read_only_inputs ?? raw.readOnlyInputs);
         const externalEvidenceRoots = parseWriteSetInput(raw.external_evidence_roots ?? raw.externalEvidenceRoots);
         const acceptanceCriteria = stringArray(raw.acceptance_criteria ?? raw.acceptanceCriteria);
-        return { tasks, notes: optionalString(raw.notes) ?? "", raw: parsed, predictedWriteSet, readOnlyInputs, externalEvidenceRoots, acceptanceCriteria };
+        const protectedAreasNeeded = parseProtectedAreaForecast(raw);
+        return { tasks, notes: optionalString(raw.notes) ?? "", raw: parsed, predictedWriteSet, readOnlyInputs, externalEvidenceRoots, acceptanceCriteria,
+          protectedAreasNeeded };
       }
     }
   }
@@ -9099,7 +9298,7 @@ function normalizePlanTask(item: unknown, index: number): PlanTask | null {
   const expectsFileChange = declaredExpectation === true && unambiguouslyValidationOnly
     ? false
     : declaredExpectation ?? inferredExpectation;
-  return { id, description, dependsOn: stringArray(raw.dependsOn) ?? [], ...(expectsFileChange === undefined ? {} : { expectsFileChange }) };
+  return { id, description, dependsOn: stringArray(raw.dependsOn) ?? [], predictedWriteSet: parseWriteSetInput(raw.predicted_write_set ?? raw.predictedWriteSet), ...(expectsFileChange === undefined ? {} : { expectsFileChange }) };
 }
 
 /** Focused regression seams for planner-input validation. */

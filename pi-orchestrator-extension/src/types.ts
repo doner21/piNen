@@ -124,6 +124,13 @@ export interface WorkerExecutionConstraints {
   noForceKill: boolean;
   /** Immutable run-scoped authority captured before the first worker. */
   testAuthorization?: FrozenTestAuthorizationPolicy;
+  /** Host/admission-owned grants; a planner may add needs, never grants. */
+  protectedAreaAuthorization?: {
+    needed?: string[];
+    grants: string[];
+    paths: string[];
+    descriptions?: string[];
+  };
 }
 
 export interface NormalizedParams {
@@ -152,6 +159,9 @@ export interface NormalizedParams {
   cwd: string;
   /** Caller-declared read-only evidence roots retained across role recovery. */
   externalEvidenceRoots?: string[];
+  /** Admission forecast (explicit [] for deterministic plans) and recorded owner grants. */
+  protectedAreasNeeded?: string[];
+  protectedAreaGrants?: string[];
   allowLocalModel: boolean;
   /** Natural-language orchestration controls detected from the task text. */
   orchestrationControls: NaturalLanguageOrchestrationControls;

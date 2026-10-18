@@ -1,8 +1,14 @@
 #!/usr/bin/env node
 // No Pi child, no session killing, no token files. Reuses the boot daemon entry point in topics mode.
 import core from '../extensions/telegram-pi/multi-session.cjs';
+import windows from '../window/window.cjs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+// Shared by production startup and isolated transport regressions. Only terminal
+// presentation is injectable; authorization and request transport remain real.
+export function windowLauncher(dir, config, presentation) {
+ return async text => windows.telegramNew(text, { ...config || await windows.loadConfig(), telegramRuntime: dir }, presentation);
+}
 export async function main() {
  const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
  if (!token) throw Error('Set TELEGRAM_BOT_TOKEN in the router environment (never a CLI argument or token file).');
@@ -14,7 +20,8 @@ export async function main() {
  const allowlist = config ? config.allowlist
   : (process.env.TELEGRAM_ALLOWED_FROM || '').split(',').filter(s => s.trim()).map(s => /^\d+$/.test(s.trim()) ? Number(s) : NaN);
  const dir = selected.dir;
- const router = new core.Router({ dir, api: new core.BotApi(token), chatId, allowlist });
+ const router = new core.Router({ dir, api: new core.BotApi(token), chatId, allowlist,
+  launchWindow: windowLauncher(dir) });
  let fence;
  const service = await core.serve({ router, token, expectedUsername: config?.botUsername,
   beforePoll: config ? async (router, abort) => {

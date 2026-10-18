@@ -19,13 +19,15 @@
 
 import { spawnSync } from "node:child_process";
 import { mergeCommandTimes, commandTimesFromHostResults, formatCommandTimes, summarizeCommandTimes, type CommandTimes } from "../command-times";
-import { getCommandTimesForRun } from "../substrate";
+import { getCommandTimesForRun, getRunProcessTrees } from "../substrate";
+import { assessResultProcessTrees, RetryCleanupError, type ProcessTreeInventory } from "../process-generation";
 import { readFileSync, existsSync } from "node:fs";
 import {
   SpawnGuard,
   SUBSTRATE_CAPS,
   clampIterations,
   spawnSubagent,
+  SubagentInfrastructureError,
   runWorkGraph,
   buildExecutionWaves,
   formatRoutedModel,
@@ -66,7 +68,9 @@ import {
   type ToolCallSummary,
 } from "../judgment";
 
-import { PEV_SHAPE_EXECUTION } from "../supervision";
+import { PEV_SHAPE_EXECUTION, decideProtectedAreaPermission } from "../supervision";
+import { atomicWriteJsonSync, runDirFor } from "../run-state";
+import { parseWriteSetInput } from "../write-set";
 import { captureContentSignatureSnapshot, diffContentSignatureSnapshots, type ContentSignatureSnapshot } from "../write-set";
 
 import type {
@@ -105,15 +109,20 @@ interface PlanTask {
   provider?: string;
   /** Output type classification set by the planner. Enforced pre-verifier. */
   outputType?: TaskOutputType;
+  predictedWriteSet?: string[];
 }
 
 interface Plan {
+  protectedAreasNeeded?: string[];
+  predictedWriteSet?: string[];
   tasks: PlanTask[];
   notes: string;
   raw?: unknown;
 }
 
 interface ExecutorOutput {
+  processTree?: ProcessTreeInventory;
+  processTrees?: ProcessTreeInventory[];
   taskId: string;
   description: string;
   agentName: string;
@@ -432,7 +441,16 @@ async function runPlanExecuteVerify(
     state.planText = planner.text;
     const plan = enforceTaskSizeCap(parsePlan(planner.text, params.task), computeAdaptiveTaskSizeCap(params.executorModel));
     const executionWaves = buildExecutionWaves(plan.tasks);
+    if (plan.protectedAreasNeeded && params.protectedAreasNeeded) plan.protectedAreasNeeded = [...new Set([...params.protectedAreasNeeded, ...plan.protectedAreasNeeded])];
     state.plan = plan;
+    const protectedAreaDecision = decideProtectedAreaPermission({ needed: plan.protectedAreasNeeded, grants: params.protectedAreaGrants,
+      paths: [...(params.predictedWriteSet ?? []), ...(plan.predictedWriteSet ?? []), ...plan.tasks.flatMap(task => task.predictedWriteSet ?? [])],
+      descriptions: plan.tasks.map(task => task.description), cwd: params.cwd });
+    // A standalone invocation has no visible-main store, but its plan and
+    // admission authority still remain available before executor dispatch.
+    const permissionRunId = context.runId ?? `pev-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    atomicWriteJsonSync(`${runDirFor(permissionRunId)}/attempt-${attempt}-protected-plan.json`, { plan, protectedAreaGrants: params.protectedAreaGrants ?? [], protectedAreaDecision });
+    if (!protectedAreaDecision.approved) throw new Error(`Protected permission refused before builder: ${protectedAreaDecision.reasons.join("; ")}`);
 
     // ── Phase 4: termination policy resolution (first iteration only) ────
     // Resolved once after the planner produces a plan. Precedence:
@@ -624,6 +642,12 @@ async function runPlanExecuteVerify(
       toModelOverride(params.verifierModel, params.verifierProvider),
     );
     const verifierResult = parseVerifierResult(verifier.text);
+    const durableTrees = getRunProcessTrees();
+    const processTrees = durableTrees?.trees ?? assessResultProcessTrees([planner, ...executorOutputs, verifier]);
+    if (durableTrees && durableTrees.status !== "clean" || processTrees.some(tree => tree.status !== "clean")) {
+      verifierResult.status = "fail";
+      verifierResult.reasons.push("WORKER_PROCESS_GENERATION_NOT_CLEAN: surviving, unknown or missing inventory");
+    }
     state.routingCheck = checkRequiredModelRouting(params, state);
     if (verifierResult.status === "pass" && state.routingCheck.status === "fail") {
       verifierResult.status = "fail";
@@ -678,6 +702,7 @@ async function runPlanExecuteVerify(
       : ["Verifier did not return a pass result."];
     state.failureReasons.push(...reasons.map((reason) => `Attempt ${attempt}: ${reason}`));
     emit(`Attempt ${attempt}: verification failed (${reasons.join("; ")}).`);
+    if (durableTrees && durableTrees.status !== "clean" || processTrees.some(tree => tree.status !== "clean")) break; // preserve settled writer, never retry a cleanup failure
 
     if (attempt >= maxAttemptsForBudget) break;
     if (!state.spawnGuard.wouldFit(1)) {
@@ -1035,7 +1060,7 @@ function buildPlanningPrompt(
   const retryBlock = failureReasons.length
     ? `\nPrevious verifier failure reasons to address deterministically (host context, not new owner criteria):\nROLE_RECOVERY_PLANNING_CONTEXT:\n${JSON.stringify(failureReasons)}\n`
     : "";
-  return `Plan the following task for executor subagents. Return JSON if possible, exactly shaped as:\n{"tasks":[{"id":"...","description":"...","dependsOn":[],"agent":"coder","role":"...","model":"...","provider":"...","outputType":"file_change|validation|analysis"}],"notes":"..."}\n\nINTAKE CONTRACT:\n${formatIntakeForPrompt(intake)}\n\nRules:\n- Keep task IDs stable and simple (task-1, task-2, ...).\n- Make each description self-contained.\n- Do not execute the task.\n- Carry forward all intake constraints, invariants, success criteria, failure criteria, and executor output contract into the task descriptions/notes.\n- If model routing requirements exist in intake, treat them as essential orchestrator constraints, not executor work.\n- Honor intake.orchestration_controls from natural language: maxSubagents/concurrency/looping are already normalized by the orchestrator, while requested runtime-role counts and perspectives must shape the plan.\n- If orchestration_controls.researcherCount is set, create that many research tasks assigned to agent "researcher" unless doing so would violate a hard constraint. Give each researcher a distinct perspective when perspectiveCount/perspectives are present.\n- If routing_requirements contains a runtime role such as "researcher", matching tasks must use agent "researcher" and may include the exact model/provider fields from that routing requirement for clarity. These are routing hints for the orchestrator, not work for the executor to perform.\n- If the task cannot be safely split and no runtime-role count is requested, return one task.\n- **Task-size cap**: each executor task description MUST be under ~200 words. Tasks exceeding this should be split into multiple smaller tasks. Small tasks ensure executor subagents have enough context budget to use write/edit/bash tools and produce actual file artifacts rather than text reports.\n- An executor task that only describes/analyzes and never touches files is NOT sufficient for CREATE or IMPLEMENT work — the verifier will check for actual file artifacts.\n- **OUTPUT TYPE CLASSIFICATION (REQUIRED)**: Every task MUST include an "outputType" field set to one of: "file_change" (task must produce disk artifacts — use write/edit/bash), "validation" (task checks/inspects existing state), or "analysis" (task produces reasoning only). The orchestrator enforces this contract pre-verifier. Tasks containing CREATE, IMPLEMENT, BUILD, MODIFY, ADD, WRITE, GENERATE, EDIT, CHANGE, FIX, or REFACTOR keywords MUST use "file_change". Tasks containing VERIFY, VALIDATE, CHECK, CONFIRM, TEST, ASSESS, INSPECT, or AUDIT keywords should use "validation". All others should use "analysis".\n- **ANTI-ESCAPE-CLAUSE RULE**: Task descriptions MUST NOT contain escape clauses such as "or repair", "or verify", "or validate", "or confirm", "if already done", "check if exists", "already implemented", "just check", "simply check", or "no changes needed". These phrases give executors permission to skip actual work. An implementation task that says "implement or repair X" will cause the executor to check if X exists and report "already done." Instead, write: "implement X" or "repair X" — never both with "or." If two distinct actions are needed, use two separate tasks. Do not use conditional language ("if", "already", "check if") in file_change task descriptions — be imperative and unconditional.\n\nPlanner-named runtime roles (Way 1):\n- Each task can optionally specify "agent" (the agent name to spawn for this task), "role" (a semantic hint like "code-reviewer" or "architect"), "model" (per-task model override), and "provider" (per-task provider override).\n- If "agent" names an unknown agent (not loaded from defaults or ~/.pi/agent/agents), the orchestrator falls back to the default executor agent silently.\n- Per-task "model"/"provider" are subject to the same local-model rejection and spawn ceiling as role-level overrides. They take precedence over the role-level executorModel/executorProvider but are still clamped through substrate caps.\n- Use "role" only as a hint — the orchestrator routes tasks by "agent", not by "role".\n- Omit "agent", "role", "model", and "provider" when the default executor and role-level configuration are sufficient.\n\nAttempt: ${attempt}${retryBlock}`;
+  return `Plan the following task for executor subagents. Return JSON if possible, exactly shaped as:\n{"protected_areas_needed":[],"predicted_write_set":["repo/relative/output"],"tasks":[{"id":"...","description":"...","dependsOn":[],"agent":"coder","role":"...","model":"...","provider":"...","outputType":"file_change|validation|analysis"}],"notes":"..."}\n\nINTAKE CONTRACT:\n${formatIntakeForPrompt(intake)}\n\nRules:\n- Keep task IDs stable and simple (task-1, task-2, ...).\n- Make each description self-contained.\n- Do not execute the task.\n- Carry forward all intake constraints, invariants, success criteria, failure criteria, and executor output contract into the task descriptions/notes.\n- If model routing requirements exist in intake, treat them as essential orchestrator constraints, not executor work.\n- Honor intake.orchestration_controls from natural language: maxSubagents/concurrency/looping are already normalized by the orchestrator, while requested runtime-role counts and perspectives must shape the plan.\n- If orchestration_controls.researcherCount is set, create that many research tasks assigned to agent "researcher" unless doing so would violate a hard constraint. Give each researcher a distinct perspective when perspectiveCount/perspectives are present.\n- If routing_requirements contains a runtime role such as "researcher", matching tasks must use agent "researcher" and may include the exact model/provider fields from that routing requirement for clarity. These are routing hints for the orchestrator, not work for the executor to perform.\n- If the task cannot be safely split and no runtime-role count is requested, return one task.\n- **Task-size cap**: each executor task description MUST be under ~200 words. Tasks exceeding this should be split into multiple smaller tasks. Small tasks ensure executor subagents have enough context budget to use write/edit/bash tools and produce actual file artifacts rather than text reports.\n- An executor task that only describes/analyzes and never touches files is NOT sufficient for CREATE or IMPLEMENT work — the verifier will check for actual file artifacts.\n- **OUTPUT TYPE CLASSIFICATION (REQUIRED)**: Every task MUST include an "outputType" field set to one of: "file_change" (task must produce disk artifacts — use write/edit/bash), "validation" (task checks/inspects existing state), or "analysis" (task produces reasoning only). The orchestrator enforces this contract pre-verifier. Tasks containing CREATE, IMPLEMENT, BUILD, MODIFY, ADD, WRITE, GENERATE, EDIT, CHANGE, FIX, or REFACTOR keywords MUST use "file_change". Tasks containing VERIFY, VALIDATE, CHECK, CONFIRM, TEST, ASSESS, INSPECT, or AUDIT keywords should use "validation". All others should use "analysis".\n- **ANTI-ESCAPE-CLAUSE RULE**: Task descriptions MUST NOT contain escape clauses such as "or repair", "or verify", "or validate", "or confirm", "if already done", "check if exists", "already implemented", "just check", "simply check", or "no changes needed". These phrases give executors permission to skip actual work. An implementation task that says "implement or repair X" will cause the executor to check if X exists and report "already done." Instead, write: "implement X" or "repair X" — never both with "or." If two distinct actions are needed, use two separate tasks. Do not use conditional language ("if", "already", "check if") in file_change task descriptions — be imperative and unconditional.\n\nPlanner-named runtime roles (Way 1):\n- Each task can optionally specify "agent" (the agent name to spawn for this task), "role" (a semantic hint like "code-reviewer" or "architect"), "model" (per-task model override), and "provider" (per-task provider override).\n- If "agent" names an unknown agent (not loaded from defaults or ~/.pi/agent/agents), the orchestrator falls back to the default executor agent silently.\n- Per-task "model"/"provider" are subject to the same local-model rejection and spawn ceiling as role-level overrides. They take precedence over the role-level executorModel/executorProvider but are still clamped through substrate caps.\n- Use "role" only as a hint — the orchestrator routes tasks by "agent", not by "role".\n- Omit "agent", "role", "model", and "provider" when the default executor and role-level configuration are sufficient.\n\nAttempt: ${attempt}${retryBlock}`;
 }
 
 function buildExecutorPrompt(intake: Intake, plan: Plan, task: PlanTask, gitForcingBlock?: string): string {
@@ -1083,7 +1108,7 @@ function buildVerificationPrompt(
   const artifactBlock = artifactText
     ? `\n\n${artifactText}`
     : "";
-  return `Verify the orchestration result against the intake contract.\n\nINTAKE CONTRACT:\n${formatIntakeForPrompt(intake)}\n\nPlan:\n${JSON.stringify(plan, null, 2)}\n\nExecutor outputs:\n${JSON.stringify(outputs, null, 2)}\n\nHOST-OWNED COMMAND TIMING (measurements, not worker claims):\n${JSON.stringify(commandTimesFromHostResults(outputs))}\n\nModel routing evidence/configuration supplied by orchestrator:\n${routingEvidence}${artifactBlock}\n\nReturn JSON exactly and only in this shape:\n{"status":"pass"|"fail","reasons":["..."]}\n\nUse status "pass" only if the plan, outputs, and supplied routing evidence/configuration satisfy the intake success criteria and do not violate any constraints, invariants, or failure criteria. Use "fail" with concrete reasons for missing, unclear, or incorrect work.\n\nFILE ARTIFACT VERIFICATION RULE: If any executor task description contains CREATE, IMPLEMENT, BUILD, MODIFY, ADD, WRITE, or GENERATE (case-insensitive), the executor output MUST reference actual file artifacts (files created, modified, or edited). A text-only response that describes what was done without mentioning any specific files created/modified is INSUFFICIENT — treat it as FAIL with reason "no file artifacts produced for implementation task". The ARTIFACT EVIDENCE block (if present) shows what files actually changed on disk — use it as ground truth, overriding any text claims.`;
+  return `Verify the orchestration result against the intake contract.\n\nINTAKE CONTRACT:\n${formatIntakeForPrompt(intake)}\n\nPlan:\n${JSON.stringify(plan, null, 2)}\n\nExecutor outputs:\n${JSON.stringify(outputs, null, 2)}\n\nHOST-OWNED EVIDENCE AUTHORITY: executor commandTimes and chronological secret-redacted actionEvidence above are authoritative, override worker prose, and appear exactly once. Recovery ledger records reference shared metadata by recoveryOutputIndex; entryIndex preserves complete original command order.\n\nModel routing evidence/configuration supplied by orchestrator:\n${routingEvidence}${artifactBlock}\n\nReturn JSON exactly and only in this shape:\n{"status":"pass"|"fail","reasons":["..."]}\n\nUse status "pass" only if the plan, outputs, and supplied routing evidence/configuration satisfy the intake success criteria and do not violate any constraints, invariants, or failure criteria. Use "fail" with concrete reasons for missing, unclear, or incorrect work.\n\nFILE ARTIFACT VERIFICATION RULE: If any executor task description contains CREATE, IMPLEMENT, BUILD, MODIFY, ADD, WRITE, or GENERATE (case-insensitive), the executor output MUST reference actual file artifacts (files created, modified, or edited). A text-only response that describes what was done without mentioning any specific files created/modified is INSUFFICIENT — treat it as FAIL with reason "no file artifacts produced for implementation task". The ARTIFACT EVIDENCE block (if present) shows what files actually changed on disk — use it as ground truth, overriding any text claims.`;
 }
 
 // ── Parsing ─────────────────────────────────────────────────────────────────
@@ -1097,7 +1122,8 @@ function parsePlan(text: string, originalTask: string): Plan {
         .map((item, index) => normalizePlanTask(item, index))
         .filter((task): task is PlanTask => Boolean(task));
       if (tasks.length > 0) {
-        return { tasks, notes: optionalString(raw.notes) ?? "", raw: parsed };
+        return { tasks, notes: optionalString(raw.notes) ?? "", raw: parsed,
+          protectedAreasNeeded: parseProtectedAreaForecast(raw), predictedWriteSet: parseWriteSetInput(raw.predicted_write_set ?? raw.predictedWriteSet) };
       }
     }
   }
@@ -1109,6 +1135,14 @@ function parsePlan(text: string, originalTask: string): Plan {
       "Planner output was not parseable as plan JSON; fell back to one executor task containing the planner output.",
     raw: text,
   };
+}
+
+/** Keep alias validation identical to the public host parser. */
+function parseProtectedAreaForecast(raw: Record<string, unknown>): string[] | undefined {
+  const values = ["protected_areas_needed", "protectedAreasNeeded", "protected areas needed"].filter(key => Object.prototype.hasOwnProperty.call(raw, key)).map(key => raw[key]);
+  if (!values.length || !values.every(value => Array.isArray(value) && value.every(item => typeof item === "string" && item.length > 0 && item.trim() === item))
+    || !values.every(value => JSON.stringify(value) === JSON.stringify(values[0]))) return undefined;
+  return [...values[0] as string[]];
 }
 
 function normalizePlanTask(item: unknown, index: number): PlanTask | null {
@@ -1134,6 +1168,7 @@ function normalizePlanTask(item: unknown, index: number): PlanTask | null {
     model: optionalString(raw.model),
     provider: optionalString(raw.provider),
     outputType,
+    predictedWriteSet: parseWriteSetInput(raw.predicted_write_set ?? raw.predictedWriteSet),
   };
 }
 
@@ -1395,17 +1430,28 @@ async function spawnChecked(
   const role = routingRole === "planner" || routingRole === "verifier" ? routingRole : undefined;
   const launch = async (prompt: string, _stage: RoleRecoveryStage = "initial", _index = 0, planning = false): Promise<SubagentResult> => {
     // Every follow-on passes the same guard and complete launcher admission.
-    const spawned = state.spawnGuard.reserve();
+    const spawned = state.spawnGuard.spawned;
     const name = planning ? params.plannerAgent : agentName;
     onProgress?.(`Spawning subagent ${name} (${spawned}/${state.spawnGuard.cap}) in ${params.cwd}`);
     const timedPrompt = role === "verifier" && !planning ? `${prompt}\n\nHOST-OWNED COMMAND TIMING (measurements, not worker claims):\n${JSON.stringify(getCommandTimesForRun())}` : prompt;
     const operation = () => spawnSubagent(name, timedPrompt, {
       agents, cwd: params.cwd, allowLocalModel: params.allowLocalModel, signal, inheritedModel, onProgress,
+      reserveSpawn: () => { state.spawnGuard.reserve(); },
+      infrastructureRetry: { identity: JSON.stringify([name, routingRole, _stage, _index, prompt, evidenceContext]), reserve: () => {
+        if (!state.spawnGuard.wouldFit(1)) throw new Error("Substrate spawn ceiling exceeded before infrastructure retry.");
+      } },
       modelOverride: planning ? toModelOverride(params.plannerModel, params.plannerProvider) : modelOverride,
-      readOnly: planning,
+      // The initial planner is inspection-only too, not just recovery planners.
+      // This also installs the capability allowlist used by the launch gate.
+      readOnly: planning || role === "planner",
       verifier: role === "verifier" && !planning,
       ...(role ? { recoverableRole: planning ? "planner" as const : role } : {}),
-      workerExecutionConstraints: params.workerExecutionConstraints,
+      workerExecutionConstraints: { ...params.workerExecutionConstraints, protectedAreaAuthorization: {
+        needed: state.plan ? state.plan.protectedAreasNeeded : params.protectedAreasNeeded,
+        grants: params.protectedAreaGrants ?? [],
+        paths: [...(params.predictedWriteSet ?? []), ...(state.plan?.predictedWriteSet ?? []), ...(state.plan?.tasks.flatMap(task => task.predictedWriteSet ?? []) ?? [])],
+        descriptions: state.plan?.tasks.map(task => task.description) ?? [params.task],
+      } },
       commandTimingContext: { role: planning ? "planner" : role ?? "executor", stage: _stage },
     });
     return role ? observeRoleReadOnlyLaunch(params.cwd, params.externalEvidenceRoots ?? [], operation) : operation();
@@ -3295,6 +3341,7 @@ async function executeExecutorTaskWithRecovery(
       { taskId: task.id, semanticRole: task.role },
     );
   } catch (err) {
+    if (err instanceof SubagentInfrastructureError || err instanceof RetryCleanupError) throw err;
     emit(`Task ${task.id}: spawn failed — ${String(err)}`);
     return {
       taskId: task.id,
@@ -3358,6 +3405,8 @@ async function executeExecutorTaskWithRecovery(
     outputSuffix: outputSuffix ?? undefined,
     toolCalls: result.toolCalls,
     commandTimes: result.commandTimes,
+    processTree: result.processTree,
+    processTrees: result.processTrees,
   };
 
   // ── Post-execution git diff (Change 1) ───────────────────────────
@@ -3433,6 +3482,7 @@ async function executeExecutorTaskWithRecovery(
         { taskId: `${task.id}-continue`, semanticRole: task.role },
       );
     } catch (error) {
+      if (error instanceof SubagentInfrastructureError || error instanceof RetryCleanupError) throw error;
       emit(`Task ${task.id}: handoff continuation spawn failed — escalating to split.`);
       state.recoveryLog.push(
         `[RECOVERY] ${task.id}: CONTINUE spawn failed — escalating to SPLIT.`,
@@ -3451,6 +3501,8 @@ async function executeExecutorTaskWithRecovery(
       contextBudget: budget, truncated: continueResult.truncated,
       contextExhaustionSignal: continueResult.contextExhaustionSignal, toolCalls: continueResult.toolCalls,
       commandTimes: continueResult.commandTimes,
+      processTree: continueResult.processTree,
+      processTrees: continueResult.processTrees,
     }, continueBefore));
     if (!checkContextExhaustion(continueResult)) {
       emit(`Task ${task.id}: handoff continuation succeeded.`);
@@ -3572,6 +3624,7 @@ async function splitAndExecuteTask(
         { taskId: subtask.id, semanticRole: task.role },
       );
     } catch (err) {
+      if (err instanceof SubagentInfrastructureError || err instanceof RetryCleanupError) throw err;
       emit(`Task ${task.id}: subtask ${subtask.id} spawn failed — ${String(err)}`);
       subtaskOutputs.push(observeSubtask({
         taskId: subtask.id,
@@ -3598,6 +3651,8 @@ async function splitAndExecuteTask(
       contextExhaustionSignal: subtaskResult.contextExhaustionSignal,
       toolCalls: subtaskResult.toolCalls,
       commandTimes: subtaskResult.commandTimes,
+      processTree: subtaskResult.processTree,
+      processTrees: subtaskResult.processTrees,
     }));
 
     // If this subtask also shows exhaustion, stop spawning more
@@ -3635,6 +3690,7 @@ async function splitAndExecuteTask(
     exitCode: allClean ? 0 : 1,
     durationMs: totalDuration,
     commandTimes: mergeCommandTimes(...subtaskOutputs.map(item => item.commandTimes)),
+    processTrees: subtaskOutputs.flatMap(item => item.processTrees ?? (item.processTree ? [item.processTree] : [])),
     contextBudget: budget,
   };
 }
@@ -3801,6 +3857,7 @@ function mergeExecutorOutputs(
     exitCode: first.exitCode === 0 ? second.exitCode : first.exitCode,
     durationMs: first.durationMs + second.durationMs,
     commandTimes: mergeCommandTimes(first.commandTimes, second.commandTimes),
+    processTrees: [...(first.processTrees ?? (first.processTree ? [first.processTree] : [])), ...(second.processTrees ?? (second.processTree ? [second.processTree] : []))],
     contextBudget: first.contextBudget,
     truncated: second.truncated ?? first.truncated,
     contextExhaustionSignal: second.contextExhaustionSignal ?? first.contextExhaustionSignal,

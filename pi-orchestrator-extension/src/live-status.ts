@@ -6,10 +6,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { atomicWriteJsonSync } from "./run-state";
+import { snapshotProcesses, readRunProcessTrees } from "./process-generation";
+import { lifecycleEligibility, type SupervisionRunState } from "./supervision";
 
 export type ProcessIdentityObservation =
   | { status: "dead"; evidence: string }
-  | { status: "alive"; startedAt?: number }
+  | { status: "alive"; startedAt?: number; birthIdentity?: string }
   | { status: "unknown"; reason: string };
 export type ProcessIdentityObserver = (pid: number) => ProcessIdentityObservation;
 
@@ -20,7 +22,9 @@ export function observeProcessIdentity(pid: number): ProcessIdentityObservation 
   if (pid === process.pid) return { status: "alive", startedAt: Math.round(performance.timeOrigin) };
   try {
     process.kill(pid, 0);
-    return { status: "alive" };
+    const snapshot = snapshotProcesses();
+    const row = snapshot.rows.find(row => row.pid === pid);
+    return row ? { status: "alive", startedAt: Date.parse(row.born), birthIdentity: row.born } : { status: "unknown", reason: snapshot.error ?? "generation_not_observed" };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException | null)?.code;
     return code === "ESRCH" ? { status: "dead", evidence: "ESRCH" } : { status: "unknown", reason: code || "process_probe_failed" };
@@ -59,9 +63,15 @@ export interface LiveStatus {
   activeSilenceAlarms: Array<SilenceAlarm & { phase: string }>;
   lastError: unknown;
   observationErrors: string[];
+  processTrees: ReturnType<typeof readRunProcessTrees>;
+  durableStatus?: string;
+  terminalOutcome?: string;
+  /** Current cleanup observation never rewrites the durable verdict. */
+  lifecycle: ReturnType<typeof lifecycleEligibility>;
 }
 export interface LiveStatusOptions {
   now?: Date;
+  hostInstanceId?: string;
   observeProcess?: ProcessIdentityObserver;
   runDir?: string;
   /** A store validation/read failure, retained without changing its rejection. */
@@ -162,6 +172,8 @@ export function refreshLiveStatus(runDir: string, options: LiveStatusOptions = {
     errors.push("durable run identity mismatch");
   }
   const preExecutor = !manifest && Boolean(state && ["plan_checkpoint", "awaiting_supervisor", "paused"].includes(state.status)
+    && !state.currentTaskId && state.runtime?.kind === "generic-shape" && Array.isArray(state.runtime.executorOutputs) && state.runtime.executorOutputs.length === 0
+    && state.runtime.cursor?.nextTaskIndex === 0
     && Array.isArray(state.checkpoints) && !state.checkpoints.some((item: any) => ["executor", "verifier"].includes(item?.kind)));
   const manifestState = manifest && Array.isArray(manifest.phases) ? "available" : preExecutor ? "not started yet" : "unavailable";
   if (manifestState === "unavailable") {
@@ -189,10 +201,11 @@ export function refreshLiveStatus(runDir: string, options: LiveStatusOptions = {
     const [pid, startedAt] = hostId.split(":").map(Number);
     if (validPid(pid) && Number.isSafeInteger(startedAt)) {
       const observed = probe(pid);
-      if (observed.status === "alive" && observed.startedAt !== undefined && Math.abs(observed.startedAt - startedAt) <= 2_000 && fresh(state?.updatedAt)) {
+      if (observed.status === "alive" && observed.startedAt !== undefined && Math.abs(observed.startedAt - startedAt) <= 2_000) {
         // A live Pi host can own many stopped runs. Only fresh in-flight host
         // activity counts; cancellation never conceals an observed survivor.
-        hostAlive = ["executing", "verifying"].includes(state?.status);
+        hostAlive = ["executing", "verifying"].includes(state?.status) && fresh(state?.updatedAt);
+        if (["executing", "verifying"].includes(state?.status) && !hostAlive) uncertain = true;
       } else if (observed.status !== "dead" || observed.evidence !== "ESRCH") uncertain = true;
     } else uncertain = true;
   } else uncertain = true;
@@ -200,6 +213,7 @@ export function refreshLiveStatus(runDir: string, options: LiveStatusOptions = {
   let names: string[] = [];
   try { names = fs.readdirSync(runDir).sort(); }
   catch (error) { uncertain = true; errors.push(`run directory: ${String(error)}`); }
+  const processTrees = readRunProcessTrees(runDir, options.observeProcess, { preDispatch: preExecutor });
   const candidates: Array<{ pid?: unknown; phase: string; heartbeatAt?: string; startedAt?: string; launchId?: string }> = [];
   const alarms: LiveStatus["activeSilenceAlarms"] = [];
   const observedPhaseIndices = new Set<number>();
@@ -228,8 +242,13 @@ export function refreshLiveStatus(runDir: string, options: LiveStatusOptions = {
     const phaseEntry = Array.isArray(manifest?.phases) ? manifest.phases.find((entry: unknown) => record(entry) && entry.index === index) : undefined;
     const phase = typeof phaseEntry?.name === "string" ? phaseEntry.name : name.replace(/^phase-\d+-/, "").replace(/\.result\.json$/, "");
     if (result.kind !== "subagent-phase-result" || !["running", "incomplete", "complete"].includes(result.status)) { uncertain = true; continue; }
-    if (validPid(result.pid) || result.status === "running") candidates.push({ pid: result.pid, phase, heartbeatAt: result.heartbeatAt, startedAt: result.startedAt, launchId: result.launchId });
-    else if (result.status === "complete" || time(result.completedAt) === undefined) {
+    const fact = processTrees.phases.find(item => item.file === name);
+    // Settled phase roots are assessed by exact generation below, never by a
+    // historical PID reinterpreted as a new worker. Descendants stay retained.
+    if (fact && fact.settlement !== "ambiguous") {
+      if (processTrees.reasons.some(reason => reason.startsWith(`${name}:`))) uncertain = true;
+    } else if (validPid(result.pid) || result.status === "running") candidates.push({ pid: result.pid, phase, heartbeatAt: result.heartbeatAt, startedAt: result.startedAt, launchId: result.launchId });
+    else {
       uncertain = true;
       errors.push(`${name}: terminal worker identity/settlement unavailable`);
     }
@@ -299,16 +318,22 @@ export function refreshLiveStatus(runDir: string, options: LiveStatusOptions = {
     }
   }
   activeWorkers.sort((a, b) => a.pid - b.pid);
+  if (processTrees.status !== "clean" && !preExecutor) uncertain = true;
+  for (const tree of processTrees.trees) for (const member of tree.survivors) {
+    if (!activeWorkers.some(worker => worker.pid === member.pid)) activeWorkers.push({ pid: member.pid, phase: "retained process generation", liveness: "alive" });
+  }
   const going = activeWorkers.some(worker => worker.liveness === "alive") || hostAlive ? "going" : uncertain ? "unknown" : "not going";
   const heartbeatAt = activeWorkers.map(worker => worker.heartbeatAt).filter((stamp): stamp is string => time(stamp) !== undefined).sort().at(-1)
     ?? (hostAlive ? state?.updatedAt : null);
   const projection: LiveStatus = {
     schemaVersion: 1, runId, observedAt: now.toISOString(), going, manifestState,
+    durableStatus: state?.status, terminalOutcome: state?.terminalOutcome,
+    lifecycle: state ? lifecycleEligibility(state as SupervisionRunState, runDir, options) : { allowedNextActions: ["inspect"], actionRefusals: { continue: "durable state unavailable", accept: "durable state unavailable" } },
     phases: (Array.isArray(manifest?.phases) ? manifest.phases : [])
       .filter((entry: unknown) => record(entry) && Number.isSafeInteger(entry.index) && entry.index >= 0 && typeof entry.name === 'string' && ['pending', 'running', 'done', 'detached', 'ambiguous-completion'].includes(entry.status))
       .map((entry: { index: number; name: string; status: string }) => ({index: entry.index, name: entry.name, status: entry.status})),
     phase: activeWorkers.length ? [...new Set(activeWorkers.map(worker => worker.phase))].join(", ") : hostAlive ? String(state?.runtime?.cursor?.stage ?? state?.status ?? "host") : null,
-    activeWorkers, heartbeatAt, activeSilenceAlarms: alarms, lastError: options.observationError ?? lastError ?? errors.at(-1) ?? null, observationErrors: errors,
+    processTrees, activeWorkers, heartbeatAt, activeSilenceAlarms: alarms, lastError: options.observationError ?? lastError ?? errors.at(-1) ?? null, observationErrors: errors,
   };
   atomicWriteJsonSync(path.join(runDir, "live-status.json"), projection);
   return projection;

@@ -20,6 +20,10 @@ for (const [key, dir] of Object.entries({ PI_CODING_AGENT_DIR: "agent", PI_ORCHE
 process.env.PI_ORCHESTRATOR_TEST_RUNS_OWNER = SCRATCH;
 process.env.PI_OFFLINE = "1";
 const ts = require(path.join(ROOT, "node_modules/typescript"));
+const substrate = require(path.join(ROOT, 'node_modules/jiti'))(__filename, { interopDefault: true, fsCache: false })(path.join(ROOT, 'src/substrate.ts'));
+// A pending mock readiness promise has no native handle. Never let early event
+// loop exhaustion accidentally report success before every case ran.
+process.exitCode = 1;
 const timingFile = path.join(ROOT, "src/command-times.ts");
 const timingModule = { exports: {} }, actionModule = { exports: {} };
 vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(ROOT, "src/action-evidence.ts"), "utf8"), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true } }).outputText, { module: actionModule, exports: actionModule.exports, require: id => id.startsWith(".") ? require(path.join(ROOT, "src", id)) : require(id), Date, Buffer, TextDecoder });
@@ -38,13 +42,22 @@ function declarations(relative, names) {
   }).join("\n");
 }
 function compile(relative, name, dependencies) {
+  if (fs.readFileSync(path.join(ROOT, relative), 'utf8').includes(`function ${name}Attempt(`)) name += 'Attempt';
   const source = declarations("src/substrate.ts", ["SubagentPhaseResultRecorder", "isValidBoundPhaseResult"])
     + "\n" + declarations(relative, [name, "buildSubagentSystemPrompt", "describeJsonEvent", "extractMessageText"]);
-  const js = ts.transpileModule(source + `\nglobalThis.launch = ${name}; globalThis.Recorder = SubagentPhaseResultRecorder;`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText;
+  const wrapper = dependencies.withInfrastructureRetry ? declarations('src/substrate.ts', ['retryInfrastructureSubagent']) + '\n' + declarations(relative, [name.replace(/Attempt$/, '')]) : '';
+  const js = ts.transpileModule(source + wrapper + `\nglobalThis.launch = ${dependencies.withInfrastructureRetry ? name.replace(/Attempt$/, '') : name}; globalThis.Recorder = SubagentPhaseResultRecorder;`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText;
   const context = vm.createContext({ Date: Clock, path, os, process, console, Buffer, structuredClone,
     createHash: crypto.createHash, randomBytes: crypto.randomBytes,
     existsSync: fs.existsSync, readFileSync: fs.readFileSync,
     atomicWriteJsonSync(file, value) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(value)); },
+    ...require(path.join(ROOT, 'src/streaming-redactor.cjs')),
+    sanitizeSubagentResult: substrate.sanitizeSubagentResult,
+    isProvablyReadOnlySubagent: substrate.isProvablyReadOnlySubagent,
+    isNoToolInfrastructureFailure: substrate.isNoToolInfrastructureFailure,
+    isInfrastructureFailure: substrate.isInfrastructureFailure,
+    SubagentInfrastructureError: substrate.SubagentInfrastructureError,
+    ProcessGenerationTracker: class { sample() {} rootClosed() {} current() { return undefined; } },
     ...timingModule.exports, ...dependencies });
   vm.runInContext(js, context, { filename: relative });
   return context;
@@ -52,7 +65,7 @@ function compile(relative, name, dependencies) {
 const failures = [];
 async function check(id, body) {
   try { await body(); console.log(`PASS ${id}`); }
-  catch (error) { failures.push({ id, error: error.message }); console.log(`RED ${id}: ${error.message}`); }
+  catch (error) { failures.push({ id, error: error.name }); console.log(`RED ${id}: ${error.name}`); }
 }
 async function exercise(relative, name, fault) {
   observedNow = NOW;
@@ -155,11 +168,13 @@ async function exercise(relative, name, fault) {
     assert.equal(result.result, undefined, "refusal must never manufacture a successful worker result");
   }
 }
-(async () => {
+module.exports = { compile, SCRATCH, substrate, ts, ROOT };
+if (require.main === module) (async () => {
   try {
     for (const [relative, name] of [["src/substrate.ts", "spawnSubagent"], ["src/index.ts", "runSubagent"]]) {
       for (const fault of ["capacity", "prompt", "preparation", "progress", "policy", "write", "command", "attempts", "collector", "spawn", "empty", "cleanup", "success", "survivor"]) await check(`${name}/${fault}`, () => exercise(relative, name, fault));
     }
   } finally { fs.rmSync(SCRATCH, { recursive: true, force: true }); }
-  assert.equal(failures.length, 0, JSON.stringify(failures, null, 2));
-})().catch(error => { throw error; });
+  assert.equal(failures.length, 0, 'worker settlement cases failed');
+  process.exitCode = 0;
+})().catch(() => { console.error('WORKER_SETTLEMENT_CHECK_FAILED (safe labels only)'); process.exitCode = 1; });

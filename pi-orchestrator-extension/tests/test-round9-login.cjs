@@ -1,0 +1,21 @@
+#!/usr/bin/env node
+'use strict';
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
+const ROOT=path.resolve(__dirname,'..'),ts=require(path.join(ROOT,'node_modules/typescript'));
+const file=path.join(ROOT,'../agent/skills/headless-orchestration/scripts/launch.mjs'),source=fs.readFileSync(file,'utf8'),ast=ts.createSourceFile(file,source,ts.ScriptTarget.Latest,true,ts.ScriptKind.JS);
+const names=['validateConfig','validateIsolatedLogin'];
+const declarations=ast.statements.filter(n=>names.includes(n.name?.text)).map(n=>n.getText(ast).replace(/^export\s+/,'' )).join('\n');
+const runDir='C:/owned/run',frozenRoot='C:/owned/frozen';
+const cfg={nodeExe:process.execPath,cwd:'C:/owned/candidate',frozenRoot,extension:frozenRoot+'/index.ts',sdkEntry:frozenRoot+'/sdk.js',piCli:frozenRoot+'/cli.js',runDir,systemFile:runDir+'/system.md',commandFile:runDir+'/command.txt',supervisorFile:runDir+'/supervisor.md',evidenceRoots:[],provider:'openai-codex',model:'gpt-6-astra',credentialRenewalOwner:'independent-runtime-login'};
+const controls='--supervision visible-main --adaptive-supervision off --planner-provider openai-codex --planner-model gpt-6-astra --executor-provider openai-codex --executor-model gpt-6.1-sol --verifier-provider openai-codex --verifier-model gpt-6.1-sol --planner-count 1 --executor-concurrency 1 --verifier-count 1 --max-retries 0 --paradigm plan-execute-verify --no-force-kill';
+let auth;
+const context=vm.createContext({Error,path,process,Date,JSON,canonicalExisting:p=>path.resolve(p),inside:(a,b)=>{const r=path.relative(a,b);return !r||(!r.startsWith('..')&&!path.isAbsolute(r));},fs:{statSync:()=>({isFile:()=>true}),lstatSync:()=>({isFile:()=>true,nlink:1,isSymbolicLink:()=>false}),readFileSync:p=>{if(p.endsWith('config.json'))return JSON.stringify(cfg);if(p.endsWith('command.txt'))return '/orchestrate run '+controls+' -- authorized task';if(auth===undefined)throw Error('missing secret auth file');return JSON.stringify(auth);}}});
+vm.runInContext(declarations+'\nglobalThis.api=validateConfig;',context);
+assert.throws(()=>context.api(runDir+'/config.json'),/LOGIN_/,'missing isolated credential must refuse BEFORE launch');
+auth={'openai-codex':{type:'oauth',access:'synthetic-not-real',refresh:'synthetic-not-real',expires:0,accountId:'synthetic'}};
+assert.throws(()=>context.api(runDir+'/config.json'),/LOGIN_.*EXPIRED/);
+auth['openai-codex'].expires=Date.now()+3600000;
+const checked=context.api(runDir+'/config.json');
+assert.equal(checked.cfg.loginStatus.remoteValidity,'unverified');
+assert.equal(checked.cfg.loginStatus.sharedRenewal,'unavailable-manual-reprovisioning');
+console.log('PASS missing/expired refusal, local usability versus remote validity, manual shared-renewal limitation');

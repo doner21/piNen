@@ -31,7 +31,7 @@ import { createInterface } from "node:readline";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { refreshLiveStatus, reduceSilenceAlarms, type SilenceAlarm, type LiveStatusOptions } from "./live-status";
 import { CommandTimesCollector, mergeCommandTimes, readRunCommandTimes, type CommandTimes, type CommandTimingClocks, type CommandTimingContext } from "./command-times";
-import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -46,13 +46,18 @@ import {
   type ProviderHealthError,
 } from "./judgment";
 import { getPiChildFirstJsonTimeoutMs, isPiJsonProtocolEvent, killOwnedProcessTree, resolvePiChildCommand } from "./child-launch.ts";
-import { atomicWriteJsonSync, phaseLogPathFor, phaseResultPathFor } from "./run-state";
+import { atomicWriteJsonSync, phaseLogPathFor, phaseResultPathFor, runDirFor } from "./run-state";
+import { reserveRunSpawn } from "./spawn-budget";
 import { assertWorkerPromptFitsCapacity } from "./executor-recovery/budget-estimator";
 import { isRoleContextExhaustion, isRoleRecoveryHandoff, RoleContextExhaustionError, type RoleRecoveryEvidence } from "./role-recovery";
 import { NO_FORCE_KILL_GUARD_READY_MARKER } from "./worker-execution-constraints";
 import { NO_OUTPUT_MONITOR_READY_MARKER } from "./worker-no-output-monitor";
 import { ActionEvidenceCollector as UnobservedActionEvidenceCollector, type ActionEvidenceCollectorOptions, type ActionEvidenceLedger } from "./action-evidence";
 import { beginHostPublication, observeHostPublication } from "./host-publications";
+import { decideProtectedAreaPermission } from "./supervision";
+import { ProcessGenerationTracker, readRunProcessTrees, assessRetryPredecessors, processTreesDigest, RetryCleanupError, type RetryPredecessorEvidence, type ProcessTreeInventory } from "./process-generation";
+import { withInfrastructureRetry, type InfrastructureRetryOptions } from "./infrastructure-retry";
+import { sanitizeWorkerText, sanitizeWorkerValue, WorkerProtocolSanitizer } from "./streaming-redactor.cjs";
 
 /** Keep attribution at the host adapter, without changing journal authority.
  * Both legacy and substrate launchers use this collector; isolated admission
@@ -226,6 +231,9 @@ export interface SubagentResult {
   commandTimes?: CommandTimes;
   /** Transient assistant/transport failures cleared by the child's successful auto-retry lifecycle. */
   recoveredAssistantFailures?: string[];
+  /** Cumulative kernel process generations, including reparented helpers. */
+  processTree?: ProcessTreeInventory;
+  processTrees?: ProcessTreeInventory[];
   /** Provider-refusal recovery telemetry, present when one safe reworded retry occurred. */
   providerRefusal?: ProviderRefusalInfo;
 }
@@ -256,6 +264,9 @@ export const VERIFIER_EVIDENCE_TOOLS = Object.freeze([
 ] as const);
 
 export interface SpawnSubagentOptions {
+  infrastructureRetry?: InfrastructureRetryOptions;
+  /** Called for every physical launch, including transport retry attempts. */
+  reserveSpawn?: () => void;
   commandTimingClocks?: CommandTimingClocks;
   commandTimingContext?: CommandTimingContext;
   /** Host observations retained before a defensive provider retry starts. */
@@ -321,6 +332,7 @@ export interface SpawnSubagentOptions {
   verifier?: boolean;
   /** Internal recursion fence: provider refusals may be reworded at most once. */
   providerRefusalRetryAttempt?: 0 | 1;
+  policyRetryBudget?: import("./infrastructure-retry").PolicyRetryBudget;
   /** Typed context exhaustion for planner/verifier recovery, after settlement. */
   recoverableRole?: "planner" | "verifier";
   /** Health probes must surface provider policy/refusal failures immediately. */
@@ -387,6 +399,25 @@ export interface SubagentTerminalAmbiguousInfo {
   candidate?: SubagentResult;
 }
 
+export function isInfrastructureFailure(failures: string[]): boolean {
+  return /authentication|unauthorized|\b401\b|\b403\b|oauth|(?:token.*expired|expired.*token)|rate.limit|quota|provider.*(?:fail|unavailable)|fetch failed|econnreset/i.test(failures.join("; "));
+}
+
+/** Only a complete tool-event stream can establish that no tool ran. */
+export function isNoToolInfrastructureFailure(failures: string[], tools: ToolCallSummary, telemetryComplete: boolean): boolean {
+  return telemetryComplete && tools.total === 0 && tools.mutating === 0 && isInfrastructureFailure(failures);
+}
+
+export class SubagentInfrastructureError extends Error {
+  readonly info = { code: "worker_infrastructure" as const, retryAllowed: true, retryEligible: true, retryAttempted: false, mutationAmbiguous: false, toolTelemetryComplete: true, toolCalls: { total: 0, mutating: 0, byTool: {} } };
+  constructor(attempted = false) {
+    super("WORKER_INFRASTRUCTURE: recorded auth/provider failure before any tool execution; restoration unconfirmed or the single same-role retry is exhausted.");
+    this.info.retryAttempted = attempted;
+    this.info.retryAllowed = !attempted;
+    this.name = "SubagentInfrastructureError";
+  }
+}
+
 export interface ProviderRefusalInfo {
   code: "provider_refused";
   providerMessage: string;
@@ -400,7 +431,7 @@ export class ProviderRefusalError extends Error {
   readonly info: ProviderRefusalInfo & { agentName: string };
 
   constructor(agentName: string, info: Omit<ProviderRefusalInfo, "code">) {
-    const payload = { code: "provider_refused" as const, agentName, ...info };
+    const payload = { code: "provider_refused" as const, agentName, ...sanitizeWorkerValue(info) };
     super(`Subagent ${agentName} provider refusal (code=provider_refused, retryAllowed=${payload.retryAllowed}): ${payload.providerMessage}`);
     this.name = "ProviderRefusalError";
     this.info = payload;
@@ -463,6 +494,10 @@ export class SubagentTerminalAmbiguousError extends Error {
   constructor(agentName: string, info: Omit<SubagentTerminalAmbiguousInfo, "agentName" | "retryAllowed">) {
     const payload: SubagentTerminalAmbiguousInfo = {
       ...info,
+      errorMessage: sanitizeWorkerText(info.errorMessage),
+      stderr: sanitizeWorkerText(info.stderr),
+      assistantFailures: info.assistantFailures.map(sanitizeWorkerText),
+      ...(info.candidate ? { candidate: sanitizeSubagentResult(info.candidate) } : {}),
       agentName,
       retryAllowed: false,
     };
@@ -478,6 +513,14 @@ export class SubagentTerminalAmbiguousError extends Error {
 interface SubagentPhaseLogContext {
   runId: string;
   nextIndex: number;
+  maxSubagents?: number | (() => number);
+  allowAutomaticIncrease?: boolean;
+}
+
+/** Durable attempt-wide cleanup includes planner, exhausted and refused phases. */
+export function getRunProcessTrees(): ReturnType<typeof readRunProcessTrees> | undefined {
+  const context = subagentPhaseLogContext.getStore();
+  return context ? readRunProcessTrees(runDirFor(context.runId)) : undefined;
 }
 
 /** Read all host phase publications, including abandoned/incomplete starts. */
@@ -500,18 +543,27 @@ export function withWorkerExecutionConstraints<T>(
 ): Promise<T> {
   const snapshot: WorkerExecutionConstraints = {
     noForceKill: constraints.noForceKill === true,
+    ...(constraints.protectedAreaAuthorization
+      ? { protectedAreaAuthorization: JSON.parse(JSON.stringify(constraints.protectedAreaAuthorization)) as NonNullable<WorkerExecutionConstraints["protectedAreaAuthorization"]> }
+      : {}),
     ...(constraints.testAuthorization
       ? { testAuthorization: JSON.parse(JSON.stringify(constraints.testAuthorization)) as FrozenTestAuthorizationPolicy }
       : {}),
   };
   if (snapshot.testAuthorization) deepFreezeValue(snapshot.testAuthorization);
+  if (snapshot.protectedAreaAuthorization) deepFreezeValue(snapshot.protectedAreaAuthorization);
   return workerExecutionConstraintContext.run(Object.freeze(snapshot), operation);
 }
 
 /** Bind all substrate spawns in an orchestration dispatch to durable per-phase logs. */
-export function withSubagentPhaseLogging<T>(runId: string | undefined, operation: () => Promise<T>): Promise<T> {
+export function withSubagentPhaseLogging<T>(runId: string | undefined, operation: () => Promise<T>, maxSubagents?: number | (() => number), allowAutomaticIncrease = false): Promise<T> {
   if (!runId) return operation();
-  return subagentPhaseLogContext.run({ runId, nextIndex: 0 }, operation);
+  const dir = runDirFor(runId);
+  const nextIndex = existsSync(dir) ? readdirSync(dir).reduce((next, name) => {
+    const match = /^phase-(\d+)-.*\.(?:result\.json|log)$/.exec(name);
+    return match ? Math.max(next, Number(match[1]) + 1) : next;
+  }, 0) : 0;
+  return subagentPhaseLogContext.run({ runId, nextIndex, maxSubagents, allowAutomaticIncrease }, operation);
 }
 
 function allocatePhaseEvidence(agentName: string, explicitLog?: string, explicitResult?: string): AllocatedPhaseEvidence {
@@ -566,8 +618,20 @@ function replacePhaseLogWithTail(file: string, appended: Buffer, maxBytes: numbe
   }
 }
 
-export function appendSubagentPhaseLog(file: string | undefined, stream: "stdout" | "stderr" | "host", text: string): void {
-  observeHostPublication([file], () => appendSubagentPhaseLogUnobserved(file, stream, text));
+export function appendSubagentPhaseLog(file: string | undefined, stream: "stdout" | "stderr" | "host", text: string, protocol?: WorkerProtocolSanitizer): void {
+  // stderr chunks can split a credential at any byte. Withhold them rather
+  // than persist a prefix before a later callback reveals the credential key.
+  let safe = stream === "stderr" ? (text ? "[worker stderr withheld]" : "") : sanitizeWorkerText(text);
+  if (stream === "stdout" && text) {
+    try {
+      const record = JSON.parse(text);
+      if (!record || typeof record !== "object") throw new Error("not a protocol record");
+      // Direct callers without a stream cursor cannot safely publish deltas.
+      safe = JSON.stringify(protocol ? protocol.sanitize(record) : record.type === "message_update"
+        ? { type: "message_update", payload: "[partial worker payload withheld]" } : sanitizeWorkerValue(record));
+    } catch { safe = "[non-protocol worker stdout withheld]"; }
+  }
+  observeHostPublication([file], () => appendSubagentPhaseLogUnobserved(file, stream, safe));
 }
 
 function appendSubagentPhaseLogUnobserved(file: string | undefined, stream: "stdout" | "stderr" | "host", text: string): void {
@@ -624,9 +688,15 @@ export interface SubagentPhaseResultPublication {
   heartbeatAt: string;
   heartbeatSequence: number;
   eventCount: number;
+  /** Observed child/provider lifecycle counts, not inferred hidden network requests. */
+  providerAttemptEvidence?: { agentStarts: number; automaticRetries: number };
   pid?: number;
+  processTree?: ProcessTreeInventory;
+  processTrees?: ProcessTreeInventory[];
   completedAt?: string;
   incompleteReason?: string;
+  /** Settled process/telemetry, NOT a successful worker result. */
+  settlement?: "infrastructure_no_tools" | "provider_refused_read_only" | "never_dispatched" | "closed";
   transportFailuresAfterResult?: string[];
   activeSilenceAlarms?: SilenceAlarm[];
   commandTimes?: CommandTimes;
@@ -650,11 +720,26 @@ export class SubagentPhaseResultRecorder {
   private readonly startedAt: string;
   private heartbeatSequence = 0;
   private terminal = false;
+  /** Evidence loss must never become durable success or a retryable writer. */
+  terminalPublicationFailed = false;
   private latestEventCount = 0;
+  private agentStarts = 0;
+  private automaticRetries = 0;
   private latestPid: number | undefined;
   private lastWriteAt = 0;
   private activeSilenceAlarms: SilenceAlarm[] = [];
   private commandTimes: CommandTimes | undefined;
+  private processTracker: ProcessGenerationTracker | undefined;
+  private priorProcessTrackers: ProcessGenerationTracker[] = [];
+
+  get processTree(): ProcessTreeInventory | undefined { return this.processTracker?.current(); }
+  get processTrees(): ProcessTreeInventory[] | undefined {
+    return this.priorProcessTrackers.length ? [...this.priorProcessTrackers.map(tracker => tracker.current()), ...(this.processTree ? [this.processTree] : [])] : undefined;
+  }
+  private sampleProcessTrees(): void {
+    for (const tracker of this.priorProcessTrackers) tracker.sample();
+    this.processTracker?.sample();
+  }
 
   /** Persist starts immediately, including commands that never settle. */
   publishCommandTimes(ledger: CommandTimes): void {
@@ -680,12 +765,32 @@ export class SubagentPhaseResultRecorder {
     const pidChanged = pid !== undefined && pid !== this.latestPid;
     if (pid !== undefined) this.latestPid = pid;
     this.heartbeatSequence += 1;
-    if (pidChanged || Date.now() - this.lastWriteAt >= 1_000) this.write({ status: "running" });
+    if (pidChanged && pid !== undefined) {
+      if (this.processTracker) this.priorProcessTrackers.push(this.processTracker);
+      this.processTracker = new ProcessGenerationTracker(pid, undefined, { launchId: this.launchId, phaseId: this.file ?? `in_memory:${this.launchId}` });
+    }
+    if (pidChanged || Date.now() - this.lastWriteAt >= 1_000) {
+      if (!pidChanged) this.sampleProcessTrees();
+      this.write({ status: "running" });
+    }
+  }
+
+  /** Native close belongs only to this recorder's current spawned child. */
+  processClosed(pid: number | undefined): void {
+    if (pid !== undefined && pid === this.latestPid) this.processTracker?.rootClosed();
   }
 
   /** Observe matching command output/completion; unrelated heartbeats cannot clear alarms. */
   observeEvent(event: unknown): void {
-    if (this.terminal || !event || typeof event !== "object" || !["tool_execution_update", "tool_execution_end"].includes(String((event as Record<string, unknown>).type))) return;
+    if (this.terminal || !event || typeof event !== "object") return;
+    const type = String((event as Record<string, unknown>).type);
+    if (type === "agent_start") this.agentStarts++;
+    if (type === "auto_retry_start") this.automaticRetries++;
+    if (["tool_execution_start", "tool_execution_end", "agent_end"].includes(type)) {
+      this.sampleProcessTrees();
+      this.write({ status: "running" });
+    }
+    if (!["tool_execution_update", "tool_execution_end"].includes(type)) return;
     const next = reduceSilenceAlarms(this.activeSilenceAlarms, event);
     if (JSON.stringify(next) === JSON.stringify(this.activeSilenceAlarms)) return;
     this.activeSilenceAlarms = next;
@@ -694,6 +799,9 @@ export class SubagentPhaseResultRecorder {
 
   complete(result: SubagentResult, transportFailuresAfterResult: string[] = []): void {
     if (this.terminal || !isValidBoundPhaseResult(result, this.agentName, this.task)) return;
+    this.sampleProcessTrees();
+    result.processTrees = this.processTrees;
+    result.processTree = result.processTrees ? undefined : this.processTree;
     this.latestEventCount = Math.max(this.latestEventCount, result.events);
     this.heartbeatSequence += 1;
     this.terminal = true;
@@ -707,12 +815,43 @@ export class SubagentPhaseResultRecorder {
     });
   }
 
-  incomplete(reason: string, actionEvidence?: ActionEvidenceLedger): void {
+  incomplete(reason: string, actionEvidence?: ActionEvidenceLedger, settlement?: "never_dispatched" | "closed"): void {
     if (this.terminal) return;
+    this.sampleProcessTrees();
     this.heartbeatSequence += 1;
     this.terminal = true;
     this.activeSilenceAlarms = [];
-    this.write({ status: "incomplete", completedAt: new Date().toISOString(), incompleteReason: reason, ...(actionEvidence ? { actionEvidence } : {}) });
+    this.write({ status: "incomplete", completedAt: new Date().toISOString(), incompleteReason: reason, ...(settlement ? { settlement } : {}), ...(actionEvidence ? { actionEvidence } : {}) });
+  }
+
+  infrastructureFailure(): void {
+    if (this.terminalPublicationFailed) throw new Error("TERMINAL_PUBLICATION_FAILED: durable failure evidence unavailable; redispatch forbidden.");
+    // The child is already closed and the full zero-tool protocol was checked
+    // by the launcher. Keep its generation inventory without inventing output.
+    // readComplete still refuses this publication because no result exists.
+    this.sampleProcessTrees();
+    this.terminal = true;
+    this.write({ status: "complete", settlement: "infrastructure_no_tools", completedAt: new Date().toISOString(),
+      incompleteReason: "Settled auth/provider failure before tools; no successful worker result." });
+    if (this.terminalPublicationFailed) throw new Error("TERMINAL_PUBLICATION_FAILED: durable failure evidence unavailable; redispatch forbidden.");
+  }
+
+  readOnlyProviderRefusal(actionEvidence: ActionEvidenceLedger): void {
+    if (this.terminalPublicationFailed) throw new Error("TERMINAL_PUBLICATION_FAILED: durable failure evidence unavailable; redispatch forbidden.");
+    // Only the launcher's complete, read-only, zero-mutation protocol proof may
+    // settle a refusal. This is not a successful result and cannot replay work.
+    this.sampleProcessTrees();
+    this.terminal = true;
+    this.activeSilenceAlarms = [];
+    this.write({ status: "complete", settlement: "provider_refused_read_only", completedAt: new Date().toISOString(),
+      incompleteReason: "Settled read-only provider refusal; no successful worker result.", actionEvidence });
+    if (this.terminalPublicationFailed) throw new Error("TERMINAL_PUBLICATION_FAILED: durable failure evidence unavailable; redispatch forbidden.");
+  }
+
+  /** Pin the host's own facts, not fields read back from a replaceable sidecar. */
+  retryEvidence(settlement: RetryPredecessorEvidence["settlement"]): RetryPredecessorEvidence {
+    return { file: this.file, launchId: this.launchId, agentName: this.agentName, taskSha256: this.taskSha256,
+      pid: this.latestPid, settlement, treesSha256: processTreesDigest(this.processTrees ?? (this.processTree ? [this.processTree] : [])) };
   }
 
   retry(): void {
@@ -753,20 +892,30 @@ export class SubagentPhaseResultRecorder {
       heartbeatAt,
       heartbeatSequence: this.heartbeatSequence,
       eventCount: this.latestEventCount,
+      providerAttemptEvidence: { agentStarts: this.agentStarts, automaticRetries: this.automaticRetries },
       activeSilenceAlarms: this.activeSilenceAlarms,
+      ...(this.processTrees ? { processTrees: this.processTrees } : this.processTree ? { processTree: this.processTree } : {}),
       ...(this.commandTimes ? { commandTimes: this.commandTimes } : {}),
       ...(this.latestPid === undefined ? {} : { pid: this.latestPid }),
       ...(extra.completedAt ? { completedAt: extra.completedAt } : {}),
+      ...(extra.settlement ? { settlement: extra.settlement } : {}),
       ...(extra.incompleteReason ? { incompleteReason: extra.incompleteReason } : {}),
       ...(extra.transportFailuresAfterResult ? { transportFailuresAfterResult: extra.transportFailuresAfterResult } : {}),
       ...(extra.actionEvidence ? { actionEvidence: extra.actionEvidence } : {}),
       ...(extra.result ? { result: extra.result } : {}),
     };
     try {
+      // Host binding fields remain verbatim; sanitize worker payloads BEFORE IO.
+      if (publication.result) publication.result = sanitizeSubagentResult(publication.result);
+      if (publication.actionEvidence) publication.actionEvidence = sanitizeWorkerValue(publication.actionEvidence);
+      if (publication.incompleteReason) publication.incompleteReason = sanitizeWorkerText(publication.incompleteReason);
+      if (publication.transportFailuresAfterResult) publication.transportFailuresAfterResult = publication.transportFailuresAfterResult.map(sanitizeWorkerText);
       atomicWriteJsonSync(this.file, publication);
       this.lastWriteAt = Date.now();
-      refreshLiveStatus(path.dirname(this.file), this.liveStatusOptions);
-    } catch {}
+      try { refreshLiveStatus(path.dirname(this.file), this.liveStatusOptions); } catch { /* projection is not the authoritative publication */ }
+    } catch {
+      if (extra.status !== "running") this.terminalPublicationFailed = true;
+    }
   }
 }
 
@@ -955,6 +1104,7 @@ export async function resolveCompleteWorkerLaunchPrompt(input: {
   modelArgument: string;
   thinkingLevel?: string;
   api: string;
+  baseUrl: string;
   compat: unknown;
 }> {
   // Use Pi's own effective launcher configuration root. PI_AGENT_DIR was an
@@ -962,6 +1112,16 @@ export async function resolveCompleteWorkerLaunchPrompt(input: {
   // different instructions than the child launched with PI_CODING_AGENT_DIR.
   const agentDir = getAgentDir();
   const settingsManager = SettingsManager.create(input.cwd, agentDir);
+  // Physical launches are the host's retry authority. The shipped worker CLI
+  // must not silently retry providers inside one reserved launch. Require the
+  // supported isolated settings rather than changing an owner's global store.
+  const isolatedRetry = settingsManager.getGlobalSettings().retry;
+  // The CLI can ignore untrusted project settings. Check both trust outcomes:
+  // a project override must not mask an unsafe isolated user-level default.
+  if (isolatedRetry?.enabled !== false || (isolatedRetry.provider?.maxRetries ?? 0) !== 0
+    || settingsManager.getRetryEnabled() || (settingsManager.getProviderRetrySettings().maxRetries ?? 0) !== 0) {
+    throw new Error("WORKER_RETRY_CONFIGURATION_REQUIRED: configure isolated settings retry.enabled=false and retry.provider.maxRetries=0 before dispatch.");
+  }
   const explicitProvider = input.profile.provider?.trim() || undefined;
   const explicitModel = input.profile.model?.trim() || undefined;
   const settingsDefaultProvider = settingsManager.getDefaultProvider();
@@ -1135,6 +1295,7 @@ export async function resolveCompleteWorkerLaunchPrompt(input: {
       modelArgument,
       ...(thinkingLevel ? { thinkingLevel } : {}),
       api: model.api,
+      baseUrl: model.baseUrl,
       compat: model.compat,
     };
   } finally {
@@ -1151,11 +1312,64 @@ export async function resolveCompleteWorkerLaunchPrompt(input: {
  *
  * It does NOT know about any shape-specific semantics.
  */
-export async function spawnSubagent(
+export function sanitizeSubagentResult<T extends SubagentResult>(result: T): T {
+  return { ...result, text: sanitizeWorkerText(result.text), stderr: sanitizeWorkerText(result.stderr),
+    ...(result.recoveredAssistantFailures ? { recoveredAssistantFailures: result.recoveredAssistantFailures.map(sanitizeWorkerText) } : {}),
+    ...(result.actionEvidence ? { actionEvidence: sanitizeWorkerValue(result.actionEvidence) } : {}),
+    ...(result.providerRefusal ? { providerRefusal: sanitizeWorkerValue(result.providerRefusal) } : {}) };
+}
+
+export async function retryInfrastructureSubagent(agentName: string, task: string, options: SpawnSubagentOptions, launch: (retry: boolean, evidence: import("./infrastructure-retry").OriginalPhaseEvidence, policyRetry?: import("./infrastructure-retry").PolicyRetryBudget) => Promise<SubagentResult>): Promise<SubagentResult> {
+  const retryOptions = options.infrastructureRetry ? { ...options.infrastructureRetry,
+    identity: JSON.stringify([options.infrastructureRetry.identity ?? task, agentName, options.cwd, options.workerExecutionConstraints]) } : undefined;
+  return withInfrastructureRetry({ options: retryOptions, identity: task,
+    originalEvidence: { phaseResultFile: options.phaseResultFile, phaseLogFile: options.phaseLogFile },
+    route: async () => {
+      const loaded = options.agents.get(agentName) ?? { name: agentName };
+      const profile = { ...loaded, provider: options.modelOverride?.provider ?? loaded.provider ?? options.inheritedModel?.provider,
+        model: options.modelOverride?.model ?? loaded.model ?? options.inheritedModel?.model };
+      const resolved = await resolveCompleteWorkerLaunchPrompt({ cwd: options.cwd, profile, appendedSystemPrompt: profile.systemPrompt ?? "", workerExecutionConstraints: options.workerExecutionConstraints });
+      return { provider: resolved.provider, model: resolved.model, api: resolved.api, baseUrl: resolved.baseUrl };
+    }, launch: async (retry, evidence = { phaseResultFile: options.phaseResultFile, phaseLogFile: options.phaseLogFile }, policyRetry) => {
+      const priorTrees: import("./process-generation").ProcessTreeInventory[] = [];
+      if (retry || policyRetry?.resumePolicy) priorTrees.push(...assessRetryPredecessors(policyRetry?.predecessors ?? []));
+      const result = await launch(retry, evidence, policyRetry);
+      if (retry || policyRetry?.resumePolicy) {
+        result.processTrees = [...priorTrees, ...(result.processTrees ?? (result.processTree ? [result.processTree] : []))];
+        result.processTree = undefined;
+      }
+      return result;
+    }, eligible: error => error instanceof SubagentInfrastructureError,
+    assess: assessRetryPredecessors, blocked: error => error instanceof RetryCleanupError,
+    refused: attempted => new SubagentInfrastructureError(attempted) });
+}
+
+export async function spawnSubagent(agentName: string, task: string, options: SpawnSubagentOptions): Promise<SubagentResult> {
+  const evidence = allocatePhaseEvidence(agentName, options.phaseLogFile, options.phaseResultFile);
+  const boundOptions = { ...options, phaseLogFile: evidence.logFile, phaseResultFile: evidence.resultFile,
+    ...(options.infrastructureRetry ? { infrastructureRetry: { ...options.infrastructureRetry,
+      file: options.infrastructureRetry.file ?? (evidence.resultFile ? path.join(path.dirname(evidence.resultFile), `infrastructure-${createHash("sha256").update(JSON.stringify([agentName, options.infrastructureRetry.identity ?? task])).digest("hex")}.retry.json`) : undefined) } } : {}) };
+  return retryInfrastructureSubagent(agentName, task, boundOptions, (retry, evidence, policyRetryBudget) => spawnSubagentAttempt(agentName, policyRetryBudget?.resumePolicy ? buildProviderRefusalRetryPrompt(task) : task, { ...boundOptions, policyRetryBudget,
+    ...(policyRetryBudget?.resumePolicy ? { phaseLogFile: policyRetryBudget.resumePolicy.phaseLogFile?.replace(/\.log$/, "-policy-retry.log"),
+      phaseResultFile: policyRetryBudget.resumePolicy.phaseResultFile?.replace(/\.result\.json$/, "-policy-retry.result.json"), providerRefusalRetryAttempt: 1 }
+      : retry ? { phaseLogFile: evidence.phaseLogFile?.replace(/\.log$/, "-infrastructure-retry.log"),
+      phaseResultFile: evidence.phaseResultFile?.replace(/\.result\.json$/, "-infrastructure-retry.result.json") } : {}),
+  }));
+}
+
+async function spawnSubagentAttempt(
   agentName: string,
   task: string,
   options: SpawnSubagentOptions,
 ): Promise<SubagentResult> {
+  // This check precedes capacity probes, log/result publication and process
+  // creation. Explicit supervision=off does not bypass admission grants.
+  const constraints = options.workerExecutionConstraints ?? workerExecutionConstraintContext.getStore();
+  const authorization = constraints?.protectedAreaAuthorization;
+  if (!options.verifier && !isProvablyReadOnlySubagent(options.readOnly, options.agents.get(agentName)?.tools) && authorization) {
+    const permission = decideProtectedAreaPermission({ ...authorization, cwd: options.cwd });
+    if (!permission.approved) throw new Error(`Protected permission refused before worker launch: ${permission.reasons.join("; ")}`);
+  }
   const startedAt = Date.now();
   const phaseEvidence = allocatePhaseEvidence(agentName, options.phaseLogFile, options.phaseResultFile);
   const phaseLogFile = phaseEvidence.logFile;
@@ -1290,6 +1504,7 @@ export async function spawnSubagent(
     for (let attemptIndex = 0; attemptIndex < launchAttempts.length; attemptIndex++) {
       const launch = launchAttempts[attemptIndex];
       appendSubagentPhaseLog(phaseLogFile, "host", `launch-attempt=${attemptIndex + 1} command=${path.basename(launch.command)}`);
+      const protocolSanitizer = new WorkerProtocolSanitizer(), logSanitizer = new WorkerProtocolSanitizer();
       let stderr = "";
       let lastAssistantText = "";
       let settledAssistantText: string | undefined;
@@ -1317,6 +1532,7 @@ export async function spawnSubagent(
       // but must not poison a subsequently successful child result.
       const recoveredAssistantFailures: string[] = [];
       const toolCalls = emptyToolCallSummary();
+      let toolTelemetryComplete = true, sawAgentStart = false;
       const actionEvidence = new ActionEvidenceCollector({
         cancellationJournalFile: path.join(noOutputPhaseRoot, `${phaseResult.launchId}.cancellations.jsonl`),
       });
@@ -1329,6 +1545,10 @@ export async function spawnSubagent(
       let collectorFailure: Error | undefined;
 
       let child: ReturnType<typeof spawn>;
+      options.policyRetryBudget?.beforeDispatch();
+      options.reserveSpawn?.();
+      const budget = subagentPhaseLogContext.getStore();
+      if (budget?.maxSubagents !== undefined) reserveRunSpawn(runDirFor(budget.runId), typeof budget.maxSubagents === "function" ? budget.maxSubagents() : budget.maxSubagents, budget.allowAutomaticIncrease, phaseEvidence.resultFile);
       try {
         child = spawn(launch.command, launch.args, launch.options);
         childCreated = true;
@@ -1367,12 +1587,14 @@ export async function spawnSubagent(
         const result: SubagentResult = {
           agentName: profile.name,
           task,
-          text: text.trim(),
-          stderr: stderr.trim(),
+          text: sanitizeWorkerText(text.trim()),
+          stderr: sanitizeWorkerText(stderr.trim()),
           exitCode: code,
           durationMs: Date.now() - startedAt,
           events: eventCount,
           toolCalls,
+          processTree: phaseResult.processTrees ? undefined : phaseResult.processTree,
+          processTrees: phaseResult.processTrees,
           actionEvidence: actionEvidence.finalize(),
           commandTimes: mergeCommandTimes(options.commandTimingPrior ?? { schemaVersion: 1, entries: [] }, commandTimes.snapshot(actionEvidence.finalize())),
         };
@@ -1384,23 +1606,24 @@ export async function spawnSubagent(
       const heartbeatTimer = setInterval(() => phaseResult.heartbeat(eventCount, child.pid), 5_000);
       heartbeatTimer.unref?.();
       child.once("close", (code) => {
+        phaseResult.processClosed(child.pid);
         clearInterval(heartbeatTimer);
         if (code === 0 && settledAssistantText !== undefined && !roleContextExhausted && !protocolTimedOut && !killedByAbort && !collectorFailure) {
           try { phaseResult.complete(buildResult(code, settledAssistantText), assistantFailures); }
           catch (error) {
             collectorFailure = error instanceof Error ? error : new Error(String(error));
-            phaseResult.incomplete(`ACTION_EVIDENCE_PERSISTENCE_FAILED: ${collectorFailure.message}`);
+            phaseResult.incomplete(`ACTION_EVIDENCE_PERSISTENCE_FAILED: ${collectorFailure.message}`, undefined, "closed");
           }
         } else {
           const reason = collectorFailure ? `ACTION_EVIDENCE_PERSISTENCE_FAILED: ${collectorFailure.message}`
             : roleContextExhausted ? "role worker exhausted context; partial output is not terminal" : code === 0
               ? "child closed without a complete assistant result"
               : `child exited with code ${String(code)}`;
-          try { phaseResult.incomplete(reason, actionEvidence.finalize()); }
+          try { phaseResult.incomplete(reason, actionEvidence.finalize(), "closed"); }
           catch (error) {
             // Preserve the original rejection if final evidence is also lost.
             collectorFailure ??= error instanceof Error ? error : new Error(String(error));
-            phaseResult.incomplete(`ACTION_EVIDENCE_PERSISTENCE_FAILED: ${collectorFailure.message}`);
+            phaseResult.incomplete(`ACTION_EVIDENCE_PERSISTENCE_FAILED: ${collectorFailure.message}`, undefined, "closed");
           }
         }
       });
@@ -1450,18 +1673,11 @@ export async function spawnSubagent(
           // alive; the child's cwd artifacts are durable regardless.)
           child.once("close", (code) => {
             try {
-              const backgroundResult: SubagentResult = {
-                agentName: profile.name,
-                task,
-                text: lastAssistantText.trim(),
-                stderr: stderr.trim(),
-                exitCode: code,
-                durationMs: Date.now() - startedAt,
-                events: eventCount,
-                toolCalls,
-                actionEvidence: actionEvidence.finalize(),
-                commandTimes: mergeCommandTimes(options.commandTimingPrior ?? { schemaVersion: 1, entries: [] }, commandTimes.snapshot(actionEvidence.finalize())),
-              };
+              const backgroundResult = buildResult(code, settledAssistantText ?? lastAssistantText);
+              if (phaseResult.terminalPublicationFailed) {
+                backgroundResult.exitCode = null;
+                backgroundResult.stderr += "\nTERMINAL_PUBLICATION_FAILED: settled output retained; replay forbidden.";
+              }
               if (profile.provider) backgroundResult.provider = profile.provider;
               if (profile.model) backgroundResult.model = profile.model;
               if (recoveredAssistantFailures.length > 0) backgroundResult.recoveredAssistantFailures = [...recoveredAssistantFailures];
@@ -1491,16 +1707,20 @@ export async function spawnSubagent(
       if (!child.stdout) throw new Error(`Subagent ${profile.name} launched without a readable stdout pipe.`);
       const stdoutReader = createInterface({ input: child.stdout });
       stdoutReader.on("line", (line) => {
-        appendSubagentPhaseLog(phaseLogFile, "stdout", line);
+        appendSubagentPhaseLog(phaseLogFile, "stdout", line, logSanitizer);
         const trimmed = line.trim();
         if (!trimmed) return;
         try {
           const event = JSON.parse(trimmed);
+          const safeEvent = protocolSanitizer.sanitize(event);
           if (isPiJsonProtocolEvent(event)) markFirstJsonProtocolEvent();
+          else toolTelemetryComplete = false;
+          if (event?.type === "agent_start") sawAgentStart = true;
+          if (["tool_execution_update", "tool_execution_end"].includes(event?.type) && toolCalls.total === 0) toolTelemetryComplete = false;
           eventCount++;
           // Authority must see every event before any additive timing parser or
           // publication can fail. Timing idempotence never skips validation.
-          try { if (!collectorFailure) actionEvidence.observe(event); }
+          try { if (!collectorFailure) actionEvidence.observe(sanitizeWorkerValue(event)); }
           catch (error) {
             collectorFailure = error instanceof Error ? error : new Error(String(error));
             appendSubagentPhaseLog(phaseLogFile, "host", `ACTION_EVIDENCE_PERSISTENCE_FAILED: ${collectorFailure.message}`);
@@ -1515,12 +1735,14 @@ export async function spawnSubagent(
           }
           if (timingChanged) phaseResult.publishCommandTimes(commandTimes.snapshot());
           phaseResult.observeEvent(event);
-          const progress = describeJsonEvent(profile.name, event);
-          if (progress) options.onProgress?.(progress);
+          const progress = describeJsonEvent(profile.name, safeEvent);
+          if (progress) options.onProgress?.(sanitizeWorkerText(progress));
           if (!collectorFailure) acknowledgeNoOutputAlarm(event, noOutputAlarmAckRoot);
           if (event?.type === "tool_execution_start") {
-            const toolName = optionalString((event as Record<string, unknown>).toolName);
-            if (toolName) recordToolCall(toolCalls, toolName);
+            const toolName = optionalString(event.toolName) ?? optionalString(event.tool_name);
+            // Every start is execution evidence, even an unidentified tool.
+            recordToolCall(toolCalls, toolName || "unknown");
+            if (!toolName) toolTelemetryComplete = false;
           }
 
           // Respect Pi's child auto-retry lifecycle. An agent_end carrying
@@ -1560,15 +1782,15 @@ export async function spawnSubagent(
             event.message?.role === "assistant" &&
             !agentEnded
           ) {
-            lastAssistantText = extractMessageText(event.message);
+            lastAssistantText = sanitizeWorkerText(extractMessageText(safeEvent.message));
             const stopReason =
               optionalString(event.message.stopReason) ??
               optionalString(event.stopReason);
             const errorMessage =
-              optionalString(event.message.errorMessage) ??
-              optionalString(event.errorMessage) ??
-              optionalString(event.message.error?.message) ??
-              optionalString(event.error?.message);
+              optionalString(safeEvent.message.errorMessage) ??
+              optionalString(safeEvent.errorMessage) ??
+              optionalString(safeEvent.message.error?.message) ??
+              optionalString(safeEvent.error?.message);
             const normalizedStopReason = stopReason?.toLowerCase();
             if (options.recoverableRole && (isRoleContextExhaustion(stopReason, errorMessage) || isRoleRecoveryHandoff(lastAssistantText, options.recoverableRole))) roleContextExhausted = true;
             if (normalizedStopReason === "error" || normalizedStopReason === "aborted") {
@@ -1579,12 +1801,13 @@ export async function spawnSubagent(
             ) {
               settledAssistantText = lastAssistantText;
             }
-            if (errorMessage) assistantFailures.push(`assistant errorMessage=${errorMessage}`);
-            terminalProviderRefusal = classifyProviderRefusal(event) ?? terminalProviderRefusal;
+            if (errorMessage) assistantFailures.push(`assistant errorMessage=${sanitizeWorkerText(errorMessage)}`);
+            terminalProviderRefusal = classifyProviderRefusal(safeEvent) ?? terminalProviderRefusal;
           }
           phaseResult.heartbeat(eventCount, child.pid);
         } catch {
-          // JSON mode should emit JSONL; ignore any incidental non-JSON line defensively.
+          // Missing/malformed telemetry can never establish zero tool execution.
+          toolTelemetryComplete = false;
         }
       });
 
@@ -1648,9 +1871,15 @@ export async function spawnSubagent(
       if (firstJsonTimer) clearTimeout(firstJsonTimer);
       if (options.signal) options.signal.removeEventListener("abort", abortHandler);
       stdoutReader.close();
+      stderr = sanitizeWorkerText(stderr);
 
       const buildCandidate = (): SubagentResult => buildResult(exitCode);
       const throwAmbiguousIfMutating = (errorMessage: string): void => {
+        if (isNoToolInfrastructureFailure([...assistantFailures, stderr], toolCalls, toolTelemetryComplete && sawAgentStart && agentEnded)) {
+          phaseResult.infrastructureFailure();
+          options.policyRetryBudget?.retain(phaseResult.retryEvidence("infrastructure_no_tools"));
+          throw new SubagentInfrastructureError();
+        }
         const mutatingEvidence = options.phaseMutates === true || toolCalls.mutating > 0;
         if (!mutatingEvidence) return;
         const candidate = lastAssistantText.trim() ? buildCandidate() : undefined;
@@ -1676,6 +1905,13 @@ export async function spawnSubagent(
       }
       if (roleContextExhausted && !killedByAbort && !protocolTimedOut) throw new RoleContextExhaustionError(buildCandidate());
       const durableResult = phaseResult.readComplete();
+      if (settledAssistantText !== undefined && phaseResult.file && !durableResult && !killedByAbort && !protocolTimedOut) {
+        throw new SubagentTerminalAmbiguousError(profile.name, {
+          code: "AMBIGUOUS_COMPLETION", resultLost: false,
+          errorMessage: "TERMINAL_PUBLICATION_FAILED: settled output retained but durable completion unavailable; replay forbidden.",
+          exitCode, stderr, assistantFailures: [...assistantFailures], candidate: buildResult(exitCode, settledAssistantText),
+        });
+      }
       if (!killedByAbort && !protocolTimedOut && durableResult) {
         if (assistantFailures.length > 0) {
           options.onProgress?.(
@@ -1685,19 +1921,34 @@ export async function spawnSubagent(
         return durableResult;
       }
       if (killedByAbort) throw new Error(`Subagent ${agentName} aborted.`);
+      // Authentication/infrastructure evidence takes precedence even when a
+      // provider also includes policy wording. Rewording is not restoration.
+      if (isInfrastructureFailure([...assistantFailures, stderr])) {
+        throwAmbiguousIfMutating("WORKER_INFRASTRUCTURE: provider failed after tool execution or with unknown telemetry; redispatch refused.");
+        throw new Error("WORKER_INFRASTRUCTURE: tool execution or unknown telemetry prevents automatic retry.");
+      }
       const providerRefusal = terminalProviderRefusal
         ?? classifyProviderRefusal(assistantFailures.join("; "))
         ?? classifyProviderRefusal(stderr);
       if (providerRefusal) {
-        const retryAttempt = options.providerRefusalRetryAttempt ?? 0;
-        const retryEligible = isProvablyReadOnlySubagent(options.readOnly || options.verifier, profile.tools) && toolCalls.mutating === 0;
+        const retryAttempt = options.policyRetryBudget?.used ? 1 : options.providerRefusalRetryAttempt ?? 0;
+        const retryEligible = isProvablyReadOnlySubagent(options.readOnly || options.verifier, profile.tools) && toolTelemetryComplete && sawAgentStart && agentEnded && toolCalls.mutating === 0;
+        if (retryEligible) phaseResult.readOnlyProviderRefusal(actionEvidence.finalize());
         if (!options.disableProviderRefusalRetry && retryEligible && retryAttempt === 0) {
           options.onProgress?.(`Subagent ${profile.name}: provider refused the read-only review; retrying once with defensive evidence-only wording.`);
-          const retried = await spawnSubagent(agentName, buildProviderRefusalRetryPrompt(task), {
+          // Stay inside the existing durable operation/claim. The ordinary
+          // attempt still performs admission; every extra dispatch is charged.
+          options.policyRetryBudget?.retain(phaseResult.retryEvidence("provider_refused_read_only"));
+          options.policyRetryBudget?.consume();
+          const retried = await spawnSubagentAttempt(agentName, buildProviderRefusalRetryPrompt(task), {
             ...options,
+            phaseLogFile: options.phaseLogFile?.replace(/\.log$/, "-policy-retry.log"),
+            phaseResultFile: options.phaseResultFile?.replace(/\.result\.json$/, "-policy-retry.result.json"),
             providerRefusalRetryAttempt: 1,
             commandTimingPrior: mergeCommandTimes(options.commandTimingPrior ?? { schemaVersion: 1, entries: [] }, commandTimes.snapshot()),
           });
+          retried.processTrees = [...(phaseResult.processTrees ?? (phaseResult.processTree ? [phaseResult.processTree] : [])), ...(retried.processTrees ?? (retried.processTree ? [retried.processTree] : []))];
+          retried.processTree = undefined;
           retried.commandTimes = mergeCommandTimes(commandTimes.snapshot(actionEvidence.finalize()), retried.commandTimes);
           retried.providerRefusal = {
             ...providerRefusal,
@@ -1709,7 +1960,7 @@ export async function spawnSubagent(
           return retried;
         }
         throw new ProviderRefusalError(profile.name, {
-          providerMessage: providerRefusal.providerMessage,
+          providerMessage: sanitizeWorkerText(providerRefusal.providerMessage),
           retryAllowed: false,
           retryEligible,
           retryAttempted: retryAttempt > 0,
@@ -1757,7 +2008,7 @@ export async function spawnSubagent(
     throw new Error(`Subagent ${agentName} did not launch: no spawn attempts were available.`);
   } catch (error) {
     launchFailed = true;
-    if (!childCreated) phaseResult.incomplete(error instanceof Error ? error.message : String(error));
+    if (!childCreated) phaseResult.incomplete(error instanceof Error ? error.message : String(error), undefined, "never_dispatched");
     throw error;
   } finally {
     if (tempDir !== undefined) {
@@ -2153,6 +2404,9 @@ export async function preflightProviderHealth(
         );
         settled = true;
       } catch (err) {
+        // Typed zero-tool infrastructure and cleanup refusals must never become
+        // advisory string-classified transient retries without retry authority.
+        if (err instanceof SubagentInfrastructureError || err instanceof RetryCleanupError) throw err;
         if (options.signal?.aborted && !timedOut) {
           throw new Error(`PREFLIGHT ABORTED while checking ${label}.`);
         }
@@ -2534,7 +2788,9 @@ function rejectLocalModelIfNeeded(profile: AgentProfile, allowLocalModel: boolea
 function writeJsonPublicationAtomic(file: string, value: unknown): void {
   mkdirSync(path.dirname(file), { recursive: true });
   const temporary = `${file}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  const safe = value && typeof value === "object" && "task" in value && "text" in value && "stderr" in value
+    ? sanitizeSubagentResult(value as SubagentResult) : sanitizeWorkerValue(value);
+  writeFileSync(temporary, `${JSON.stringify(safe, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   renameSync(temporary, file);
 }
 

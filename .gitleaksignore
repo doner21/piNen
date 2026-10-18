@@ -1,0 +1,6 @@
+# Synthetic test strings used by redaction tests (not real credentials)
+pi-orchestrator-extension/tests/test-2026-09-21-no-output-fresh3.cjs:generic-api-key:148
+pi-orchestrator-extension/tests/test-2026-09-17-action-evidence.cjs:curl-auth-header:309
+pi-orchestrator-extension/tests/test-2026-09-17-action-evidence.cjs:curl-auth-header:310
+pi-orchestrator-extension/tests/test-2026-09-17-action-evidence.cjs:curl-auth-header:312
+pi-orchestrator-extension/tests/test-2026-09-21-no-output.cjs:generic-api-key:362

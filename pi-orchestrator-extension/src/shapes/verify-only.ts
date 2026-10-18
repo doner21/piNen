@@ -24,6 +24,7 @@
 
 import {
   SpawnGuard,
+  getRunProcessTrees,
   spawnSubagent,
   runBoundedPool,
   formatRoutedModel,
@@ -35,6 +36,10 @@ import {
 } from "../substrate";
 
 import { READ_ONLY_SHAPE_EXECUTION } from "../supervision";
+import { existsSync } from "node:fs";
+import path from "node:path";
+import { RunStateStore, runDirFor, phaseLogPathFor, phaseResultPathFor } from "../run-state";
+import { assessResultProcessTrees, type ProcessTreeInventory } from "../process-generation";
 import { createRoleRecoveryRequest, runRoleWithRecovery, observeRoleReadOnlyLaunch, type RoleRecoveryEvidence } from "../role-recovery";
 import { HostPublicationObservation, withHostPublicationObservation } from "../host-publications";
 import {
@@ -64,6 +69,7 @@ import { mergeCommandTimes, formatCommandTimes, summarizeCommandTimes, type Comm
 
 interface VerifierRun {
   commandTimes?: CommandTimes;
+  processTrees: ProcessTreeInventory[];
   verifierIndex: number;
   agentName: string;
   provider?: string;
@@ -111,6 +117,12 @@ async function runVerifyOnly(
   const { params, signal, onUpdate, inheritedModel, agents } = context;
   const emit = (text: string) => onUpdate?.({ content: [{ type: "text", text }] });
 
+  // No recovered shard cursor exists for this shape. Refuse historical replay
+  // rather than restarting a settled verifier/recovery prefix.
+  if (context.resumeState) throw new Error("VERIFY_ONLY_RECOVERY_POSITION_UNKNOWN: settled shards will not be replayed.");
+  if (context.runId && existsSync(path.join(runDirFor(context.runId), "state.json"))) throw new Error("VERIFY_ONLY_EXISTING_STATE: refuse checkpoint overwrite.");
+  const checkpointStore = context.runId ? RunStateStore.create(context.runId, "verify-only", params.task,
+    JSON.parse(JSON.stringify(params)), [], undefined, { schemaVersion: 1, mode: "off", classification: "read-only" }) : undefined;
   const spawnGuard = new SpawnGuard(params.maxSubagents);
   const verifierCount = inferVerifierCount(params.task);
   emit(
@@ -144,11 +156,19 @@ async function runVerifyOnly(
         const result: SubagentResult = await observeRoleReadOnlyLaunch(params.cwd, params.externalEvidenceRoots ?? [], () => runRoleWithRecovery(request, {
           // No planner callback exists in a verifier-only shape. Scope chaining
           // cannot silently introduce another role or writer.
-          launch: (prompt, stage) => {
-            const spawned = spawnGuard.reserve();
+          launch: (prompt, stage, step) => {
+            const spawned = spawnGuard.spawned;
             emit(`Spawning subagent ${params.verifierAgent} (${spawned}/${spawnGuard.cap}) in ${params.cwd}`);
             return observeRoleReadOnlyLaunch(params.cwd, params.externalEvidenceRoots ?? [], () => spawnSubagent(params.verifierAgent, prompt, {
               agents: verifierAgents, cwd: params.cwd, allowLocalModel: params.allowLocalModel,
+              ...(context.runId ? {
+                phaseLogFile: phaseLogPathFor(context.runId, index - 1, `verify-only-${index}-${stage}-${step}`),
+                phaseResultFile: phaseResultPathFor(context.runId, index - 1, `verify-only-${index}-${stage}-${step}`),
+              } : {}),
+              reserveSpawn: () => { spawnGuard.reserve(); },
+              infrastructureRetry: { identity: JSON.stringify(["verify-only", index, stage, step, prompt]), reserve: () => {
+                if (!spawnGuard.wouldFit(1)) throw new Error("Verify-only spawn ceiling exhausted before infrastructure retry.");
+              } },
               signal: workerSignal, inheritedModel, onProgress: emit, modelOverride: override,
               verifier: true, recoverableRole: "verifier", workerExecutionConstraints: params.workerExecutionConstraints,
               commandTimingContext: { role: "verifier", stage },
@@ -159,7 +179,13 @@ async function runVerifyOnly(
         const after = captureContentSignatureSnapshot(params.cwd);
         const admitted = hostPublications.admittedPaths(before, after);
         const mutations = diffContentSignatureSnapshots(before, after).filter(change => !admitted.has(change.path));
+        checkpointStore?.checkpointPhase(index - 1, `verify-only-${index}`, result);
         const parsed = parseVerifyOnlyResult(result.text);
+        const processTrees = assessResultProcessTrees([result]);
+        if (processTrees.some(tree => tree.status !== "clean")) {
+          parsed.overall = "fail";
+          parsed.reasons.unshift("WORKER_PROCESS_GENERATION_NOT_CLEAN: every recovery attempt requires clean generation evidence.");
+        }
         if (mutations.length) {
           const listed = mutations.slice(0, 20).map((change) => `${change.kind}:${change.path}`).join(", ");
           parsed.overall = "fail";
@@ -172,6 +198,7 @@ async function runVerifyOnly(
         );
         const run: VerifierRun = {
           verifierIndex: index,
+          processTrees,
           agentName: result.agentName,
           overall: parsed.overall,
           reasons: parsed.reasons,
@@ -191,12 +218,14 @@ async function runVerifyOnly(
 
   const passes = runs.filter((r) => r.overall === "pass").length;
   const fails = runs.length - passes;
-  const status: "pass" | "fail" = passes > fails ? "pass" : "fail";
+  const durableTrees = getRunProcessTrees();
+  const cleanupClean = (!durableTrees || durableTrees.status === "clean") && runs.every(run => run.processTrees.every(tree => tree.status === "clean"));
+  const status: "pass" | "fail" = passes > fails && cleanupClean ? "pass" : "fail";
   emit(`Verify-only majority: ${passes} PASS, ${fails} FAIL → ${status.toUpperCase()}.`);
 
   const aggregated = aggregateChecks(runs);
   const markdown = buildFinalResult(status, params, spawnGuard, runs, aggregated, passes, fails) + "\n\n" + formatCommandTimes(mergeCommandTimes(...runs.map(run => run.commandTimes)));
-  const details = { ...buildDetails(status, params, spawnGuard, runs, aggregated, passes, fails), commandTimes: mergeCommandTimes(...runs.map(run => run.commandTimes)), commandTimingSummary: summarizeCommandTimes(mergeCommandTimes(...runs.map(run => run.commandTimes))) };
+  const details = { ...buildDetails(status, params, spawnGuard, runs, aggregated, passes, fails), processTrees: durableTrees?.trees ?? runs.flatMap(run => run.processTrees), cleanupClean, commandTimes: mergeCommandTimes(...runs.map(run => run.commandTimes)), commandTimingSummary: summarizeCommandTimes(mergeCommandTimes(...runs.map(run => run.commandTimes))) };
   return { markdown, details };
 }
 
